@@ -9,10 +9,11 @@ A Player is a self-contained agent that can:
 Each player has a role/persona defined by a prompt, and a set of tools
 it can use to accomplish tasks.
 
-Uses the unified DataSource abstraction for all data access.
+Uses the unified ExecutionContext abstraction for all data access.
 """
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union, Type
 
+from pydantic import BaseModel
 from langchain_core.tools import BaseTool
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -82,8 +83,8 @@ class Player:
     def execute_task(
         self,
         task: str,
-        datasource_key: str,
-        datasource_info: Dict[str, Any],
+        context_key: str,
+        context_info: Dict[str, Any],
         workspace: Dict[str, Any],
         inputs: Dict[str, str],
         target_tables: List[str] = None
@@ -96,11 +97,11 @@ class Player:
         
         Args:
             task: The task description to execute
-            datasource_key: Key for the DataSource in the tool registry
-            datasource_info: Serialized info about the DataSource
+            context_key: Key for the ExecutionContext in the tool registry
+            context_info: Serialized info about the ExecutionContext
             workspace: Dictionary of artifacts from previous steps
             inputs: Mapping of parameter names to artifact names in workspace
-            target_tables: List of specific tables this task targets
+            target_tables: List of specific resources/tables this task targets
             
         Returns:
             Dictionary containing the execution result and any produced artifacts
@@ -119,24 +120,24 @@ class Player:
             for tool in self.tools
         ]) if self.tools else "No tools available."
         
-        # Build data source info section
-        is_multi_table = datasource_info.get("is_multi_table", False)
-        tables = datasource_info.get("tables", [])
+        # Build context info section
+        is_multi_resource = context_info.get("is_multi_resource", False)
+        resources = context_info.get("resources", [])
         target_tables = target_tables or []
         
-        if is_multi_table:
-            ds_info = f"Multi-table Dataset: {datasource_info.get('name', 'dataset')}\n"
-            ds_info += f"Source type: {datasource_info.get('source_type', 'unknown')}\n"
-            ds_info += f"Tables: {', '.join(tables)}\n"
+        if is_multi_resource:
+            ctx_info = f"Multi-resource Context: {context_info.get('name', 'context')}\n"
+            ctx_info += f"Context type: {context_info.get('context_type', 'unknown')}\n"
+            ctx_info += f"Resources: {', '.join(resources)}\n"
             if target_tables:
-                ds_info += f"Target tables for this step: {', '.join(target_tables)}\n"
-            ds_info += f"\nTo use tools, pass datasource_key='{datasource_key}'"
+                ctx_info += f"Target resources for this step: {', '.join(target_tables)}\n"
+            ctx_info += f"\nTo use tools, pass context_key='{context_key}'"
         else:
-            table_name = tables[0] if tables else "unknown"
-            ds_info = f"Dataset: {datasource_info.get('name', 'dataset')}\n"
-            ds_info += f"Source type: {datasource_info.get('source_type', 'unknown')}\n"
-            ds_info += f"Table: {table_name}\n"
-            ds_info += f"\nTo use tools, pass datasource_key='{datasource_key}'"
+            resource_name = resources[0] if resources else "unknown"
+            ctx_info = f"Context: {context_info.get('name', 'context')}\n"
+            ctx_info += f"Context type: {context_info.get('context_type', 'unknown')}\n"
+            ctx_info += f"Resource: {resource_name}\n"
+            ctx_info += f"\nTo use tools, pass context_key='{context_key}'"
         
         prompt = ChatPromptTemplate.from_messages([
             ("system", f"""You are {self.name}. {self.role_prompt}
@@ -144,15 +145,15 @@ class Player:
 You have access to the following tools:
 {tool_descriptions}
 
-Your task is to analyze the dataset and provide a detailed response.
+Your task is to analyze the context and provide a detailed response.
 When you need to use a tool, describe what you would do and provide your analysis.
 
-{ds_info}
+{ctx_info}
 
-For multi-table datasets, consider:
-- How tables might relate to each other
-- Common columns that could be foreign keys
-- Data integrity across tables
+For multi-resource contexts (e.g. multiple tables), consider:
+- How resources might relate to each other
+- Common fields that could be foreign keys
+- Data integrity across resources
 """),
             ("human", """Task: {task}
 
@@ -177,44 +178,57 @@ Execute this task and provide a comprehensive response. Include:
         # Actually invoke tools if available
         tool_results = {}
         
-        # Invoke tools with datasource_key
+        # Invoke tools with context_key
         for tool in self.tools:
             tool_name = tool.name.lower()
             try:
                 # Determine which tables to analyze
                 if target_tables:
-                    tables_to_analyze = target_tables
+                    resources_to_analyze = target_tables
                 else:
-                    tables_to_analyze = tables
+                    resources_to_analyze = resources
                 
                 # Check if tool needs table parameter
-                if any(kw in tool_name for kw in ['table_info', 'row_count', 'column', 'sample', 'statistics', 'missing', 'unique']):
-                    # Table-specific tools - run on each target table
-                    for table in tables_to_analyze:
+                if any(
+                    kw in tool_name
+                    for kw in [
+                        "resource_info",
+                        "item_count",
+                        "field",
+                        "sample",
+                        "statistics",
+                        "missing",
+                        "unique",
+                    ]
+                ):
+                    # Resource-specific tools - run on each target resource
+                    for resource in resources_to_analyze:
                         try:
                             result = tool.invoke({
-                                "datasource_key": datasource_key,
-                                "table": table
+                                "context_key": context_key,
+                                "resource": resource
                             })
-                            tool_results[f"{table}:{tool.name}"] = result
+                            tool_results[f"{resource}:{tool.name}"] = result
                         except Exception as e:
                             # Try without table parameter
                             try:
-                                result = tool.invoke({"datasource_key": datasource_key})
+                                result = tool.invoke({"context_key": context_key})
                                 tool_results[tool.name] = result
                                 break
                             except Exception:
-                                tool_results[f"{table}:{tool.name}"] = f"Error: {str(e)}"
+                                tool_results[f"{resource}:{tool.name}"] = f"Error: {str(e)}"
                 else:
-                    # Dataset-level tools
-                    result = tool.invoke({"datasource_key": datasource_key})
+                    # Context-level tools
+                    result = tool.invoke({"context_key": context_key})
                     tool_results[tool.name] = result
                     
             except Exception as e:
                 tool_results[tool.name] = f"Error: {str(e)}"
         
         # Get LLM analysis
-        target_info = ", ".join(target_tables) if target_tables else ("All tables" if is_multi_table else "N/A")
+        target_info = ", ".join(target_tables) if target_tables else (
+            "All resources" if is_multi_resource else "N/A"
+        )
         llm_response = chain.invoke({
             "task": task,
             "target_tables": target_info,
@@ -227,13 +241,13 @@ Execute this task and provide a comprehensive response. Include:
             "tool_results": tool_results,
             "analysis": llm_response,
             "success": True,
-            "is_multi_table": is_multi_table
+            "is_multi_table": is_multi_resource,
         }
     
     def generate_initial_work(
         self,
         task: str,
-        datasource_info: Dict[str, Any],
+        context_info: Dict[str, Any],
         context: Dict[str, Any]
     ) -> str:
         """
@@ -241,37 +255,45 @@ Execute this task and provide a comprehensive response. Include:
         
         Args:
             task: The task to work on
-            datasource_info: Info about the DataSource
+            context_info: Info about the ExecutionContext
             context: Additional context (workspace, tool results, etc.)
             
         Returns:
             The player's initial analysis as a string
         """
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", f"""You are {self.name}. {self.role_prompt}
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    f"""You are {self.name}. {self.role_prompt}
 
-You are participating in a multi-agent analysis of a dataset.
-Your goal is to provide your unique perspective and insights."""),
-            ("human", """Task: {task}
+You are participating in a multi-agent analysis of a context (dataset, API, etc.).
+Your goal is to provide your unique perspective and insights.""",
+                ),
+                (
+                    "human",
+                    """Task: {task}
 
-Dataset: {dataset_name} ({source_type})
-Tables: {tables}
+Context: {context_name} ({context_type})
+Resources: {resources}
 
 Context and available information:
 {context}
 
 Provide your initial analysis. Be thorough and specific.
-Focus on what you can contribute based on your role.""")
-        ])
+Focus on what you can contribute based on your role.""",
+                ),
+            ]
+        )
         
         chain = prompt | self.llm | self._output_parser
         
         return chain.invoke({
             "task": task,
-            "dataset_name": datasource_info.get("name", "dataset"),
-            "source_type": datasource_info.get("source_type", "unknown"),
-            "tables": ", ".join(datasource_info.get("tables", [])),
-            "context": str(context)
+            "context_name": context_info.get("name", "context"),
+            "context_type": context_info.get("context_type", "unknown"),
+            "resources": ", ".join(context_info.get("resources", [])),
+            "context": str(context),
         })
     
     def critique_work(
@@ -369,8 +391,9 @@ while maintaining accuracy and your analytical perspective.""")
     def synthesize_results(
         self,
         task: str,
-        all_results: List[Dict[str, Any]]
-    ) -> str:
+        all_results: List[Dict[str, Any]],
+        output_schema: Optional[Type[BaseModel]] = None
+    ) -> Union[str, BaseModel]:
         """
         Synthesize multiple results into a consolidated output.
         Uses this player's role/expertise to consolidate debate results.
@@ -378,10 +401,27 @@ while maintaining accuracy and your analytical perspective.""")
         Args:
             task: The task that was worked on
             all_results: List of results from all players
+            output_schema: Optional Pydantic model class for structured output.
+                          If provided, returns a validated Pydantic model instance.
+                          If None, returns a string (legacy behavior).
             
         Returns:
-            Synthesized result as a string
+            Synthesized result as a string or Pydantic model instance
         """
+        results_str = "\n\n".join([
+            f"=== {r.get('player', 'Unknown')} ===\n{r.get('analysis', str(r))}"
+            for r in all_results
+        ])
+        
+        if output_schema is not None:
+            # Use structured output with Pydantic schema
+            return self._synthesize_structured(task, results_str, output_schema)
+        else:
+            # Legacy string output
+            return self._synthesize_string(task, results_str)
+    
+    def _synthesize_string(self, task: str, results_str: str) -> str:
+        """Synthesize results as a string (legacy behavior)."""
         prompt = ChatPromptTemplate.from_messages([
             ("system", f"""You are {self.name}. {self.role_prompt}
 
@@ -408,10 +448,48 @@ Provide the consolidated result for this task. Output only the result, no commen
         
         chain = prompt | self.llm | self._output_parser
         
-        results_str = "\n\n".join([
-            f"=== {r.get('player', 'Unknown')} ===\n{r.get('analysis', str(r))}"
-            for r in all_results
+        return chain.invoke({
+            "task": task,
+            "all_results": results_str
+        })
+    
+    def _synthesize_structured(
+        self, 
+        task: str, 
+        results_str: str, 
+        output_schema: Type[BaseModel]
+    ) -> BaseModel:
+        """
+        Synthesize results into a structured Pydantic model.
+        
+        Uses LangChain's with_structured_output() for guaranteed schema compliance.
+        """
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", f"""You are {self.name}. {self.role_prompt}
+
+You are synthesizing metadata from multiple analysts into a structured format.
+
+**Your job:**
+- Extract and consolidate all relevant metadata from the analyses
+- Fill in ALL fields in the schema with concrete values from the gathered information
+- Use null/None for fields where information is truly unavailable
+- Resolve conflicts by choosing the most accurate/complete information
+
+**CRITICAL:**
+- Output MUST conform exactly to the provided schema
+- Use actual values, not placeholders like "..." 
+- Be specific and concrete"""),
+            ("human", """Task: {task}
+
+Results from all analysts:
+{all_results}
+
+Generate the final structured metadata output.""")
         ])
+        
+        # Use with_structured_output for guaranteed schema compliance
+        structured_llm = self.llm.with_structured_output(output_schema)
+        chain = prompt | structured_llm
         
         return chain.invoke({
             "task": task,

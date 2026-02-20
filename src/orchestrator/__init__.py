@@ -6,12 +6,11 @@ This module provides:
 - PlanExecutor: Executes a complete plan with parallel players
 - Step execution via LangGraph
 
-Uses the unified DataSource abstraction for all data access.
-See src/datasource for DataSource creation and configuration.
+Uses the unified ExecutionContext abstraction for all data access.
+See `src.context` for context creation and configuration.
 
 Typical usage:
     from src.orchestrator import Orchestrator
-    from src.datasource import create_datasource
     from src.standards import METADATA_STANDARDS
     
     # Create orchestrator
@@ -47,13 +46,8 @@ Typical usage:
 
 from .orchestrator import Orchestrator, run_metadata_extraction
 from .plan_executor import PlanExecutor, execute_plan
-from .schemas import (
-    Plan, 
-    PlanStep, 
-    StepResult, 
-    ExecutionResult,
-)
-from .state import StepExecutionState, PlanExecutionState
+from src.core.schemas import Plan, Task, StepResult, ExecutionResult
+from src.core.state import StepExecutionState, PlanExecutionState
 
 __all__ = [
     # Main classes
@@ -64,7 +58,7 @@ __all__ = [
     "execute_plan",
     # Schema classes
     "Plan",
-    "PlanStep",
+    "Task",
     "StepResult",
     "ExecutionResult",
     # State classes

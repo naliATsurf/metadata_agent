@@ -7,18 +7,18 @@ This module implements the core logic for executing a single plan step:
 3. Players debate (critique and revise) their results
 4. A synthesizer consolidates the final result
 
-Uses the unified DataSource abstraction for all data access.
+Uses the unified ExecutionContext abstraction for all data access.
 
 The execution flow is:
     execute_parallel → critique → revise → [loop or synthesize]
 """
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Type
 
+from pydantic import BaseModel
 from langgraph.graph import StateGraph, END
 
-from .state import StepExecutionState, PlayerResult, DebateEntry
-from ..datasource import DataSource
+from src.core.state import StepExecutionState, PlayerResult, DebateEntry
 from ..players import Player, create_player_from_config, PLAYER_CONFIGS
 
 
@@ -41,29 +41,31 @@ def execute_parallel_node(state: StepExecutionState) -> Dict[str, Any]:
     
     players: List[Player] = state["players"]
     task = state["task"]
-    datasource_key = state["datasource_key"]
-    datasource_info = state["datasource_info"]
+    context_key = state["context_key"]
+    context_info = state["context_info"]
     target_tables = state.get("target_tables", [])
     workspace = state["workspace"]
     input_mappings = state["input_mappings"]
     
-    is_multi_table = datasource_info.get("is_multi_table", False)
+    is_multi_resource = context_info.get("is_multi_resource", False)
     
-    if is_multi_table:
-        logging.info(f"  Multi-table mode: {len(datasource_info.get('tables', []))} tables")
+    if is_multi_resource:
+        logging.info(
+            f"  Multi-resource mode: {len(context_info.get('resources', []))} resources"
+        )
         if target_tables:
-            logging.info(f"  Target tables: {target_tables}")
+            logging.info(f"  Target resources: {target_tables}")
     
     player_results: List[PlayerResult] = []
     initial_debate_entries: List[DebateEntry] = []
     
     for player in players:
         try:
-            # Execute the task with DataSource context
+            # Execute the task with ExecutionContext context
             result = player.execute_task(
                 task=task,
-                datasource_key=datasource_key,
-                datasource_info=datasource_info,
+                context_key=context_key,
+                context_info=context_info,
                 workspace=workspace,
                 inputs=input_mappings,
                 target_tables=target_tables
@@ -224,6 +226,9 @@ def synthesize_node(state: StepExecutionState) -> Dict[str, Any]:
     
     The synthesizer combines the best insights from all players
     and resolves any conflicts to produce a final result.
+    
+    If output_schema is provided in state, uses structured output
+    to return a validated Pydantic model instead of a string.
     """
     logging.info(f"--- STEP {state['step_index']}: SYNTHESIS ---")
     
@@ -231,6 +236,10 @@ def synthesize_node(state: StepExecutionState) -> Dict[str, Any]:
     task = state["task"]
     player_results = state["player_results"]
     expected_outputs = state["expected_outputs"]
+    output_schema: Optional[Type[BaseModel]] = state.get("output_schema")
+    
+    if output_schema:
+        logging.info(f"  Using structured output with schema: {output_schema.__name__}")
     
     try:
         # Prepare results for synthesis
@@ -243,15 +252,24 @@ def synthesize_node(state: StepExecutionState) -> Dict[str, Any]:
             for r in player_results
         ]
         
+        # Synthesize with optional structured output
         consolidated = synthesizer.synthesize_results(
             task=task,
-            all_results=results_for_synthesis
+            all_results=results_for_synthesis,
+            output_schema=output_schema
         )
+        
+        # Convert Pydantic model to dict for artifact storage if needed
+        if output_schema and isinstance(consolidated, BaseModel):
+            artifact_value = consolidated.model_dump(by_alias=True)
+            logging.info(f"  Structured output validated successfully")
+        else:
+            artifact_value = consolidated
         
         # Create artifacts from the consolidated result
         produced_artifacts = {}
         for output_name in expected_outputs:
-            produced_artifacts[output_name] = consolidated
+            produced_artifacts[output_name] = artifact_value
         
         logging.info(f"  Synthesis complete. Produced artifacts: {list(produced_artifacts.keys())}")
         
@@ -263,6 +281,8 @@ def synthesize_node(state: StepExecutionState) -> Dict[str, Any]:
     except Exception as e:
         error_msg = f"Synthesis failed: {str(e)}"
         logging.error(f"  {error_msg}")
+        import traceback
+        logging.error(traceback.format_exc())
         return {
             "error": error_msg,
             "consolidated_result": None,
@@ -365,13 +385,14 @@ def get_step_execution_graph():
 def create_step_state(
     step_index: int,
     step_dict: Dict[str, Any],
-    datasource: DataSource,
-    datasource_key: str,
+    context: Any,
+    context_key: str,
     workspace: Dict[str, Any],
     metadata_standard: str,
     players_per_step: int,
     debate_rounds: int,
-    player_pool: List[str]
+    player_pool: List[str],
+    output_schema: Optional[Type[BaseModel]] = None
 ) -> StepExecutionState:
     """
     Create the initial state for executing a step.
@@ -379,13 +400,14 @@ def create_step_state(
     Args:
         step_index: Index of this step in the plan
         step_dict: The step dictionary from the plan
-        datasource: The DataSource to analyze
-        datasource_key: Key for the DataSource in the tool registry
+        context: The ExecutionContext to analyze
+        context_key: Key for the ExecutionContext in the tool registry
         workspace: Current workspace with artifacts
         metadata_standard: The metadata standard to follow
         players_per_step: Number of players to spawn
         debate_rounds: Number of debate rounds
         player_pool: List of player role names available
+        output_schema: Optional Pydantic model for structured output (typically for final step)
         
     Returns:
         Initialized StepExecutionState
@@ -402,7 +424,7 @@ def create_step_state(
     # This ensures synthesis is done by someone who understands the task context
     synthesizer = players[0] if players else None
     
-    # Get target tables from step
+    # Get target resources from step (field still named target_tables)
     target_tables = step_dict.get("target_tables", [])
     
     return StepExecutionState(
@@ -413,8 +435,8 @@ def create_step_state(
         input_mappings=step_dict.get("inputs", {}),
         expected_outputs=step_dict.get("outputs", []),
         target_tables=target_tables,
-        datasource_key=datasource_key,
-        datasource_info=datasource.to_dict(),
+        context_key=context_key,
+        context_info=context.to_dict(),
         workspace=workspace,
         metadata_standard=metadata_standard,
         players=players,
@@ -423,7 +445,8 @@ def create_step_state(
         current_debate_round=0,
         player_results=[],
         debate_log=[],
+        output_schema=output_schema,
         consolidated_result=None,
         produced_artifacts={},
-        error=None
+        error=None,
     )

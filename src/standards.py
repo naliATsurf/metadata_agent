@@ -1,163 +1,70 @@
 """
 This file contains predefined, named metadata standards that can be used by the orchestrator.
 
-Includes standards for both single-file and multi-file (relational) datasets.
+Each standard has:
+1. A string template (METADATA_STANDARDS) - used for prompting the LLM
+2. A Pydantic model (METADATA_SCHEMAS) - used for structured output validation
 """
 
+from typing import Dict, Optional
+from pydantic import BaseModel, Field
+
+
+# =============================================================================
+# PYDANTIC MODELS FOR STRUCTURED OUTPUT
+# =============================================================================
+
+class SpatialEcologicalMetadata(BaseModel):
+    """Simple spatial/ecological metadata standard."""
+    title: str = Field(description="Title of the dataset")
+    description: str = Field(description="Description of the dataset")
+    subject: Optional[str] = Field(default=None, description="Subject/topic")
+    spatial_coverage: Optional[str] = Field(default=None, description="Geographic/spatial coverage")
+    spatial_resolution: Optional[str] = Field(default=None, description="Spatial resolution of the data")
+    temporal_coverage: Optional[str] = Field(default=None, description="Time period covered")
+    temporal_resolution: Optional[str] = Field(default=None, description="Temporal resolution of the data")
+    methods: Optional[str] = Field(default=None, description="Methods used for data collection")
+    format: Optional[str] = Field(default=None, description="Data format")
+
+
+# =============================================================================
+# SCHEMA REGISTRY - Maps standard names to Pydantic models
+# =============================================================================
+
+METADATA_SCHEMAS: Dict[str, type[BaseModel]] = {
+    "spatial_ecological": SpatialEcologicalMetadata,
+}
+
+
+def get_schema_for_standard(standard_name: str) -> Optional[type[BaseModel]]:
+    """
+    Get the Pydantic schema class for a given standard name.
+    
+    Args:
+        standard_name: Name of the metadata standard
+        
+    Returns:
+        Pydantic model class, or None if not found
+    """
+    return METADATA_SCHEMAS.get(standard_name)
+
+
+# =============================================================================
+# STRING TEMPLATES FOR PROMPTING (Original format, kept for compatibility)
+# =============================================================================
+
 METADATA_STANDARDS = {
-    "basic": """
+    "spatial_ecological": """
 {
     "title": "...",
     "description": "...",
-    "schema": {
-        "fields": [
-            {
-                "name": "...",
-                "type": "...",
-                "description": "..."
-            }
-        ]
-    }
-}
-""",
-    "dublin_core": """
-{
-    "title": "...",
-    "creator": "...",
     "subject": "...",
-    "description": "...",
-    "publisher": "...",
-    "date": "...",
-    "type": "...",
-    "format": "...",
-    "identifier": "...",
-    "language": "..."
-}
-""",
-    # Standard for multi-file/relational datasets
-    "relational": """
-{
-    "dataset": {
-        "name": "...",
-        "description": "...",
-        "domain": "...",
-        "created_date": "...",
-        "version": "..."
-    },
-    "tables": [
-        {
-            "name": "...",
-            "description": "...",
-            "row_count": 0,
-            "primary_key": "...",
-            "fields": [
-                {
-                    "name": "...",
-                    "type": "...",
-                    "description": "...",
-                    "nullable": true,
-                    "is_primary_key": false,
-                    "is_foreign_key": false
-                }
-            ]
-        }
-    ],
-    "relationships": [
-        {
-            "name": "...",
-            "description": "...",
-            "from_table": "...",
-            "from_column": "...",
-            "to_table": "...",
-            "to_column": "...",
-            "relationship_type": "one-to-many | many-to-one | one-to-one | many-to-many",
-            "cardinality": "...",
-            "is_mandatory": true
-        }
-    ],
-    "data_quality": {
-        "completeness": "...",
-        "consistency": "...",
-        "notes": "..."
-    }
-}
-""",
-    # Simplified relational standard for quick analysis
-    "relational_simple": """
-{
-    "dataset_name": "...",
-    "description": "...",
-    "tables": {
-        "table_name": {
-            "description": "...",
-            "columns": ["col1", "col2", ...],
-            "row_count": 0,
-            "key_columns": ["..."]
-        }
-    },
-    "relationships": [
-        {
-            "from": "table.column",
-            "to": "table.column",
-            "type": "one-to-many"
-        }
-    ]
-}
-""",
-    # Ecological/scientific data standard (relevant for your biota/observation data)
-    "ecological_data": """
-{
-    "dataset": {
-        "title": "...",
-        "description": "...",
-        "geographic_coverage": {
-            "location": "...",
-            "bounding_box": {
-                "north": 0.0,
-                "south": 0.0,
-                "east": 0.0,
-                "west": 0.0
-            }
-        },
-        "temporal_coverage": {
-            "start_date": "...",
-            "end_date": "..."
-        },
-        "taxonomic_coverage": ["..."],
-        "methods": "..."
-    },
-    "tables": [
-        {
-            "name": "...",
-            "description": "...",
-            "entity_type": "observation | sample | measurement | taxon | location",
-            "row_count": 0,
-            "fields": [
-                {
-                    "name": "...",
-                    "type": "...",
-                    "description": "...",
-                    "unit": "...",
-                    "standard_term": "..."
-                }
-            ]
-        }
-    ],
-    "relationships": [
-        {
-            "description": "...",
-            "from_table": "...",
-            "from_column": "...",
-            "to_table": "...",
-            "to_column": "...",
-            "relationship_type": "..."
-        }
-    ],
-    "data_standards": {
-        "taxonomy": "GBIF | WoRMS | ITIS | ...",
-        "coordinates": "WGS84 | ...",
-        "units": "SI | ..."
-    }
+    "spatial_coverage": "...",
+    "spatial_resolution": "...",
+    "temporal_coverage": "...",
+    "temporal_resolution": "...",
+    "methods": "...",
+    "format": "..."
 }
 """
 }

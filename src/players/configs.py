@@ -4,14 +4,14 @@ Player configurations for the multi-agent system.
 This module defines the available player roles with their prompts and tools.
 Players are instantiated from these configs at runtime.
 
-Uses the unified DataSource tools for all data access.
+Uses the unified ExecutionContext tools for all data access.
 
 Note: model_name and temperature are optional - if not specified,
 the defaults from config.py will be used.
 """
 from typing import Dict, Any
 
-from ..tools import datasource_tools
+from ..tools import context_tools
 
 
 PLAYER_CONFIGS: Dict[str, Dict[str, Any]] = {
@@ -24,13 +24,15 @@ PLAYER_CONFIGS: Dict[str, Dict[str, Any]] = {
             "potential relationships between tables."
         ),
         "tools": [
-            datasource_tools.get_dataset_overview,
-            datasource_tools.get_table_info,
-            datasource_tools.get_row_count, 
-            datasource_tools.get_column_names,
-            datasource_tools.get_column_statistics,
-            datasource_tools.get_missing_values,
-            datasource_tools.find_common_columns,
+            # High-level context and resource summaries
+            context_tools.get_context_overview,
+            context_tools.list_resources,
+            context_tools.get_resource_info,
+            # Basic profiling
+            context_tools.get_item_count,
+            context_tools.get_field_names,
+            context_tools.get_field_statistics,
+            context_tools.get_missing_values,
         ],
         # model_name: uses config default
         # temperature: uses config default
@@ -43,12 +45,10 @@ PLAYER_CONFIGS: Dict[str, Dict[str, Any]] = {
             "datasets, identify primary keys, foreign keys, and normalization patterns."
         ),
         "tools": [
-            datasource_tools.get_dataset_schema,
-            datasource_tools.get_column_names,
-            datasource_tools.get_column_types,
-            datasource_tools.get_sample_rows,
-            datasource_tools.compare_table_schemas,
-            datasource_tools.find_common_columns,
+            context_tools.get_context_schema,
+            context_tools.get_field_names,
+            context_tools.get_field_types,
+            context_tools.get_sample_items,
         ],
     },
     "metadata_specialist": {
@@ -61,8 +61,8 @@ PLAYER_CONFIGS: Dict[str, Dict[str, Any]] = {
             "datasets, include relationship metadata and per-table descriptions."
         ),
         "tools": [
-            datasource_tools.get_dataset_overview,
-            datasource_tools.get_dataset_schema,
+            context_tools.get_context_overview,
+            context_tools.get_context_schema,
         ],
         "temperature": 0.3,  # Lower for more consistent, structured output
     },
@@ -88,13 +88,39 @@ PLAYER_CONFIGS: Dict[str, Dict[str, Any]] = {
             "Output relationships in a structured format suitable for metadata records."
         ),
         "tools": [
-            datasource_tools.get_relationships,
-            datasource_tools.find_common_columns,
-            datasource_tools.analyze_potential_relationship,
-            datasource_tools.preview_join,
-            datasource_tools.compare_table_schemas,
-            datasource_tools.get_dataset_overview,
+            context_tools.get_relationships,
+            context_tools.get_context_overview,
+            context_tools.get_resource_info,
+            context_tools.get_field_names,
+            context_tools.get_unique_values,
         ],
         "temperature": 0.3,
+    },
+    # Specialized player for final metadata generation according to standards
+    "metadata_generator": {
+        "role_prompt": (
+            "You are a metadata generation expert. Your SOLE responsibility is to take "
+            "information gathered from previous analysis steps and generate CONCRETE VALUES "
+            "for each field defined in the **metadata standard**.\n\n"
+            "**STRICT Rules:**\n"
+            "1. Output ONLY a valid JSON object matching the metadata standard schema EXACTLY\n"
+            "2. Include ONLY fields that exist in the metadata standard - DO NOT add extra fields!\n"
+            "3. Fill in ALL fields from the standard with actual values from the gathered information\n"
+            "4. Use null for fields where information is unavailable\n"
+            "5. NO explanations, NO commentary, NO markdown - ONLY the JSON object\n"
+            "6. DO NOT invent or add fields that are not in the standard schema\n\n"
+            "**Example - Strict Field Matching:**\n"
+            "Metadata standard: {\"title\": \"...\", \"description\": \"...\"}\n"
+            "Input info: 'Dataset has 1000 rows, columns: id, name, date. Contains customer records. Created 2024.'\n"
+            "CORRECT Output: {\"title\": \"Customer Records\", \"description\": \"Customer records with 1000 entries\"}\n"
+            "WRONG Output: {\"title\": \"...\", \"description\": \"...\", \"created_date\": \"2024\", \"row_count\": 1000}\n"
+            "(Wrong because created_date and row_count are NOT in the standard!)\n\n"
+            "Remember: Output ONLY fields from the metadata standard. Nothing more, nothing less."
+        ),
+        "tools": [
+            context_tools.get_context_overview,
+            context_tools.get_context_schema,
+        ],
+        "temperature": 0.2,  # Low temperature for consistent, structured output
     },
 }
