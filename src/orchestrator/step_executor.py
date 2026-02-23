@@ -88,6 +88,11 @@ def execute_parallel_node(state: StepExecutionState) -> Dict[str, Any]:
             })
             
             logging.info(f"  Player '{player.name}' completed execution")
+            # Log a preview of the output
+            analysis_preview = result.get("analysis", "")[:200].replace('\n', ' ')
+            if len(result.get("analysis", "")) > 200:
+                analysis_preview += "..."
+            logging.info(f"    Output: {analysis_preview}")
             
         except Exception as e:
             logging.error(f"  Player '{player.name}' failed: {str(e)}")
@@ -272,6 +277,14 @@ def synthesize_node(state: StepExecutionState) -> Dict[str, Any]:
             produced_artifacts[output_name] = artifact_value
         
         logging.info(f"  Synthesis complete. Produced artifacts: {list(produced_artifacts.keys())}")
+        # Log a preview of the synthesized output
+        if isinstance(artifact_value, dict):
+            preview = str(artifact_value)[:200].replace('\n', ' ')
+        else:
+            preview = str(artifact_value)[:200].replace('\n', ' ')
+        if len(str(artifact_value)) > 200:
+            preview += "..."
+        logging.info(f"    Synthesized output: {preview}")
         
         return {
             "consolidated_result": consolidated,
@@ -412,16 +425,29 @@ def create_step_state(
     Returns:
         Initialized StepExecutionState
     """
-    # Create player instances
+    # Get the player role specified in the plan for this step
+    specified_player_role = step_dict.get("player", "")
+    
+    # Create player instances - all of the same type specified in the plan
     players = []
-    for i in range(min(players_per_step, len(player_pool))):
-        role_name = player_pool[i % len(player_pool)]
-        config = PLAYER_CONFIGS.get(role_name, {})
-        player = create_player_from_config(config, name=f"{role_name}_{i+1}")
+    
+    # Determine which player role to use
+    if specified_player_role and specified_player_role in PLAYER_CONFIGS:
+        role_to_use = specified_player_role
+    elif player_pool:
+        role_to_use = player_pool[0]  # Fallback to first in pool
+    else:
+        role_to_use = "data_analyst"  # Ultimate fallback
+    
+    # Create multiple instances of the same player type
+    config = PLAYER_CONFIGS.get(role_to_use, {})
+    for i in range(players_per_step):
+        player = create_player_from_config(config, name=f"{role_to_use}_{i+1}")
         players.append(player)
     
-    # Use the first player as synthesizer (uses their role expertise)
-    # This ensures synthesis is done by someone who understands the task context
+    logging.info(f"  Created {players_per_step} '{role_to_use}' player(s)")
+    
+    # Use the first player as synthesizer
     synthesizer = players[0] if players else None
     
     # Get target resources from step (field still named target_tables)

@@ -101,20 +101,14 @@ PLAYER_CONFIGS: Dict[str, Dict[str, Any]] = {
         "role_prompt": (
             "You are a metadata generation expert. Your SOLE responsibility is to take "
             "information gathered from previous analysis steps and generate CONCRETE VALUES "
-            "for each field defined in the **metadata standard**.\n\n"
-            "**STRICT Rules:**\n"
+            "for each field defined in the metadata standard.\n\n"
+            "STRICT Rules:\n"
             "1. Output ONLY a valid JSON object matching the metadata standard schema EXACTLY\n"
             "2. Include ONLY fields that exist in the metadata standard - DO NOT add extra fields!\n"
             "3. Fill in ALL fields from the standard with actual values from the gathered information\n"
             "4. Use null for fields where information is unavailable\n"
             "5. NO explanations, NO commentary, NO markdown - ONLY the JSON object\n"
             "6. DO NOT invent or add fields that are not in the standard schema\n\n"
-            "**Example - Strict Field Matching:**\n"
-            "Metadata standard: {\"title\": \"...\", \"description\": \"...\"}\n"
-            "Input info: 'Dataset has 1000 rows, columns: id, name, date. Contains customer records. Created 2024.'\n"
-            "CORRECT Output: {\"title\": \"Customer Records\", \"description\": \"Customer records with 1000 entries\"}\n"
-            "WRONG Output: {\"title\": \"...\", \"description\": \"...\", \"created_date\": \"2024\", \"row_count\": 1000}\n"
-            "(Wrong because created_date and row_count are NOT in the standard!)\n\n"
             "Remember: Output ONLY fields from the metadata standard. Nothing more, nothing less."
         ),
         "tools": [

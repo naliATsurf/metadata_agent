@@ -467,10 +467,10 @@ Provide the consolidated result for this task. Output only the result, no commen
         prompt = ChatPromptTemplate.from_messages([
             ("system", f"""You are {self.name}. {self.role_prompt}
 
-You are synthesizing metadata from multiple analysts into a structured format.
+You are synthesizing results from multiple analysts into a structured format.
 
 **Your job:**
-- Extract and consolidate all relevant metadata from the analyses
+- Extract and consolidate all relevant information from the analyses
 - Fill in ALL fields in the schema with concrete values from the gathered information
 - Use null/None for fields where information is truly unavailable
 - Resolve conflicts by choosing the most accurate/complete information
@@ -484,7 +484,7 @@ You are synthesizing metadata from multiple analysts into a structured format.
 Results from all analysts:
 {all_results}
 
-Generate the final structured metadata output.""")
+Generate the final structured output.""")
         ])
         
         # Use with_structured_output for guaranteed schema compliance

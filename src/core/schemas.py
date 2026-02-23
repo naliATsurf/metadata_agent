@@ -110,8 +110,8 @@ class StepResult(BaseModel):
     debate_rounds_completed: int = Field(
         default=0, description="Number of debate rounds that were completed."
     )
-    consolidated_result: str = Field(
-        default="", description="The synthesized result after debate."
+    consolidated_result: Any = Field(
+        default="", description="The synthesized result after debate (string or Pydantic model)."
     )
     artifacts: Dict[str, Any] = Field(
         default_factory=dict,
