@@ -19,7 +19,13 @@ class SpatialEcologicalMetadata(BaseModel):
     title: str = Field(description="Title of the dataset")
     description: str = Field(description="Description of the dataset")
     subject: Optional[str] = Field(default=None, description="Subject/topic")
-    spatial_coverage: Optional[str] = Field(default=None, description="Geographic/spatial coverage")
+    spatial_coverage: Optional[Dict[str, float]] = Field(
+        default=None,
+        description=(
+            "Geographic bounding box with keys: "
+            "min_lat, min_lon, max_lat, max_lon"
+        ),
+    )
     spatial_resolution: Optional[str] = Field(default=None, description="Spatial resolution of the data")
     temporal_coverage: Optional[str] = Field(default=None, description="Time period covered")
     temporal_resolution: Optional[str] = Field(default=None, description="Temporal resolution of the data")

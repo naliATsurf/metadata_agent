@@ -38,8 +38,9 @@ Your goal is to generate a step-by-step plan to extract metadata from a resource
 The last step MUST:
 1. Use the `metadata_generator` player
 2. Include `"metadata_standard": "metadata_standard"` in its `inputs` dictionary (THIS IS REQUIRED!)
-3. Include all relevant artifacts from previous steps in `inputs`
-4. Generate concrete values for each metadata field
+3. Set `outputs` to exactly `["metadata_output"]` (THIS IS REQUIRED!)
+4. Include all relevant artifacts from previous steps in `inputs`
+5. Generate concrete values for each metadata field
 
 Example final step inputs format:
 ```json
@@ -63,6 +64,7 @@ REQUIREMENTS:
 1. Use MINIMUM steps - combine related analyses
 2. FINAL STEP must use `metadata_generator` player
 3. FINAL STEP inputs MUST include: {{"metadata_standard": "metadata_standard"}}
+4. FINAL STEP outputs MUST be exactly: ["metadata_output"]
 
 Keep the plan SHORT.""",
             ),
@@ -113,8 +115,9 @@ Your goal is to generate a step-by-step plan to extract metadata from a context 
 The last step MUST:
 1. Use the `metadata_generator` player
 2. Include `"metadata_standard": "metadata_standard"` in its `inputs` dictionary (THIS IS REQUIRED!)
-3. Include all relevant artifacts from previous steps in `inputs`
-4. Generate concrete values for each metadata field
+3. Set `outputs` to exactly `["metadata_output"]` (THIS IS REQUIRED!)
+4. Include all relevant artifacts from previous steps in `inputs`
+5. Generate concrete values for each metadata field
 
 Example final step inputs format:
 ```json
@@ -148,6 +151,7 @@ REQUIREMENTS:
 2. Include ONE relationship discovery step  
 3. FINAL STEP must use `metadata_generator` player
 4. FINAL STEP inputs MUST include: {{"metadata_standard": "metadata_standard"}}
+5. FINAL STEP outputs MUST be exactly: ["metadata_output"]
 
 Keep the plan SHORT (3-5 steps).""",
             ),

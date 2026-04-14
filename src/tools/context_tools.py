@@ -1,8 +1,10 @@
 """
 Unified ExecutionContext Tools for the Multi-Agent System.
 """
-from typing import Any, Dict, List
+import re
+from typing import Any, Dict, List, Optional
 
+import pandas as pd
 from langchain_core.tools import tool
 
 _context_registry: Dict[str, Any] = {}
@@ -144,6 +146,9 @@ def get_field_types(context_key: str, resource: str = None) -> Dict[str, str]:
 def get_sample_items(context_key: str, resource: str = None, n: int = 5) -> str:
     """
     Get a sample of items from a resource.
+
+    This tool retrieves up to 'n' sample rows from the specified resource in the current context and
+    returns them as a string table, allowing users or agents to preview the actual data in the resource.
     """
     try:
         ctx = get_context(context_key)
@@ -209,6 +214,531 @@ def get_relationships(context_key: str) -> List[Dict[str, Any]]:
         return [{"error": str(e)}]
 
 
+# =============================================================================
+# Spatial-Temporal Analysis Tools
+# =============================================================================
+
+# Common temporal patterns for detection
+TEMPORAL_PATTERNS = [
+    r"date",
+    r"time",
+    r"timestamp",
+    r"datetime",
+    r"created",
+    r"updated",
+    r"modified",
+    r"start",
+    r"end",
+    r"begin",
+    r"expire",
+    r"valid",
+    r"year",
+    r"month",
+    r"day",
+    r"hour",
+    r"minute",
+    r"second",
+    r"period",
+    r"duration",
+    r"_at$",
+    r"_on$",
+    r"_dt$",
+]
+
+# Common spatial patterns for detection
+SPATIAL_PATTERNS = [
+    r"lat(?:itude)?",
+    r"lon(?:g(?:itude)?)?",
+    r"coord",
+    r"geo",
+    r"location",
+    r"position",
+    r"point",
+    r"polygon",
+    r"geometry",
+    r"geom",
+    r"wkt",
+    r"wkb",
+    r"x_?coord",
+    r"y_?coord",
+    r"easting",
+    r"northing",
+    r"spatial",
+    r"place",
+    r"address",
+    r"city",
+    r"state",
+    r"country",
+    r"zip",
+    r"postal",
+    r"region",
+    r"bbox",
+    r"bounds",
+    r"extent",
+]
+
+
+def _is_temporal_column_name(column_name: str) -> bool:
+    """Check if column name suggests temporal data."""
+    name_lower = column_name.lower()
+    for pattern in TEMPORAL_PATTERNS:
+        if re.search(pattern, name_lower):
+            return True
+    return False
+
+
+def _is_spatial_column_name(column_name: str) -> bool:
+    """Check if column name suggests spatial data."""
+    name_lower = column_name.lower()
+    for pattern in SPATIAL_PATTERNS:
+        if re.search(pattern, name_lower):
+            return True
+    return False
+
+
+def _detect_temporal_dtype(series: pd.Series) -> Optional[str]:
+    """Detect if a series contains temporal data based on dtype and values."""
+    # Check pandas datetime types
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return "datetime64"
+    
+    # Check timedelta
+    if pd.api.types.is_timedelta64_dtype(series):
+        return "timedelta64"
+    
+    # Check object/string dtype for parseable dates
+    if series.dtype == object or str(series.dtype) == "string":
+        sample = series.dropna().head(100)
+        if len(sample) == 0:
+            return None
+        
+        # Try to parse as datetime
+        try:
+            parsed = pd.to_datetime(sample, errors="coerce", infer_datetime_format=True)
+            valid_ratio = parsed.notna().sum() / len(sample)
+            if valid_ratio > 0.8:
+                return "datetime_string"
+        except Exception:
+            pass
+    
+    return None
+
+
+def _detect_coordinate_values(series: pd.Series) -> Optional[str]:
+    """Detect if numeric values look like coordinates."""
+    if not pd.api.types.is_numeric_dtype(series):
+        return None
+    
+    sample = series.dropna()
+    if len(sample) == 0:
+        return None
+    
+    min_val, max_val = sample.min(), sample.max()
+    
+    # Latitude range: -90 to 90
+    if -90 <= min_val and max_val <= 90:
+        return "possible_latitude"
+    
+    # Longitude range: -180 to 180
+    if -180 <= min_val and max_val <= 180:
+        return "possible_longitude"
+    
+    return None
+
+
+def _detect_wkt_geometry(series: pd.Series) -> Optional[str]:
+    """Detect if string values contain WKT geometry."""
+    if series.dtype != object and str(series.dtype) != "string":
+        return None
+    
+    sample = series.dropna().head(50)
+    if len(sample) == 0:
+        return None
+    
+    wkt_patterns = [
+        r"^POINT\s*\(",
+        r"^LINESTRING\s*\(",
+        r"^POLYGON\s*\(",
+        r"^MULTIPOINT\s*\(",
+        r"^MULTILINESTRING\s*\(",
+        r"^MULTIPOLYGON\s*\(",
+        r"^GEOMETRYCOLLECTION\s*\(",
+    ]
+    
+    wkt_count = 0
+    for val in sample:
+        val_upper = str(val).upper().strip()
+        for pattern in wkt_patterns:
+            if re.match(pattern, val_upper):
+                wkt_count += 1
+                break
+    
+    if wkt_count / len(sample) > 0.5:
+        return "wkt_geometry"
+    
+    return None
+
+
+@tool
+def detect_temporal_columns(context_key: str, resource: str = None) -> Dict[str, Any]:
+    """
+    Detect columns that contain temporal (date/time) data in a resource.
+    Returns column names, detected types, and temporal characteristics.
+    """
+    try:
+        ctx = get_context(context_key)
+        resource = resource or ctx.resources[0]
+        df = ctx.read_resource(resource)
+        
+        temporal_columns = {}
+        
+        for col in df.columns:
+            col_info = {
+                "name_suggests_temporal": _is_temporal_column_name(col),
+                "detected_type": None,
+                "sample_values": [],
+            }
+            
+            # Detect type from data
+            detected_type = _detect_temporal_dtype(df[col])
+            if detected_type:
+                col_info["detected_type"] = detected_type
+            
+            # If either name or type suggests temporal, include it
+            if col_info["name_suggests_temporal"] or col_info["detected_type"]:
+                # Add sample values
+                sample = df[col].dropna().head(5).tolist()
+                col_info["sample_values"] = [str(v) for v in sample]
+                temporal_columns[col] = col_info
+        
+        return {
+            "resource": resource,
+            "temporal_column_count": len(temporal_columns),
+            "temporal_columns": temporal_columns,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@tool
+def analyze_temporal_column(
+    context_key: str, resource: str, column: str
+) -> Dict[str, Any]:
+    """
+    Analyze a specific temporal column in detail.
+    Returns date range, granularity, format patterns, and temporal coverage.
+    """
+    try:
+        ctx = get_context(context_key)
+        df = ctx.read_resource(resource)
+        
+        if column not in df.columns:
+            return {"error": f"Column '{column}' not found in resource '{resource}'"}
+        
+        series = df[column]
+        result = {
+            "column": column,
+            "resource": resource,
+            "total_values": len(series),
+            "null_count": series.isnull().sum(),
+            "non_null_count": series.notna().sum(),
+        }
+        
+        # Try to parse as datetime
+        parsed = None
+        if pd.api.types.is_datetime64_any_dtype(series):
+            parsed = series
+        else:
+            try:
+                parsed = pd.to_datetime(series, errors="coerce", infer_datetime_format=True)
+            except Exception:
+                pass
+        
+        if parsed is not None and parsed.notna().any():
+            valid_dates = parsed.dropna()
+            result["parse_success_rate"] = len(valid_dates) / len(series) if len(series) > 0 else 0
+            
+            if len(valid_dates) > 0:
+                result["date_range"] = {
+                    "min": str(valid_dates.min()),
+                    "max": str(valid_dates.max()),
+                    "span_days": (valid_dates.max() - valid_dates.min()).days,
+                }
+                
+                # Detect granularity
+                if len(valid_dates) > 1:
+                    diffs = valid_dates.sort_values().diff().dropna()
+                    median_diff = diffs.median()
+                    
+                    if median_diff.total_seconds() < 1:
+                        result["apparent_granularity"] = "sub-second"
+                    elif median_diff.total_seconds() < 60:
+                        result["apparent_granularity"] = "second"
+                    elif median_diff.total_seconds() < 3600:
+                        result["apparent_granularity"] = "minute"
+                    elif median_diff.total_seconds() < 86400:
+                        result["apparent_granularity"] = "hourly"
+                    elif median_diff.days < 7:
+                        result["apparent_granularity"] = "daily"
+                    elif median_diff.days < 32:
+                        result["apparent_granularity"] = "weekly/monthly"
+                    else:
+                        result["apparent_granularity"] = "monthly+"
+                
+                # Check for timezone info
+                if hasattr(valid_dates.dtype, "tz") and valid_dates.dtype.tz is not None:
+                    result["timezone"] = str(valid_dates.dtype.tz)
+                else:
+                    result["timezone"] = "none/naive"
+        else:
+            result["parse_success_rate"] = 0
+            result["note"] = "Could not parse as datetime"
+        
+        # Sample original values
+        result["sample_values"] = [str(v) for v in series.dropna().head(5).tolist()]
+        
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@tool
+def detect_spatial_columns(context_key: str, resource: str = None) -> Dict[str, Any]:
+    """
+    Detect columns that contain spatial (geographic/coordinate) data in a resource.
+    Returns column names, detected types, and spatial characteristics.
+    """
+    try:
+        ctx = get_context(context_key)
+        resource = resource or ctx.resources[0]
+        df = ctx.read_resource(resource)
+        
+        spatial_columns = {}
+        coordinate_pairs = []
+        
+        for col in df.columns:
+            col_info = {
+                "name_suggests_spatial": _is_spatial_column_name(col),
+                "detected_type": None,
+                "sample_values": [],
+            }
+            
+            # Check for WKT geometry
+            wkt_type = _detect_wkt_geometry(df[col])
+            if wkt_type:
+                col_info["detected_type"] = wkt_type
+            
+            # Check for coordinate values
+            coord_type = _detect_coordinate_values(df[col])
+            if coord_type:
+                col_info["detected_type"] = coord_type
+            
+            # If either name or type suggests spatial, include it
+            if col_info["name_suggests_spatial"] or col_info["detected_type"]:
+                sample = df[col].dropna().head(5).tolist()
+                col_info["sample_values"] = [str(v) for v in sample]
+                spatial_columns[col] = col_info
+        
+        # Try to detect lat/lon pairs
+        lat_cols = [c for c, info in spatial_columns.items() 
+                    if info.get("detected_type") == "possible_latitude" or 
+                    re.search(r"lat", c.lower())]
+        lon_cols = [c for c, info in spatial_columns.items() 
+                    if info.get("detected_type") == "possible_longitude" or 
+                    re.search(r"lon", c.lower())]
+        
+        if lat_cols and lon_cols:
+            coordinate_pairs = [{"latitude": lat_cols[0], "longitude": lon_cols[0]}]
+        
+        return {
+            "resource": resource,
+            "spatial_column_count": len(spatial_columns),
+            "spatial_columns": spatial_columns,
+            "detected_coordinate_pairs": coordinate_pairs,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@tool
+def analyze_spatial_column(
+    context_key: str, resource: str, column: str
+) -> Dict[str, Any]:
+    """
+    Analyze a specific spatial column in detail.
+    Returns coordinate ranges, geometry types, and spatial extent information.
+    """
+    try:
+        ctx = get_context(context_key)
+        df = ctx.read_resource(resource)
+        
+        if column not in df.columns:
+            return {"error": f"Column '{column}' not found in resource '{resource}'"}
+        
+        series = df[column]
+        result = {
+            "column": column,
+            "resource": resource,
+            "total_values": len(series),
+            "null_count": series.isnull().sum(),
+            "non_null_count": series.notna().sum(),
+            "dtype": str(series.dtype),
+        }
+        
+        # Analyze based on data type
+        if pd.api.types.is_numeric_dtype(series):
+            valid = series.dropna()
+            if len(valid) > 0:
+                result["value_range"] = {
+                    "min": float(valid.min()),
+                    "max": float(valid.max()),
+                    "mean": float(valid.mean()),
+                }
+                
+                # Determine if looks like latitude or longitude
+                min_val, max_val = valid.min(), valid.max()
+                if -90 <= min_val and max_val <= 90:
+                    result["coordinate_type_hint"] = "latitude"
+                elif -180 <= min_val and max_val <= 180:
+                    result["coordinate_type_hint"] = "longitude"
+                else:
+                    result["coordinate_type_hint"] = "projected_or_other"
+        
+        # Check for WKT/geometry strings
+        elif series.dtype == object or str(series.dtype) == "string":
+            wkt_type = _detect_wkt_geometry(series)
+            if wkt_type:
+                result["geometry_format"] = "WKT"
+                
+                # Try to extract geometry types
+                sample = series.dropna().head(100)
+                geometry_types = {}
+                for val in sample:
+                    val_upper = str(val).upper().strip()
+                    for gtype in ["POINT", "LINESTRING", "POLYGON", 
+                                  "MULTIPOINT", "MULTILINESTRING", "MULTIPOLYGON"]:
+                        if val_upper.startswith(gtype):
+                            geometry_types[gtype] = geometry_types.get(gtype, 0) + 1
+                            break
+                
+                result["geometry_types"] = geometry_types
+        
+        # Sample values
+        result["sample_values"] = [str(v) for v in series.dropna().head(5).tolist()]
+        
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@tool
+def get_spatial_extent(
+    context_key: str, resource: str, lat_column: str, lon_column: str
+) -> Dict[str, Any]:
+    """
+    Calculate the spatial bounding box extent from latitude and longitude columns.
+    Returns min/max coordinates and center point.
+    """
+    try:
+        ctx = get_context(context_key)
+        df = ctx.read_resource(resource)
+        
+        if lat_column not in df.columns:
+            return {"error": f"Column '{lat_column}' not found"}
+        if lon_column not in df.columns:
+            return {"error": f"Column '{lon_column}' not found"}
+        
+        lat = pd.to_numeric(df[lat_column], errors="coerce").dropna()
+        lon = pd.to_numeric(df[lon_column], errors="coerce").dropna()
+        
+        if len(lat) == 0 or len(lon) == 0:
+            return {"error": "No valid numeric coordinates found"}
+        
+        result = {
+            "resource": resource,
+            "lat_column": lat_column,
+            "lon_column": lon_column,
+            "valid_point_count": min(len(lat), len(lon)),
+            "bounding_box": {
+                "min_lat": float(lat.min()),
+                "max_lat": float(lat.max()),
+                "min_lon": float(lon.min()),
+                "max_lon": float(lon.max()),
+            },
+            "center": {
+                "lat": float(lat.mean()),
+                "lon": float(lon.mean()),
+            },
+        }
+        
+        # Validate coordinate ranges
+        warnings = []
+        if lat.min() < -90 or lat.max() > 90:
+            warnings.append("Latitude values outside valid range [-90, 90]")
+        if lon.min() < -180 or lon.max() > 180:
+            warnings.append("Longitude values outside valid range [-180, 180]")
+        
+        if warnings:
+            result["warnings"] = warnings
+        
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@tool
+def get_temporal_extent(
+    context_key: str, resource: str, time_column: str
+) -> Dict[str, Any]:
+    """
+    Calculate the temporal extent from a timestamp column.
+    Returns time range, coverage statistics, and temporal distribution info.
+    """
+    try:
+        ctx = get_context(context_key)
+        df = ctx.read_resource(resource)
+        
+        if time_column not in df.columns:
+            return {"error": f"Column '{time_column}' not found"}
+        
+        # Parse as datetime
+        series = df[time_column]
+        if pd.api.types.is_datetime64_any_dtype(series):
+            parsed = series
+        else:
+            parsed = pd.to_datetime(series, errors="coerce", infer_datetime_format=True)
+        
+        valid = parsed.dropna()
+        
+        if len(valid) == 0:
+            return {"error": "No valid datetime values found"}
+        
+        result = {
+            "resource": resource,
+            "time_column": time_column,
+            "total_records": len(series),
+            "valid_timestamps": len(valid),
+            "null_timestamps": series.isnull().sum(),
+            "temporal_extent": {
+                "start": str(valid.min()),
+                "end": str(valid.max()),
+                "duration_days": (valid.max() - valid.min()).days,
+            },
+        }
+        
+        # Add temporal distribution info
+        if len(valid) > 1:
+            by_year = valid.dt.year.value_counts().sort_index()
+            result["records_by_year"] = by_year.to_dict()
+            
+            by_month = valid.dt.month.value_counts().sort_index()
+            result["records_by_month"] = by_month.to_dict()
+        
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def get_all_context_tools() -> List:
     """Return list of all ExecutionContext tools."""
     return [
@@ -224,6 +754,13 @@ def get_all_context_tools() -> List:
         get_missing_values,
         get_unique_values,
         get_relationships,
+        # Spatial-temporal tools
+        detect_temporal_columns,
+        analyze_temporal_column,
+        detect_spatial_columns,
+        analyze_spatial_column,
+        get_spatial_extent,
+        get_temporal_extent,
     ]
 
 
@@ -235,3 +772,20 @@ def get_single_resource_tools() -> List:
 def get_multi_resource_tools() -> List:
     """Return tools appropriate for multi-resource contexts."""
     return get_all_context_tools()
+
+
+def get_spatial_temporal_tools() -> List:
+    """Return tools specific to spatial-temporal analysis."""
+    return [
+        get_context_overview,
+        get_resource_info,
+        get_field_names,
+        get_field_types,
+        get_sample_items,
+        detect_temporal_columns,
+        analyze_temporal_column,
+        detect_spatial_columns,
+        analyze_spatial_column,
+        get_spatial_extent,
+        get_temporal_extent,
+    ]

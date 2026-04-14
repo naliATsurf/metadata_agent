@@ -33,7 +33,7 @@ PROVIDER_CONFIGS = {
         "description": "Google Gemini models",
     },
     "surf": {
-        "default_model": "Qwen2.5-Coder-7B-Instruct",
+        "default_model": "default-text-large",
         "api_key_env": "SURF_API_KEY",
         "base_url_env": "SURF_API_BASE",
         "description": "Custom OpenAI-compatible endpoint (e.g., vLLM, TGI)",

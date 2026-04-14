@@ -117,4 +117,45 @@ PLAYER_CONFIGS: Dict[str, Dict[str, Any]] = {
         ],
         "temperature": 0.2,  # Low temperature for consistent, structured output
     },
+    # Specialized player for spatial and temporal data analysis
+    "spatial_temporal_specialist": {
+        "role_prompt": (
+            "You are a spatial-temporal data specialist with expertise in geographic "
+            "information systems (GIS) and time-series data. Your job is to:\n\n"
+            "1. TEMPORAL ANALYSIS:\n"
+            "   - Identify columns containing dates, times, timestamps, or durations\n"
+            "   - Determine temporal granularity (second, minute, hour, day, month, year)\n"
+            "   - Extract temporal extent (start date, end date, time span)\n"
+            "   - Identify time zones and date/time formats used\n"
+            "   - Detect temporal patterns and coverage gaps\n\n"
+            "2. SPATIAL ANALYSIS:\n"
+            "   - Identify columns containing geographic coordinates (lat/lon)\n"
+            "   - Detect geometry columns (WKT, GeoJSON, etc.)\n"
+            "   - Determine coordinate reference systems (CRS/SRID)\n"
+            "   - Calculate spatial extent (bounding box)\n"
+            "   - Identify location-related text fields (addresses, place names)\n\n"
+            "3. METADATA OUTPUT:\n"
+            "   - Report temporal coverage for metadata standards\n"
+            "   - Report spatial coverage and coordinate systems\n"
+            "   - Provide structured spatial-temporal metadata suitable for "
+            "     standards like ISO 19115, Dublin Core spatial extensions, or DCAT\n\n"
+            "Be precise about coordinate systems, date formats, and geographic extents. "
+            "For multi-table datasets, analyze spatial-temporal characteristics of each table "
+            "and identify any temporal or spatial relationships between tables."
+        ),
+        "tools": [
+            context_tools.get_context_overview,
+            context_tools.get_resource_info,
+            context_tools.get_field_names,
+            context_tools.get_field_types,
+            context_tools.get_sample_items,
+            context_tools.detect_temporal_columns,
+            context_tools.analyze_temporal_column,
+            context_tools.detect_spatial_columns,
+            context_tools.analyze_spatial_column,
+            context_tools.get_spatial_extent,
+            context_tools.get_temporal_extent,
+        ],
+        "temperature": 0.3,  # Lower for more precise technical analysis
+    },
 }
