@@ -5,7 +5,7 @@ This document describes the architecture of the multi-agent metadata extraction 
 ## Overview
 
 The Metadata Agent is a multi-agent system that extracts metadata from datasets using:
-1. **Unified DataSource**: Abstract data layer that handles any data format (CSV, SQLite, etc.)
+1. **Unified ExecutionContext**: Abstract context layer that handles CSV and SQLite inputs.
 2. **Planning**: An LLM generates a step-by-step plan based on the data source and metadata standard
 3. **Parallel Execution**: Multiple players execute each step simultaneously
 4. **Debate**: Players critique and revise each other's work to improve quality
@@ -16,23 +16,23 @@ The Metadata Agent is a multi-agent system that extracts metadata from datasets 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           USER INPUT                                         │
-│     (file path, list of paths, dict, directory, SQLite, DataSource)          │
+│     (file path, list of paths, dict, directory, SQLite, ExecutionContext)     │
 └───────────────────────────────────────┬─────────────────────────────────────┘
                                         │
                                         ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        DataSourceFactory                                     │
-│              (Auto-detects type, creates appropriate DataSource)             │
+│                        ContextFactory                                        │
+│            (Auto-detects type, creates appropriate ExecutionContext)         │
 └───────────────────────────────────────┬─────────────────────────────────────┘
                                         │
                                         ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    DataSource (Unified Interface)                            │
+│                 ExecutionContext (Unified Interface)                         │
 │                                                                              │
-│  CSVDataSource │ SQLiteDataSource │ ParquetDataSource (future) │ ...        │
+│                  CSVContext │ SQLiteContext (future) │ ...                  │
 │                                                                              │
-│  Properties: name, tables, is_multi_table, source_type                      │
-│  Methods: get_table_info(), read_table(), get_relationships(), ...          │
+│  Properties: name, resources, is_multi_csv, context_type                    │
+│  Methods: get_resource_info(), read_resource(), get_relationships(), ...    │
 └───────────────────────────────────────┬─────────────────────────────────────┘
                                         │
                                         ▼
@@ -41,7 +41,7 @@ The Metadata Agent is a multi-agent system that extracts metadata from datasets 
 │         orchestrator.run(source, metadata_standard)                         │
 │         (Unified entry point for ALL data sources)                          │
 │                                                                              │
-│  Note: For multi-table datasets, 'relationship_analyst' is automatically    │
+│  Note: For multi_csv contexts, 'relationship_analyst' is automatically      │
 │        added to the player pool.                                            │
 └───────────────────────────────────────┬─────────────────────────────────────┘
                                         │ Plan: [Step1, Step2, Step3, ...]
@@ -81,30 +81,30 @@ The Metadata Agent is a multi-agent system that extracts metadata from datasets 
 
 ## Core Components
 
-### 1. DataSource (`src/datasource/`)
+### 1. ExecutionContext (`src/context/`)
 
 The unified data access layer that abstracts away differences between data formats.
 
 ```python
-from src.datasource import create_datasource
+from src.context import create_context
 
-# All of these create appropriate DataSource objects:
-ds = create_datasource("./data/users.csv")           # Single CSV
-ds = create_datasource("./data/mydb.sqlite")         # SQLite database
-ds = create_datasource("./data/my_dataset/")         # Directory of CSVs
-ds = create_datasource(["./a.csv", "./b.csv"])       # List of files
-ds = create_datasource({                              # Named tables
+# All of these create appropriate ExecutionContext objects:
+ctx = create_context("./data/users.csv")           # single_csv
+ctx = create_context("./data/mydb.sqlite")         # sqlite
+ctx = create_context("./data/my_dataset/")         # directory of CSVs
+ctx = create_context(["./a.csv", "./b.csv"])       # list of files
+ctx = create_context({                              # named resources
     "users": "./users.csv",
     "orders": "./orders.csv"
 })
 ```
 
-**DataSource Interface:**
-- `tables` - List of table names
-- `is_multi_table` - Boolean indicating multiple tables
-- `source_type` - Type of data source (csv, sqlite, etc.)
-- `get_table_info(table)` - Get metadata for a table
-- `read_table(table)` - Read table data as DataFrame
+**ExecutionContext Interface:**
+- `resources` - List of resource names
+- `is_multi_csv` - Boolean indicating multiple CSV resources
+- `context_type` - Type of context (`single_csv`, `multi_csv`, `sqlite`, etc.)
+- `get_resource_info(resource)` - Get metadata for a resource
+- `read_resource(resource)` - Read resource data as DataFrame
 - `get_relationships()` - Get discovered relationships
 
 ### 2. Orchestrator (`src/orchestrator/orchestrator.py`)
@@ -131,8 +131,8 @@ result = run_metadata_extraction(
 )
 ```
 
-**Multi-table Auto-adaptation:**
-The orchestrator automatically adds `relationship_analyst` to the player pool when analyzing multi-table datasets. No separate topology needed.
+**Multi-CSV Auto-adaptation:**
+The orchestrator automatically adds `relationship_analyst` to the player pool when analyzing multi_csv contexts. No separate topology needed.
 
 ### 3. Player (`src/players/player.py`)
 
@@ -143,11 +143,11 @@ from src.players import Player, create_player_from_config, PLAYER_CONFIGS
 
 player = create_player_from_config(PLAYER_CONFIGS["data_analyst"], name="analyst_1")
 
-# Execute a task with DataSource
+# Execute a task with ExecutionContext
 result = player.execute_task(
     task="Analyze dataset structure",
-    datasource_key="ds_abc123",
-    datasource_info={...},
+    context_key="ctx_abc123",
+    context_info={...},
     workspace={},
     inputs={}
 )
@@ -190,20 +190,20 @@ EXECUTION_TOPOLOGIES = {
 }
 ```
 
-**Note:** For multi-table DataSources, `relationship_analyst` is automatically added to the player pool by the orchestrator. No separate multi-table topologies are needed.
+**Note:** For multi_csv contexts, `relationship_analyst` is automatically added to the player pool by the orchestrator. No separate multi_csv topologies are needed.
 
 ## Tools (`src/tools/`)
 
-### Unified DataSource Tools (`src/tools/datasource_tools.py`)
+### Unified Context Tools (`src/tools/context_tools.py`)
 
-All tools work with the DataSource abstraction:
+All tools work with the ExecutionContext abstraction:
 
 | Tool | Description |
 |------|-------------|
 | `get_dataset_overview` | Overview of the entire dataset |
 | `list_tables` | List all tables |
 | `get_dataset_schema` | Complete schema with relationships |
-| `get_table_info` | Detailed table information |
+| `get_resource_info` | Detailed resource information |
 | `get_row_count` | Row count for a table |
 | `get_column_names` | Column names |
 | `get_column_types` | Column data types |
@@ -254,13 +254,13 @@ result = run_metadata_extraction(
     metadata_standard=METADATA_STANDARDS["relational"]
 )
 
-# Access per-table metadata
-for table, metadata in result.table_metadata.items():
-    print(f"{table}: {metadata}")
+# Access per-resource metadata
+for resource, metadata in result.resource_metadata.items():
+    print(f"{resource}: {metadata}")
 
 # Access discovered relationships
 for rel in result.relationships:
-    print(f"{rel['from_table']}.{rel['from_column']} -> {rel['to_table']}.{rel['to_column']}")
+    print(f"{rel['from_resource']}.{rel['from_field']} -> {rel['to_resource']}.{rel['to_field']}")
 ```
 
 ### SQLite Database
@@ -281,20 +281,20 @@ result = run_metadata_extraction(
 )
 ```
 
-### Using DataSource Directly
+### Using ExecutionContext Directly
 
 ```python
-from src.datasource import create_datasource
+from src.context import create_context
 from src.orchestrator import Orchestrator
 
-# Create and inspect DataSource first
-ds = create_datasource("./data/my_dataset/")
-print(f"Tables: {ds.tables}")
-print(f"Relationships: {ds.get_relationships()}")
+# Create and inspect ExecutionContext first
+ctx = create_context("./data/my_dataset/")
+print(f"Resources: {ctx.resources}")
+print(f"Relationships: {ctx.get_relationships()}")
 
 # Then run orchestration
 orchestrator = Orchestrator(topology_name="default")
-result = orchestrator.run(ds, METADATA_STANDARDS["relational"])
+result = orchestrator.run(ctx, METADATA_STANDARDS["relational"])
 ```
 
 ## File Structure
@@ -305,12 +305,12 @@ src/
 ├── standards.py               # Metadata standards
 ├── topology.py                # Execution topology configs
 ├── config.py                  # LLM and system configuration
-├── datasource/                # Unified data access layer
-│   ├── __init__.py            # Exports DataSource, create_datasource
-│   ├── base.py                # Abstract DataSource base class
-│   ├── csv_source.py          # CSV file(s) implementation
-│   ├── sqlite_source.py       # SQLite database implementation
-│   └── factory.py             # DataSourceFactory with auto-detection
+├── context/                   # Unified context abstraction layer
+│   ├── __init__.py            # Exports ExecutionContext, create_context
+│   ├── base_context.py        # Abstract ExecutionContext base class
+│   ├── csv_context.py         # CSV context implementation
+│   ├── context_factory.py     # ContextFactory with auto-detection
+│   └── context_classifier.py  # Context classification helpers
 ├── orchestrator/
 │   ├── orchestrator.py        # Main Orchestrator class (unified interface)
 │   ├── plan_executor.py       # Executes full plans
@@ -324,7 +324,7 @@ src/
 │   └── configs.py             # Player role configurations
 └── tools/
     ├── __init__.py            # Exports all tools
-    └── datasource_tools.py    # Unified DataSource tools
+    └── context_tools.py       # Unified ExecutionContext tools
 ```
 
 ## Configuration
@@ -339,38 +339,38 @@ GOOGLE_API_KEY=your_api_key_here
 
 ### Adding New Data Source Types
 
-1. Create a new class extending `DataSource` in `src/datasource/`
+1. Create a new class extending `ExecutionContext` in `src/context/`
 2. Implement required abstract methods
-3. Add type detection to `DataSourceFactory`
+3. Add type detection to `ContextFactory`
 
 Example for Parquet:
 ```python
-class ParquetDataSource(DataSource):
+class ParquetContext(ExecutionContext):
     @property
-    def source_type(self) -> SourceType:
-        return SourceType.PARQUET
+    def context_type(self) -> ContextType:
+        return ContextType.UNKNOWN
     
     @property
-    def tables(self) -> List[str]:
+    def resources(self) -> List[str]:
         # Implementation
         
-    def _load_table_info(self, table: str) -> TableInfo:
+    def _load_resource_info(self, resource: str) -> ResourceInfo:
         # Implementation
         
-    def read_table(self, table: str, ...) -> pd.DataFrame:
+    def read_resource(self, resource: str, ...) -> pd.DataFrame:
         # Implementation
 ```
 
 ### Adding New Tools
 
-Add to `src/tools/datasource_tools.py`:
+Add to `src/tools/context_tools.py`:
 
 ```python
 @tool
-def my_new_tool(datasource_key: str, ...) -> Dict[str, Any]:
+def my_new_tool(context_key: str, ...) -> Dict[str, Any]:
     """Description of what this tool does."""
-    ds = get_datasource(datasource_key)
-    # Implementation using DataSource API
+    ctx = get_context(context_key)
+    # Implementation using ExecutionContext API
     return result
 ```
 

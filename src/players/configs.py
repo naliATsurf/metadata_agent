@@ -20,8 +20,8 @@ PLAYER_CONFIGS: Dict[str, Dict[str, Any]] = {
             "You are an expert data analyst. Your job is to perform statistical "
             "analysis on datasets, identify patterns, and extract meaningful insights. "
             "Focus on numerical summaries, distributions, and data quality. "
-            "For multi-table datasets, analyze each table's characteristics and note "
-            "potential relationships between tables."
+            "For multi_csv contexts, analyze each resource's characteristics and note "
+            "potential relationships between resources."
         ),
         "tools": [
             # High-level context and resource summaries
@@ -41,8 +41,8 @@ PLAYER_CONFIGS: Dict[str, Dict[str, Any]] = {
         "role_prompt": (
             "You are a database schema expert. Your job is to describe the structure "
             "of datasets, including column names, data types, relationships between "
-            "fields, and recommend appropriate metadata schemas. For multi-table "
-            "datasets, identify primary keys, foreign keys, and normalization patterns."
+            "fields, and recommend appropriate metadata schemas. For multi_csv "
+            "contexts, identify primary keys, foreign keys, and normalization patterns."
         ),
         "tools": [
             context_tools.get_context_schema,
@@ -57,8 +57,8 @@ PLAYER_CONFIGS: Dict[str, Dict[str, Any]] = {
             "DCAT, and Schema.org. Your job is to extract metadata as STRUCTURED "
             "field-value pairs. Output only the metadata fields and their values in "
             "a clean, compact format. Avoid lengthy explanations - focus on populating "
-            "metadata fields according to the specified standard. For multi-table "
-            "datasets, include relationship metadata and per-table descriptions."
+            "metadata fields according to the specified standard. For multi_csv "
+            "contexts, include relationship metadata and per-resource descriptions."
         ),
         "tools": [
             context_tools.get_context_overview,
@@ -71,8 +71,8 @@ PLAYER_CONFIGS: Dict[str, Dict[str, Any]] = {
             "You are a meticulous quality assurance critic. Your job is to review "
             "analyses from other agents, identify flaws, omissions, inconsistencies, "
             "and suggest improvements. You focus on accuracy and completeness. "
-            "For multi-table analysis, verify that relationships are correctly "
-            "identified and that cross-table consistency is maintained."
+            "For multi_csv analysis, verify that relationships are correctly "
+            "identified and that cross-resource consistency is maintained."
         ),
         "tools": [],
         "temperature": 0.4,
@@ -81,10 +81,10 @@ PLAYER_CONFIGS: Dict[str, Dict[str, Any]] = {
     "relationship_analyst": {
         "role_prompt": (
             "You are a database relationship expert specializing in discovering and "
-            "validating relationships between tables in multi-table datasets. Your job "
+            "validating relationships between resources in multi_csv contexts. Your job "
             "is to identify primary keys, foreign keys, and the nature of relationships "
             "(one-to-one, one-to-many, many-to-many). You analyze column name patterns, "
-            "data type compatibility, and value overlaps to determine how tables connect. "
+            "data type compatibility, and value overlaps to determine how resources connect. "
             "Output relationships in a structured format suitable for metadata records."
         ),
         "tools": [
@@ -140,8 +140,8 @@ PLAYER_CONFIGS: Dict[str, Dict[str, Any]] = {
             "   - Provide structured spatial-temporal metadata suitable for "
             "     standards like ISO 19115, Dublin Core spatial extensions, or DCAT\n\n"
             "Be precise about coordinate systems, date formats, and geographic extents. "
-            "For multi-table datasets, analyze spatial-temporal characteristics of each table "
-            "and identify any temporal or spatial relationships between tables."
+            "For multi_csv contexts, analyze spatial-temporal characteristics of each resource "
+            "and identify any temporal or spatial relationships between resources."
         ),
         "tools": [
             context_tools.get_context_overview,

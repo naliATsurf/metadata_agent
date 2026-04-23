@@ -2,10 +2,11 @@
 Unified ExecutionContext Tools for the Multi-Agent System.
 """
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import pandas as pd
 from langchain_core.tools import tool
+from src.context.base_context import ContextType
 
 _context_registry: Dict[str, Any] = {}
 
@@ -53,7 +54,7 @@ def get_context_overview(context_key: str) -> Dict[str, Any]:
         return {
             "name": ctx.name,
             "context_type": ctx.context_type.value,
-            "is_multi_resource": ctx.is_multi_resource,
+            "is_multi_csv": ctx.is_multi_csv,
             "resource_count": len(ctx.resources),
             "resources": resources_info,
             "relationships": relationships,
@@ -143,7 +144,7 @@ def get_field_types(context_key: str, resource: str = None) -> Dict[str, str]:
 
 
 @tool
-def get_sample_items(context_key: str, resource: str = None, n: int = 5) -> str:
+def get_sample_items(context_key: str, resource: str = "", n: int = 5) -> str:
     """
     Get a sample of items from a resource.
 
@@ -160,7 +161,7 @@ def get_sample_items(context_key: str, resource: str = None, n: int = 5) -> str:
 
 
 @tool
-def get_field_statistics(context_key: str, resource: str = None) -> Dict[str, Any]:
+def get_field_statistics(context_key: str, resource: str = "") -> Dict[str, Any]:
     """
     Get statistics for all fields in a resource.
     """
@@ -174,7 +175,7 @@ def get_field_statistics(context_key: str, resource: str = None) -> Dict[str, An
 
 
 @tool
-def get_missing_values(context_key: str, resource: str = None) -> Dict[str, int]:
+def get_missing_values(context_key: str, resource: str = "") -> Dict[str, int]:
     """
     Get count of missing values per field.
     """
@@ -764,28 +765,56 @@ def get_all_context_tools() -> List:
     ]
 
 
-def get_single_resource_tools() -> List:
-    """Return tools appropriate for single-resource contexts."""
-    return get_all_context_tools()
+def _get_tool_context_compatibility() -> Dict[str, Set[ContextType]]:
+    """Map tool names to supported context types."""
+    csv_types = {ContextType.SINGLE_CSV, ContextType.MULTI_CSV}
+    return {
+        "get_context_overview": csv_types,
+        "list_resources": csv_types,
+        "get_context_schema": csv_types,
+        "get_resource_info": csv_types,
+        "get_item_count": csv_types,
+        "get_field_names": csv_types,
+        "get_field_types": csv_types,
+        "get_sample_items": csv_types,
+        "get_field_statistics": csv_types,
+        "get_missing_values": csv_types,
+        "get_unique_values": csv_types,
+        "get_relationships": {ContextType.MULTI_CSV},
+        "detect_temporal_columns": csv_types,
+        "analyze_temporal_column": csv_types,
+        "detect_spatial_columns": csv_types,
+        "analyze_spatial_column": csv_types,
+        "get_spatial_extent": csv_types,
+        "get_temporal_extent": csv_types,
+    }
 
 
-def get_multi_resource_tools() -> List:
-    """Return tools appropriate for multi-resource contexts."""
-    return get_all_context_tools()
+def filter_tools_by_context_type(tools: List, context_type: ContextType) -> List:
+    """
+    Filter tool list based on supported context types.
+
+    Unregistered tools are allowed by default for backward compatibility.
+    """
+    compatibility = _get_tool_context_compatibility()
+    filtered = []
+    for tool_fn in tools:
+        supported = compatibility.get(tool_fn.name)
+        if supported is None or context_type in supported:
+            filtered.append(tool_fn)
+    return filtered
 
 
-def get_spatial_temporal_tools() -> List:
-    """Return tools specific to spatial-temporal analysis."""
-    return [
-        get_context_overview,
-        get_resource_info,
-        get_field_names,
-        get_field_types,
-        get_sample_items,
-        detect_temporal_columns,
-        analyze_temporal_column,
-        detect_spatial_columns,
-        analyze_spatial_column,
-        get_spatial_extent,
-        get_temporal_extent,
-    ]
+def get_tools_for_context_type(context_type: ContextType) -> List:
+    """Return all context tools compatible with the given context type."""
+    return filter_tools_by_context_type(get_all_context_tools(), context_type)
+
+
+def get_single_csv_tools() -> List:
+    """Return tools appropriate for single CSV contexts."""
+    return get_tools_for_context_type(ContextType.SINGLE_CSV)
+
+
+def get_multi_csv_tools() -> List:
+    """Return tools appropriate for multi CSV contexts."""
+    return get_tools_for_context_type(ContextType.MULTI_CSV)

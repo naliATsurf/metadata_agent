@@ -87,7 +87,7 @@ class Player:
         context_info: Dict[str, Any],
         workspace: Dict[str, Any],
         inputs: Dict[str, str],
-        target_tables: List[str] = None
+        target_resources: List[str] = None
     ) -> Dict[str, Any]:
         """
         Execute a specific task using available tools.
@@ -101,7 +101,7 @@ class Player:
             context_info: Serialized info about the ExecutionContext
             workspace: Dictionary of artifacts from previous steps
             inputs: Mapping of parameter names to artifact names in workspace
-            target_tables: List of specific resources/tables this task targets
+            target_resources: List of specific resources this task targets
             
         Returns:
             Dictionary containing the execution result and any produced artifacts
@@ -121,16 +121,16 @@ class Player:
         ]) if self.tools else "No tools available."
         
         # Build context info section
-        is_multi_resource = context_info.get("is_multi_resource", False)
+        is_multi_csv = context_info.get("is_multi_csv", False)
         resources = context_info.get("resources", [])
-        target_tables = target_tables or []
+        target_resources = target_resources or []
         
-        if is_multi_resource:
-            ctx_info = f"Multi-resource Context: {context_info.get('name', 'context')}\n"
+        if is_multi_csv:
+            ctx_info = f"Multi-CSV Context: {context_info.get('name', 'context')}\n"
             ctx_info += f"Context type: {context_info.get('context_type', 'unknown')}\n"
             ctx_info += f"Resources: {', '.join(resources)}\n"
-            if target_tables:
-                ctx_info += f"Target resources for this step: {', '.join(target_tables)}\n"
+            if target_resources:
+                ctx_info += f"Target resources for this step: {', '.join(target_resources)}\n"
             ctx_info += f"\nTo use tools, pass context_key='{context_key}'"
         else:
             resource_name = resources[0] if resources else "unknown"
@@ -150,14 +150,14 @@ When you need to use a tool, describe what you would do and provide your analysi
 
 {ctx_info}
 
-For multi-resource contexts (e.g. multiple tables), consider:
+For multi-CSV contexts (multiple CSV resources), consider:
 - How resources might relate to each other
 - Common fields that could be foreign keys
 - Data integrity across resources
 """),
             ("human", """Task: {task}
 
-Target tables for this step: {target_tables}
+Target resources for this step: {target_resources}
 
 Input context from previous steps:
 {input_context}
@@ -183,8 +183,8 @@ Execute this task and provide a comprehensive response. Include:
             tool_name = tool.name.lower()
             try:
                 # Determine which tables to analyze
-                if target_tables:
-                    resources_to_analyze = target_tables
+                if target_resources:
+                    resources_to_analyze = target_resources
                 else:
                     resources_to_analyze = resources
                 
@@ -226,12 +226,12 @@ Execute this task and provide a comprehensive response. Include:
                 tool_results[tool.name] = f"Error: {str(e)}"
         
         # Get LLM analysis
-        target_info = ", ".join(target_tables) if target_tables else (
-            "All resources" if is_multi_resource else "N/A"
+        target_info = ", ".join(target_resources) if target_resources else (
+            "All resources" if is_multi_csv else "N/A"
         )
         llm_response = chain.invoke({
             "task": task,
-            "target_tables": target_info,
+            "target_resources": target_info,
             "input_context": input_context + "\n\nTool Results:\n" + str(tool_results)
         })
         
@@ -241,7 +241,7 @@ Execute this task and provide a comprehensive response. Include:
             "tool_results": tool_results,
             "analysis": llm_response,
             "success": True,
-            "is_multi_table": is_multi_resource,
+            "is_multi_csv": is_multi_csv,
         }
     
     def generate_initial_work(

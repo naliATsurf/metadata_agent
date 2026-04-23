@@ -24,13 +24,10 @@ import pandas as pd
 class ContextType(str, Enum):
     """Enumeration of supported execution context types."""
 
-    CSV = "csv"
-    PARQUET = "parquet"
-    JSON = "json"
+    SINGLE_CSV = "single_csv"
+    MULTI_CSV = "multi_csv"
+    TEXT = "text"
     SQLITE = "sqlite"
-    DIRECTORY = "directory"
-    API = "api"
-    WEBSITE = "website"
     UNKNOWN = "unknown"
 
 
@@ -172,8 +169,8 @@ class ExecutionContext(ABC):
         return self._description
 
     @property
-    def is_multi_resource(self) -> bool:
-        return len(self.resources) > 1
+    def is_multi_csv(self) -> bool:
+        return self.context_type == ContextType.MULTI_CSV
 
     @property
     def primary_resource(self) -> Optional[str]:
@@ -200,7 +197,7 @@ class ExecutionContext(ABC):
             "name": self.name,
             "description": self.description,
             "context_type": self.context_type.value,
-            "is_multi_resource": self.is_multi_resource,
+            "is_multi_csv": self.is_multi_csv,
             "resources": {
                 name: info.to_dict()
                 for name, info in self.get_all_resource_info().items()
@@ -240,7 +237,7 @@ class ExecutionContext(ABC):
             "description": self.description,
             "context_type": self.context_type.value,
             "resources": self.resources,
-            "is_multi_resource": self.is_multi_resource,
+            "is_multi_csv": self.is_multi_csv,
         }
 
     def __repr__(self) -> str:
@@ -254,7 +251,7 @@ class ExecutionContext(ABC):
     def __str__(self) -> str:
         resource_info = (
             f"{len(self.resources)} resource(s)"
-            if self.is_multi_resource
+            if self.is_multi_csv
             else self.resources[0]
         )
         return f"{self.name} ({self.context_type.value}: {resource_info})"

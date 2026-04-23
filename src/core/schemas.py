@@ -25,9 +25,9 @@ class Task(BaseModel):
         description="The name of the player role responsible for executing this task, e.g., 'data_analyst'."
     )
     rationale: str = Field(description="The reasoning for why this step is necessary.")
-    target_tables: List[str] = Field(
+    target_resources: List[str] = Field(
         default_factory=list,
-        description="List of table names this step should operate on. Empty means all tables or dataset-level operation.",
+        description="List of resource names this step should operate on. Empty means all resources or context-level operation.",
     )
     inputs: Dict[str, str] = Field(
         default_factory=dict,

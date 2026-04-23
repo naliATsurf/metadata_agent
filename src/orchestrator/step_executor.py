@@ -20,6 +20,7 @@ from langgraph.graph import StateGraph, END
 
 from src.core.state import StepExecutionState, PlayerResult, DebateEntry
 from ..players import Player, create_player_from_config, PLAYER_CONFIGS
+from ..tools.context_tools import filter_tools_by_context_type
 
 
 # ===================================================================
@@ -33,7 +34,7 @@ def execute_parallel_node(state: StepExecutionState) -> Dict[str, Any]:
     Each player independently works on the same task using their tools
     and perspective. Results are collected for the debate phase.
     
-    Uses DataSource for unified data access.
+    Uses ExecutionContext for unified data access.
     """
     logging.info(f"--- STEP {state['step_index']}: PARALLEL EXECUTION ---")
     logging.info(f"Task: {state['task']}")
@@ -43,18 +44,18 @@ def execute_parallel_node(state: StepExecutionState) -> Dict[str, Any]:
     task = state["task"]
     context_key = state["context_key"]
     context_info = state["context_info"]
-    target_tables = state.get("target_tables", [])
+    target_resources = state.get("target_resources", [])
     workspace = state["workspace"]
     input_mappings = state["input_mappings"]
     
-    is_multi_resource = context_info.get("is_multi_resource", False)
+    is_multi_csv = context_info.get("is_multi_csv", False)
     
-    if is_multi_resource:
+    if is_multi_csv:
         logging.info(
-            f"  Multi-resource mode: {len(context_info.get('resources', []))} resources"
+            f"  Multi-CSV mode: {len(context_info.get('resources', []))} resources"
         )
-        if target_tables:
-            logging.info(f"  Target resources: {target_tables}")
+        if target_resources:
+            logging.info(f"  Target resources: {target_resources}")
     
     player_results: List[PlayerResult] = []
     initial_debate_entries: List[DebateEntry] = []
@@ -68,7 +69,7 @@ def execute_parallel_node(state: StepExecutionState) -> Dict[str, Any]:
                 context_info=context_info,
                 workspace=workspace,
                 inputs=input_mappings,
-                target_tables=target_tables
+                target_resources=target_resources
             )
             
             player_results.append({
@@ -440,7 +441,10 @@ def create_step_state(
         role_to_use = "data_analyst"  # Ultimate fallback
     
     # Create multiple instances of the same player type
-    config = PLAYER_CONFIGS.get(role_to_use, {})
+    config = PLAYER_CONFIGS.get(role_to_use, {}).copy()
+    config["tools"] = filter_tools_by_context_type(
+        config.get("tools", []), context.context_type
+    )
     for i in range(players_per_step):
         player = create_player_from_config(config, name=f"{role_to_use}_{i+1}")
         players.append(player)
@@ -450,8 +454,7 @@ def create_step_state(
     # Use the first player as synthesizer
     synthesizer = players[0] if players else None
     
-    # Get target resources from step (field still named target_tables)
-    target_tables = step_dict.get("target_tables", [])
+    target_resources = step_dict.get("target_resources", [])
     
     return StepExecutionState(
         step_index=step_index,
@@ -460,7 +463,7 @@ def create_step_state(
         rationale=step_dict.get("rationale", ""),
         input_mappings=step_dict.get("inputs", {}),
         expected_outputs=step_dict.get("outputs", []),
-        target_tables=target_tables,
+        target_resources=target_resources,
         context_key=context_key,
         context_info=context.to_dict(),
         workspace=workspace,

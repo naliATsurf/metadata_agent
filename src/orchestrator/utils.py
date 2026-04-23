@@ -1,5 +1,9 @@
 from typing import List, Dict, Any, Tuple, Optional, Set
 
+from src.context.base_context import ContextType
+from src.players.configs import PLAYER_CONFIGS
+from src.tools.context_tools import filter_tools_by_context_type
+
 # Pre-populated artifacts available in the workspace at execution start
 DEFAULT_WORKSPACE_ARTIFACTS = {
     "metadata_standard",
@@ -51,3 +55,50 @@ def validate_plan_dataflow(
             produced_artifacts.add(artifact_name)
             
     return (True, "Plan dataflow is valid.")
+
+
+def validate_plan_tool_compatibility(
+    plan: List[Dict[str, Any]],
+    context_type: ContextType,
+    allowed_players: Optional[Set[str]] = None,
+) -> Tuple[bool, str]:
+    """
+    Validate that planned players are usable in the given context type.
+
+    Checks:
+    - The planned player exists in PLAYER_CONFIGS.
+    - The planned player is in the allowed player pool (if provided).
+    - If a player has configured tools, at least one tool is compatible with context_type.
+      (Players intentionally configured with zero tools are allowed.)
+    """
+    errors: List[str] = []
+
+    for i, step in enumerate(plan):
+        player_name = step.get("player", "")
+        task_name = step.get("task", "<unknown>")
+
+        if player_name not in PLAYER_CONFIGS:
+            errors.append(
+                f"Step {i+1} ('{task_name}') uses unknown player '{player_name}'."
+            )
+            continue
+
+        if allowed_players is not None and player_name not in allowed_players:
+            errors.append(
+                f"Step {i+1} ('{task_name}') uses player '{player_name}' "
+                "which is not in the effective player pool."
+            )
+            continue
+
+        configured_tools = PLAYER_CONFIGS[player_name].get("tools", [])
+        compatible_tools = filter_tools_by_context_type(configured_tools, context_type)
+        if configured_tools and not compatible_tools:
+            errors.append(
+                f"Step {i+1} ('{task_name}') uses player '{player_name}' but none of its "
+                f"tools are compatible with context type '{context_type.value}'."
+            )
+
+    if errors:
+        return False, " | ".join(errors)
+
+    return True, "Plan tool compatibility is valid."

@@ -55,9 +55,6 @@ def get_schema_for_standard(standard_name: str) -> Optional[type[BaseModel]]:
     return METADATA_SCHEMAS.get(standard_name)
 
 
-# =============================================================================
-# STRING TEMPLATES FOR PROMPTING (Original format, kept for compatibility)
-# =============================================================================
 
 METADATA_STANDARDS = {
     "spatial_ecological": """
@@ -65,7 +62,7 @@ METADATA_STANDARDS = {
     "title": "...",
     "description": "...",
     "subject": "...",
-    "spatial_coverage": "...",
+    "spatial_coverage": "Geographic bounding box in WGS84 with numeric fields: min_lat, min_lon, max_lat, max_lon",
     "spatial_resolution": "...",
     "temporal_coverage": "...",
     "temporal_resolution": "...",

@@ -15,11 +15,11 @@ Typical usage:
         name="analyst_1"
     )
     
-    # Execute a task with DataSource (used internally by orchestrator)
+    # Execute a task with ExecutionContext (used internally by orchestrator)
     result = player.execute_task(
         task="Analyze dataset structure",
-        datasource_key="ds_abc123",  # Key to registered DataSource
-        datasource_info={"name": "my_dataset", "tables": ["users"], ...},
+        context_key="ctx_abc123",  # Key to registered ExecutionContext
+        context_info={"name": "my_dataset", "resources": ["users"], ...},
         workspace={},
         inputs={}
     )

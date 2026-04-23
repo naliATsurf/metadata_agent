@@ -40,6 +40,8 @@ from .base_context import (
 from .csv_context import CSVContext
 from .sqlite_context import SQLiteContext
 from .context_factory import ContextFactory, create_context
+from .context_classifier import classify_context_type
+from .registry import EXTENSION_MAP, detect_type_from_extension, is_csv_type
 
 __all__ = [
     # Base classes and models
@@ -54,4 +56,9 @@ __all__ = [
     # Factory
     "ContextFactory",
     "create_context",
+    # Classification and registry helpers
+    "classify_context_type",
+    "EXTENSION_MAP",
+    "detect_type_from_extension",
+    "is_csv_type",
 ]

@@ -1,0 +1,9 @@
+{
+  "venvPath": "/home/com3dian/miniconda3/envs",
+  "venv": "sam2",
+  "pythonVersion": "3.12",
+  "include": [
+    "src",
+    "notebooks"
+  ]
+}

@@ -258,7 +258,7 @@ data_context = create_context(
 The context automatically:
 - Detects the data format
 - Discovers schemas and data types
-- Identifies relationships between tables
+- Identifies relationships between resources
 
 ### Step 3: Choose a Metadata Standard
 
@@ -304,7 +304,7 @@ plan = orchestrator.generate_plan(
 
 The system will output log messages showing:
 - Context information (name, type, resources)
-- Discovered relationships between tables
+- Discovered relationships between resources
 - Available players in the topology
 
 ### Step 6: Validate and Inspect the Plan
@@ -432,7 +432,7 @@ The `result` object contains:
 | `final_workspace['metadata_output']` | The extracted metadata in your chosen standard |
 | `final_workspace['context_overview']` | Overview of the dataset |
 | `final_workspace['context_schema']` | Schema information |
-| `final_workspace['discovered_relationships']` | Relationships between tables |
+| `final_workspace['discovered_relationships']` | Relationships between resources |
 
 ### Metadata Fields (spatial_ecological standard)
 
@@ -479,7 +479,7 @@ The system uses specialized AI players:
 | `data_analyst` | Analyzes data structure and content |
 | `schema_expert` | Examines schemas and data types |
 | `metadata_specialist` | Focuses on metadata best practices |
-| `relationship_analyst` | Discovers table relationships (auto-added for multi-table data) |
+| `relationship_analyst` | Discovers resource relationships (auto-added for `multi_csv` contexts) |
 | `critic` | Reviews and critiques other players' work |
 
 ---

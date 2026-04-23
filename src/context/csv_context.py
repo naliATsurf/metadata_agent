@@ -110,7 +110,9 @@ class CSVContext(ExecutionContext):
     
     @property
     def context_type(self) -> ContextType:
-        return ContextType.CSV
+        if len(self._resources) > 1:
+            return ContextType.MULTI_CSV
+        return ContextType.SINGLE_CSV
     
     @property
     def resources(self) -> List[str]:
@@ -206,7 +208,7 @@ class CSVContext(ExecutionContext):
         return self._detect_delimiter(file_path)
     
     def _discover_relationships(self) -> List[RelationshipInfo]:
-        if not self.is_multi_resource:
+        if not self.is_multi_csv:
             return []
         
         relationships = []

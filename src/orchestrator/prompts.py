@@ -4,7 +4,7 @@ This file stores all prompt templates for the multi-agent system.
 from langchain_core.prompts import ChatPromptTemplate
 
 
-def get_planning_prompt() -> ChatPromptTemplate:
+def get_single_csv_planning_prompt() -> ChatPromptTemplate:
     """
     Returns the ChatPromptTemplate for the planning orchestrator.
     """
@@ -33,6 +33,10 @@ Your goal is to generate a step-by-step plan to extract metadata from a resource
 - For simple standards (≤5 fields): Use 2-3 steps maximum (1 analysis step + 1 generation step)
 - For medium standards (6-10 fields): Use 3-4 steps maximum
 - For complex standards (>10 fields): Group related fields and use 4-6 steps maximum
+
+**CRITICAL - Data Profiling Requirement (Even for Small Datasets):**
+- At least one step BEFORE the final generation MUST be executed by `data_analyst` and MUST run `get_field_statistics` (optionally also `get_missing_values`) so numeric ranges and distributions are available for metadata values.
+- If the context has multiple resources, run `get_field_statistics` for each resource (or a combined step that still produces per-resource `field_stats` artifacts).
 
 **MANDATORY - FINAL STEP Requirements:**
 The last step MUST:
@@ -65,6 +69,7 @@ REQUIREMENTS:
 2. FINAL STEP must use `metadata_generator` player
 3. FINAL STEP inputs MUST include: {{"metadata_standard": "metadata_standard"}}
 4. FINAL STEP outputs MUST be exactly: ["metadata_output"]
+5. Even for small datasets, include a `data_analyst` step that runs `get_field_statistics` (and optionally `get_missing_values`) before the final step.
 
 Keep the plan SHORT.""",
             ),
@@ -72,9 +77,16 @@ Keep the plan SHORT.""",
     )
 
 
-def get_multi_resource_planning_prompt() -> ChatPromptTemplate:
+def get_planning_prompt() -> ChatPromptTemplate:
     """
-    Returns the ChatPromptTemplate for planning multi-resource context analysis.
+    DEPRECATED: Use get_single_csv_planning_prompt instead.
+    """
+    return get_single_csv_planning_prompt()
+
+
+def get_multi_csv_planning_prompt() -> ChatPromptTemplate:
+    """
+    Returns the ChatPromptTemplate for planning multi_csv context analysis.
     """
     return ChatPromptTemplate.from_messages(
         [
@@ -86,12 +98,16 @@ Your goal is to generate a step-by-step plan to extract metadata from a context 
 **Context Overview:**
 {dataset_info}
 
-**Key Instructions for Multi-Resource Analysis:**
+**Key Instructions for Multi-CSV Analysis:**
 
 1.  **Be CONCISE**: Create the MINIMUM number of steps. Combine analyses where possible.
 2.  **Phase 1 - Resource Analysis**: Analyze resources (can combine multiple resources in one step if similar analysis needed)
 3.  **Phase 2 - Relationship Discovery**: One step to discover relationships between resources
 4.  **Phase 3 - Final Generation**: Use `metadata_generator` to produce all metadata values
+
+**CRITICAL - Data Profiling Requirement (Even for Small Datasets):**
+- Phase 1 MUST include a `data_analyst` field profiling step using `get_field_statistics` (optionally `get_missing_values`) so numeric ranges/distributions are available for downstream metadata.
+- For multi_csv contexts, ensure `get_field_statistics` is executed for each resource (or produces per-resource `field_stats` artifacts).
 
 **Step Schema**: Each step must include:
 - `task`: The specific task to perform
@@ -149,9 +165,10 @@ File type: {file_type}
 REQUIREMENTS:
 1. Use MINIMUM steps - combine resource analyses
 2. Include ONE relationship discovery step  
-3. FINAL STEP must use `metadata_generator` player
-4. FINAL STEP inputs MUST include: {{"metadata_standard": "metadata_standard"}}
-5. FINAL STEP outputs MUST be exactly: ["metadata_output"]
+3. Include at least one `data_analyst` profiling step using `get_field_statistics` (and optionally `get_missing_values`) even if the dataset is small.
+4. FINAL STEP must use `metadata_generator` player
+5. FINAL STEP inputs MUST include: {{"metadata_standard": "metadata_standard"}}
+6. FINAL STEP outputs MUST be exactly: ["metadata_output"]
 
 Keep the plan SHORT (3-5 steps).""",
             ),
@@ -186,7 +203,7 @@ Your goal is to complete the task thoroughly and provide actionable results.
 **Context Information:**
 {dataset_info}
 
-**Target Resources for This Step:** {target_tables}
+**Target Resources for This Step:** {target_resources}
 
 **Context from Previous Steps:**
 {input_context}
@@ -221,7 +238,7 @@ your unique perspective and insights based on your expertise.
 **Context Information:**
 {dataset_info}
 
-**Target Resources:** {target_tables}
+**Target Resources:** {target_resources}
 
 **Available Context:**
 {context}
@@ -311,6 +328,6 @@ Produce the final metadata output as a **structured record**.
 
 def get_multi_table_planning_prompt() -> ChatPromptTemplate:
     """
-    DEPRECATED: Use get_multi_resource_planning_prompt instead.
+    DEPRECATED: Use get_multi_csv_planning_prompt instead.
     """
-    return get_multi_resource_planning_prompt()
+    return get_multi_csv_planning_prompt()

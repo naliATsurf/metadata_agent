@@ -9,24 +9,13 @@ import glob
 from .base_context import ExecutionContext, ContextType
 from .csv_context import CSVContext
 from .sqlite_context import SQLiteContext
+from .registry import detect_type_from_extension, is_csv_type
 
 
 class ContextFactory:
     """
     Factory for creating ExecutionContext instances with automatic type detection.
     """
-    
-    EXTENSION_MAP = {
-        '.csv': ContextType.CSV,
-        '.tsv': ContextType.CSV,
-        '.txt': ContextType.CSV,
-        '.sqlite': ContextType.SQLITE,
-        '.sqlite3': ContextType.SQLITE,
-        '.db': ContextType.SQLITE,
-        '.parquet': ContextType.PARQUET,
-        '.json': ContextType.JSON,
-        '.jsonl': ContextType.JSON,
-    }
     
     @classmethod
     def create(
@@ -103,7 +92,7 @@ class ContextFactory:
         
         context_type = cls._detect_type_from_extension(expanded_paths[0])
         
-        if context_type == ContextType.CSV:
+        if is_csv_type(context_type):
             resources = {Path(p).stem: p for p in expanded_paths}
             return CSVContext(resources, name=name, description=description, **kwargs)
         
@@ -131,11 +120,11 @@ class ContextFactory:
         first_path = list(resources.values())[0]
         context_type = cls._detect_type_from_extension(first_path)
         
-        if context_type == ContextType.CSV:
+        if is_csv_type(context_type):
             return CSVContext(resources, name=name, description=description, **kwargs)
         
         raise ValueError(
-            f"Dict of {context_type.value} files not supported as multi-resource context."
+            f"Dict of {context_type.value} files not supported as multi_csv context."
         )
     
     @classmethod
@@ -169,8 +158,7 @@ class ContextFactory:
     @classmethod
     def _detect_type_from_extension(cls, path: str) -> ContextType:
         """Detect context type from file extension."""
-        ext = Path(path).suffix.lower()
-        return cls.EXTENSION_MAP.get(ext, ContextType.UNKNOWN)
+        return detect_type_from_extension(path)
     
     @classmethod
     def _create_typed_context(
@@ -182,17 +170,11 @@ class ContextFactory:
         **kwargs
     ) -> ExecutionContext:
         """Create a specific ExecutionContext type."""
-        if context_type == ContextType.CSV:
+        if is_csv_type(context_type):
             return CSVContext(path, name=name, description=description, **kwargs)
         
         elif context_type == ContextType.SQLITE:
             return SQLiteContext(path, name=name, description=description, **kwargs)
-        
-        elif context_type == ContextType.PARQUET:
-            raise NotImplementedError("Parquet support coming soon")
-        
-        elif context_type == ContextType.JSON:
-            raise NotImplementedError("JSON support coming soon")
         
         else:
             return CSVContext(path, name=name, description=description, **kwargs)

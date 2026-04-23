@@ -15,6 +15,6 @@
 
 ## 📝 Description
 
-This repo contains implementatin of agentic generative (LLM based) tool for extracting metadata from dataset. This repo is implemented from the MAST4Science template.
+This repository contains an implementation of an agentic generative (LLM-based) tool for extracting metadata from datasets. It is built based on the MAST4Science template.
 
 <br>

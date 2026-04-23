@@ -9,7 +9,7 @@ This module defines EXECUTION_TOPOLOGIES - how plans are executed, including:
 Player configurations (PLAYER_CONFIGS) are defined in src/players/configs.py
 
 Note: The orchestrator automatically adds 'relationship_analyst' to the player
-pool when analyzing multi-table datasets. No need for separate multi-table topologies.
+pool for multi-context dataset analysis. No need for separate multi-context topologies.
 """
 from typing import Dict, Any
 
@@ -22,7 +22,7 @@ from typing import Dict, Any
 # - debate_rounds: How many critique/revise cycles within each step
 # - player_pool: Which player roles can be assigned to steps
 #
-# Note: For multi-table DataSources, 'relationship_analyst' is automatically
+# Note: For multi-context execution contexts, 'relationship_analyst' is automatically
 # added to the player pool by the orchestrator.
 
 EXECUTION_TOPOLOGIES: Dict[str, Dict[str, Any]] = {

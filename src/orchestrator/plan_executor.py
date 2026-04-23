@@ -30,7 +30,7 @@ class PlanExecutor:
     The executor iterates through each step in the plan, spawning
     parallel players and running debates as configured by the topology.
 
-    Uses DataSource for unified data access across all source types.
+    Uses ExecutionContext for unified data access across all source types.
     """
 
     def __init__(self, topology_name: str = "default"):
@@ -118,8 +118,7 @@ class PlanExecutor:
 
         # Execute each step
         for step_index, step_dict in enumerate(plan_steps):
-            # Field is still named target_tables in Task; it refers to resources
-            target_resources = step_dict.get("target_tables", [])
+            target_resources = step_dict.get("target_resources", [])
 
             logging.info("")
             logging.info(f"{'='*20} STEP {step_index + 1}/{len(plan_steps)} {'='*20}")
@@ -128,7 +127,7 @@ class PlanExecutor:
             logging.info(f"Rationale: {step_dict.get('rationale', 'None')}")
             if target_resources:
                 logging.info(f"Target resources: {target_resources}")
-            elif context.is_multi_resource:
+            elif context.is_multi_csv:
                 logging.info("Target resources: ALL (context-level)")
 
             try:
@@ -190,7 +189,7 @@ class PlanExecutor:
                 workspace.update(produced_artifacts)
 
                 # Collect per-resource metadata
-                if context.is_multi_resource and target_resources:
+                if context.is_multi_csv and target_resources:
                     for resource in target_resources:
                         if resource not in resource_metadata:
                             resource_metadata[resource] = {}
@@ -257,7 +256,7 @@ class PlanExecutor:
         logging.info("PLAN EXECUTION COMPLETE")
         logging.info(f"Steps completed: {successful_steps}/{len(plan_steps)}")
         logging.info(f"Overall success: {overall_success}")
-        if context.is_multi_resource:
+        if context.is_multi_csv:
             logging.info(f"Resources: {context.resources}")
             logging.info(f"Relationships: {len(relationships)}")
         logging.info("=" * 60)
@@ -328,7 +327,7 @@ class PlanExecutor:
                     return value
         
         # Legacy fallback: organize artifacts by resource
-        if context.is_multi_resource:
+        if context.is_multi_csv:
             # Organize artifacts by resource
             resource_artifacts: Dict[str, Dict[str, Any]] = {}
             context_level: Dict[str, Any] = {}
@@ -343,7 +342,7 @@ class PlanExecutor:
                     context_level[key] = value
 
             return {
-                "type": "multi_resource",
+                "type": "multi_csv",
                 "name": context.name,
                 "context_type": context.context_type.value,
                 "resources": resource_artifacts,
@@ -354,7 +353,7 @@ class PlanExecutor:
         # Single-resource context fallback
         primary_resource = context.resources[0] if context.resources else None
         return {
-            "type": "single_resource",
+            "type": "single_csv",
             "name": context.name,
             "context_type": context.context_type.value,
             "resource": primary_resource,

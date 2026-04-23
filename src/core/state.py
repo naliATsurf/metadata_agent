@@ -40,7 +40,7 @@ class StepExecutionState(TypedDict):
     2. Players debate (critique and revise) their results
     3. One of the players synthesizes the final result using their role expertise
     
-    Uses unified DataSource for all data access.
+    Uses unified ExecutionContext for all data access.
     """
     # --- Step Configuration ---
     step_index: int                    # Index of this step in the plan
@@ -49,7 +49,7 @@ class StepExecutionState(TypedDict):
     rationale: str                     # Why this step is needed
     input_mappings: Dict[str, str]     # Maps param names to artifact names
     expected_outputs: List[str]        # Artifact names this step should produce
-    target_tables: List[str]           # Which resources this step targets (empty = all)
+    target_resources: List[str]        # Which resources this step targets (empty = all)
     
     # --- Execution Context ---
     context_key: str                   # Key to registered ExecutionContext in tool registry
@@ -85,7 +85,7 @@ class PlanExecutionState(TypedDict):
     This state tracks progress through all steps in a plan,
     accumulating artifacts in the workspace as steps complete.
     
-    Uses unified DataSource for all data access.
+    Uses unified ExecutionContext for all data access.
     """
     # --- Plan Configuration ---
     plan_steps: List[Task]             # The steps from the Plan object

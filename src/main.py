@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from src.standards import METADATA_STANDARDS
 from src.topology import EXECUTION_TOPOLOGIES
 from src.orchestrator import Orchestrator
-from src.datasource import create_datasource
+from src.context import create_context
 
 
 def load_metadata_standard(standard_arg: str) -> str:
@@ -110,21 +110,21 @@ def main():
         logging.error(f"Source not found: {args.source}")
         return
     
-    # Create DataSource to get info for logging
+    # Create ExecutionContext to get info for logging
     try:
-        datasource = create_datasource(args.source, name=args.name)
+        context = create_context(args.source, name=args.name)
     except Exception as e:
-        logging.error(f"Failed to create DataSource: {e}")
+        logging.error(f"Failed to create ExecutionContext: {e}")
         return
     
     logging.info("=" * 60)
     logging.info("METADATA AGENT")
     logging.info("=" * 60)
     logging.info(f"Source: {args.source}")
-    logging.info(f"Dataset Name: {datasource.name}")
-    logging.info(f"Source Type: {datasource.source_type.value}")
-    logging.info(f"Tables: {datasource.tables}")
-    logging.info(f"Multi-table: {datasource.is_multi_table}")
+    logging.info(f"Context Name: {context.name}")
+    logging.info(f"Context Type: {context.context_type.value}")
+    logging.info(f"Resources: {context.resources}")
+    logging.info(f"Multi-CSV: {context.is_multi_csv}")
     logging.info(f"Topology: {args.topology}")
     logging.info(f"Metadata Standard: {args.metadata_standard}")
     logging.info("=" * 60)
@@ -139,7 +139,7 @@ def main():
     orchestrator = Orchestrator(topology_name=args.topology)
     
     result = orchestrator.run(
-        source=datasource,
+        source=context,
         metadata_standard=metadata_standard_content
     )
     
