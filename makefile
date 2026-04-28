@@ -24,3 +24,7 @@ uv-clean:
 	rm -rf $(VENV)
 	rm -rf pyproject.toml
 	rm -rf uv.lock
+
+activate: 
+	@printf '%s\n' \
+		'source $(VENV)/bin/activate'
