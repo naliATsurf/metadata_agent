@@ -106,3 +106,7 @@ venv.bak
 # IDE specific files
 .idea/
 .vscode/
+
+# Data files
+scratch/sample/
+data/biota_dataset/

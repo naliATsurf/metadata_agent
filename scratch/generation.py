@@ -5,7 +5,7 @@ from src.orchestrator.plan_executor import PlanExecutor
 from src.tools.context_tools import register_context
 
 # 1. Define source
-source = {"data": "path/to/data.csv"}
+source = {"data": "scratch/sample/biota/biota.csv"}
 
 # 2. Create context
 context = create_context(source=source, name="my_dataset")
