@@ -13,11 +13,13 @@ Everything related to the web demo.
 ```text
 Streamlit pages
 workflow wrappers
-demo-specific pipeline helpers
-demo-specific agent helpers
 UI components
-artifact saving
-demo configuration
+```
+
+### `demo/workflows`
+Main workflows used for the apps. 
+```text
+metadata_generation.py
 ```
 
 ### `demo/pages/`

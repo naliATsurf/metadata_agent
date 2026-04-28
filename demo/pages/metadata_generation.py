@@ -22,25 +22,30 @@ from demo.workflows.metadata_generation import (
 st.set_page_config(page_title="Metadata Generation", page_icon="MD", layout="wide")
 st.title("Metadata Generation")
 
-uploaded_file = st.file_uploader(
-    "Upload a dataset",
-    type=SUPPORTED_FILE_TYPES,
-    help="CSV and TSV files are supported by the demo context.",
-)
-standard_name = st.selectbox(
-    "Metadata standard",
-    options=available_metadata_standards(),
-    index=0,
-)
+controls_col, preview_col = st.columns([1, 2], gap="large")
+
+with controls_col:
+    uploaded_file = st.file_uploader(
+        "Upload a dataset",
+        type=SUPPORTED_FILE_TYPES,
+        help="CSV and TSV files are supported by the demo context.",
+    )
+    standard_name = st.selectbox(
+        "Metadata standard",
+        options=available_metadata_standards(),
+        index=0,
+    )
 
 if uploaded_file is None:
-    st.info("Upload a CSV or TSV file to start.")
+    with preview_col:
+        st.info("Upload a CSV or TSV file to start.")
     st.stop()
 
 file_bytes = uploaded_file.getvalue()
 file_key = uploaded_file_key(file_bytes, standard_name)
 
-with st.expander("File preview", expanded=True):
+with preview_col:
+    st.subheader("Data preview")
     try:
         st.dataframe(
             load_preview(uploaded_file.name, file_bytes),
@@ -53,11 +58,13 @@ with st.expander("File preview", expanded=True):
 if "metadata_generation_results" not in st.session_state:
     st.session_state.metadata_generation_results = {}
 
-run_clicked = st.button("Generate metadata", type="primary")
+with controls_col:
+    run_clicked = st.button("Generate metadata", type="primary", use_container_width=True)
 cached_result = st.session_state.metadata_generation_results.get(file_key)
 
 if run_clicked and cached_result is None:
-    progress = st.status("Generating metadata", expanded=True)
+    with preview_col:
+        progress = st.status("Generating metadata", expanded=True)
 
     try:
         progress.write("File uploaded and staged for analysis.")
@@ -71,24 +78,26 @@ if run_clicked and cached_result is None:
         st.stop()
 
 if cached_result is None:
-    st.caption("Click Generate metadata to run the agent.")
+    with preview_col:
+        st.caption("Click Generate metadata to run the agent.")
     st.stop()
 
 metadata = extract_metadata(cached_result)
 
-st.subheader("Generated metadata")
-if metadata:
-    st.json(metadata)
-else:
-    st.warning("No final metadata artifact was found in the result.")
+with preview_col:
+    st.subheader("Generated metadata")
+    if metadata:
+        st.json(metadata)
+    else:
+        st.warning("No final metadata artifact was found in the result.")
 
-with st.expander("Execution details"):
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Plan steps", cached_result.get("plan_steps_count", 0))
-    col2.metric("Completed", cached_result.get("steps_completed", 0))
-    col3.metric("Success", "Yes" if cached_result.get("success") else "No")
+    with st.expander("Execution details"):
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Plan steps", cached_result.get("plan_steps_count", 0))
+        col2.metric("Completed", cached_result.get("steps_completed", 0))
+        col3.metric("Success", "Yes" if cached_result.get("success") else "No")
 
-    if cached_result.get("error"):
-        st.error(cached_result["error"])
+        if cached_result.get("error"):
+            st.error(cached_result["error"])
 
-    st.json(execution_details(cached_result))
+        st.json(execution_details(cached_result))
