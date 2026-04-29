@@ -23,29 +23,11 @@ from pprint import pprint
 # Add the project root to the Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.standards import METADATA_STANDARDS
+from src.standards import METADATA_STANDARDS, load_metadata_standard
 from src.topology import EXECUTION_TOPOLOGIES
 from src.orchestrator import Orchestrator
 from src.context import create_context
-from src.tui import run_tui
-
-
-def load_metadata_standard(standard_arg: str) -> str:
-    """
-    Loads the metadata standard content.
-
-    It first checks if the argument is a key in the predefined METADATA_STANDARDS.
-    If not, it assumes the argument is a file path and tries to read it.
-    """
-    if standard_arg in METADATA_STANDARDS:
-        return METADATA_STANDARDS[standard_arg]
-    elif os.path.exists(standard_arg):
-        with open(standard_arg, 'r') as f:
-            return f.read()
-    else:
-        raise ValueError(
-            f"Metadata standard '{standard_arg}' not found as a predefined standard or as a valid file path."
-        )
+# from src.tui import run_tui  # Uncomment if TUI is implemented
 
 
 def main():

@@ -6,6 +6,7 @@ Each standard has:
 2. A Pydantic model (METADATA_SCHEMAS) - used for structured output validation
 """
 
+from pathlib import Path
 from typing import Dict, Optional
 from pydantic import BaseModel, Field
 
@@ -71,3 +72,19 @@ METADATA_STANDARDS = {
 }
 """
 }
+
+
+def load_metadata_standard(standard_arg: str) -> str:
+    """
+    Load metadata standard content from the registry or a file path.
+    """
+    if standard_arg in METADATA_STANDARDS:
+        return METADATA_STANDARDS[standard_arg]
+
+    standard_path = Path(standard_arg)
+    if standard_path.exists():
+        return standard_path.read_text()
+
+    raise ValueError(
+        f"Metadata standard '{standard_arg}' not found as a predefined standard or as a valid file path."
+    )
