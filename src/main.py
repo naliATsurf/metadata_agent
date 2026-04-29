@@ -27,6 +27,7 @@ from src.standards import METADATA_STANDARDS
 from src.topology import EXECUTION_TOPOLOGIES
 from src.orchestrator import Orchestrator
 from src.context import create_context
+from src.tui import run_tui
 
 
 def load_metadata_standard(standard_arg: str) -> str:
@@ -59,11 +60,17 @@ def main():
     parser.add_argument(
         "--source",
         type=str,
-        required=True,
+        required=False,
         help=(
             "Path to the data source. Can be: "
-            "a single CSV file, a directory of CSVs, or a SQLite database."
+            "a single CSV file, a directory of CSVs, or a SQLite database. "
+            "Required unless --tui is enabled."
         )
+    )
+    parser.add_argument(
+        "--tui",
+        action="store_true",
+        help="Launch the Textual terminal UI.",
     )
     
     # Configuration arguments
@@ -98,6 +105,10 @@ def main():
     )
     
     args = parser.parse_args()
+
+    if args.tui:
+        run_tui()
+        return
     
     # Setup logging
     logging.basicConfig(
@@ -106,6 +117,10 @@ def main():
     )
     
     # Validate source exists
+    if not args.source:
+        logging.error("Missing required argument --source (or use --tui).")
+        return
+
     if not os.path.exists(args.source):
         logging.error(f"Source not found: {args.source}")
         return
@@ -136,7 +151,12 @@ def main():
         return
     
     # Initialize and run the orchestrator
-    orchestrator = Orchestrator(topology_name=args.topology)
+    orchestrator = Orchestrator(
+        topology_name=args.topology,
+        model_name=args.model_name,
+        temperature=args.temperature,
+        provider=args.provider
+    )
     
     result = orchestrator.run(
         source=context,

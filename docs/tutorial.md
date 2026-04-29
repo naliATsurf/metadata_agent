@@ -280,7 +280,14 @@ metadata_standard = METADATA_STANDARDS['spatial_ecological']
 Create an orchestrator with your preferred execution topology:
 
 ```python
-orchestrator = Orchestrator(topology_name='fast')
+from src.config import LLM_PROVIDER, PLANNING_TEMPERATURE, get_default_model
+
+orchestrator = Orchestrator(
+    topology_name="fast",
+    model_name=get_default_model(),
+    temperature=PLANNING_TEMPERATURE,
+    provider=LLM_PROVIDER,
+)
 ```
 
 **Available topologies:**
@@ -457,17 +464,39 @@ The `result` object contains:
 Choose based on your needs:
 
 ```python
+from src.config import LLM_PROVIDER, PLANNING_TEMPERATURE, get_default_model
+
 # Quick testing - single player, no debate
-orchestrator = Orchestrator(topology_name='single')
+orchestrator = Orchestrator(
+    topology_name="single",
+    model_name=get_default_model(),
+    temperature=PLANNING_TEMPERATURE,
+    provider=LLM_PROVIDER,
+)
 
 # Fast extraction - 2 players, 1 debate round
-orchestrator = Orchestrator(topology_name='fast')
+orchestrator = Orchestrator(
+    topology_name="fast",
+    model_name=get_default_model(),
+    temperature=PLANNING_TEMPERATURE,
+    provider=LLM_PROVIDER,
+)
 
 # Balanced - 3 players, 2 debate rounds (recommended)
-orchestrator = Orchestrator(topology_name='default')
+orchestrator = Orchestrator(
+    topology_name="default",
+    model_name=get_default_model(),
+    temperature=PLANNING_TEMPERATURE,
+    provider=LLM_PROVIDER,
+)
 
 # Thorough - 4 players, 3 debate rounds
-orchestrator = Orchestrator(topology_name='thorough')
+orchestrator = Orchestrator(
+    topology_name="thorough",
+    model_name=get_default_model(),
+    temperature=PLANNING_TEMPERATURE,
+    provider=LLM_PROVIDER,
+)
 ```
 
 ### Player Types
@@ -491,7 +520,14 @@ The system uses specialized AI players:
 For initial exploration, use the `fast` topology to get quick results:
 
 ```python
-orchestrator = Orchestrator(topology_name='fast')
+from src.config import LLM_PROVIDER, PLANNING_TEMPERATURE, get_default_model
+
+orchestrator = Orchestrator(
+    topology_name="fast",
+    model_name=get_default_model(),
+    temperature=PLANNING_TEMPERATURE,
+    provider=LLM_PROVIDER,
+)
 ```
 
 Switch to `default` or `thorough` for production use.
@@ -555,6 +591,7 @@ from src.standards import METADATA_STANDARDS
 from src.context.context_factory import create_context
 from src.orchestrator.plan_executor import PlanExecutor
 from src.tools.context_tools import register_context
+from src.config import LLM_PROVIDER, PLANNING_TEMPERATURE, get_default_model
 
 # 1. Define source
 source = {"data": "path/to/data.csv"}
@@ -563,7 +600,12 @@ source = {"data": "path/to/data.csv"}
 context = create_context(source=source, name="my_dataset")
 
 # 3. Generate plan
-orchestrator = Orchestrator(topology_name="fast")
+orchestrator = Orchestrator(
+    topology_name="fast",
+    model_name=get_default_model(),
+    temperature=PLANNING_TEMPERATURE,
+    provider=LLM_PROVIDER,
+)
 plan = orchestrator.generate_plan(
     context=context,
     metadata_standard=METADATA_STANDARDS["spatial_ecological"]
