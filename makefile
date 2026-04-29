@@ -11,13 +11,20 @@ RUFF := $(VENV)/bin/ruff
 help:
 	@printf '%s\n' \
 		'Available targets:' \
-		'  make first-setup   - create the uv virtual environment' \
+		'  make uv-setup   - create the uv virtual environment' \
+		'  make activate   - print the command to activate the virtual environment' \
+		'  make uv-clean   - clean the uv virtual environment and related files'
 
-uv-setup: 
-	uv init --python $(PYTHON-VERSION)
-	uv python pin $(PYTHON-VERSION)
-	uv add -r requirements.txt
+uv-setup:
+	@if [ ! -f pyproject.toml ]; then \
+		uv init --python $(PYTHON_VERSION); \
+	fi
+	uv python pin $(PYTHON_VERSION)
 	uv sync
+
+activate: 
+	@printf '%s\n' \
+		'source $(VENV)/bin/activate'
 
 uv-clean: 
 	deactivate 2>/dev/null || true
@@ -25,6 +32,4 @@ uv-clean:
 	rm -rf pyproject.toml
 	rm -rf uv.lock
 
-activate: 
-	@printf '%s\n' \
-		'source $(VENV)/bin/activate'
+
