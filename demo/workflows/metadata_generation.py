@@ -9,14 +9,8 @@ from typing import Any
 import pandas as pd
 
 from src.context import create_context
-<<<<<<< Updated upstream
-from src.main import load_metadata_standard
-from src.orchestrator import Orchestrator
-from src.standards import METADATA_STANDARDS
-=======
 from src.orchestrator import Orchestrator
 from src.standards import METADATA_STANDARDS, load_metadata_standard
->>>>>>> Stashed changes
 from src.topology import EXECUTION_TOPOLOGIES
 
 
