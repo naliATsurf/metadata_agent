@@ -1,0 +1,32 @@
+[project]
+name = "metadata-agent"
+version = "0.1.0"
+description = "An agentic generative (LLM-based) tool for extracting metadata from datasets."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "langchain>=1.2.15",
+    "langchain-google-genai>=4.2.2",
+    "langchain-openai>=1.2.0",
+    "langgraph>=1.1.9",
+    "pandas>=3.0.2",
+    "pydantic>=2.13.3",
+    "python-dotenv>=1.2.2",
+    "ruff>=0.15.11",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+docs = [
+    "myst-parser>=5.0.0",
+    "pydata-sphinx-theme>=0.17.1",
+    "sphinx>=9.1.0",
+    "sphinx-autoapi>=3.8.0",
+    "sphinx-copybutton>=0.5.2",
+]

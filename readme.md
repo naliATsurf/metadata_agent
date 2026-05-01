@@ -18,3 +18,12 @@
 This repository contains an implementation of an agentic generative (LLM-based) tool for extracting metadata from datasets. It is built based on the [MAST4Science template](https://github.com/com3dian/multi_agent_system_template).
 
 <br>
+
+## Folder roles
+### [`src`](./src)
+
+Contains the core metadata extraction pipeline. 
+
+### [`demo`](./demo)
+
+Contains web applications for workflow demonstrations. 

@@ -6,3 +6,10 @@ pydantic
 python-dotenv
 pandas
 ruff  # For linting
+
+# sphinx
+sphinx
+pydata-sphinx-theme
+myst-parser
+sphinx-copybutton
+sphinx-autoapi
