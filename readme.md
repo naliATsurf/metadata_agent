@@ -19,15 +19,6 @@ This repository contains an implementation of an agentic generative (LLM-based) 
 
 <br>
 
-## Documentation
-Refer to [`docs`](./docs) for tutorials and architecture explanations. 
-
-The complete API reference is generated and rendered by Sphinx, which right now is not hosted. For local usage, run the following command to generate documentation. 
-```bash
-make docs
-```
-
-
 ## Folder roles
 ### [`src`](./src)
 
