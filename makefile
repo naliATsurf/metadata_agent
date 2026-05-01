@@ -48,3 +48,10 @@ docs: install-docs
 
 docs-clean:
 	rm -rf docs/_build docs/generated
+
+
+install-demo:
+	$(UV) sync --no-default-groups --group demo  # install dependencies for demo group
+	
+demo: install-demo
+	$(UV) run streamlit run demo/pages/metadata_generation.py

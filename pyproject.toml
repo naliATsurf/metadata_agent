@@ -13,7 +13,6 @@ dependencies = [
     "pydantic>=2.13.3",
     "python-dotenv>=1.2.2",
     "ruff>=0.15.11",
-    "streamlit>=1.56.0",
 ]
 
 [build-system]
@@ -24,6 +23,9 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [dependency-groups]
+demo = [
+    "streamlit>=1.57.0",
+]
 docs = [
     "myst-parser>=5.0.0",
     "pydata-sphinx-theme>=0.17.1",
