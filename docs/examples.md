@@ -1,4 +1,4 @@
-# Examples to get familiar with the project
+# Examples
 
 ## Environment setup
 - python: 3.11+

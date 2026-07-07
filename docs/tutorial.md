@@ -1,4 +1,4 @@
-# Metadata Agent Tutorial
+# Tutorial
 
 This tutorial walks you through using the Multi-Agent System (MAS) for automatic metadata extraction from datasets. We'll use a practical example with ecological data to demonstrate the full workflow.
 
