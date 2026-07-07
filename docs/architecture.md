@@ -1,4 +1,4 @@
-# Metadata Agent Architecture
+# Architecture
 
 This document describes the architecture of the multi-agent metadata extraction system.
 

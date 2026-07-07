@@ -5,9 +5,9 @@
 
 development/extension
 tutorial
+examples
+demo
 architecture
 modules
-demo
-examples
 reference/index
 ```

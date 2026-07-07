@@ -4,6 +4,11 @@ This example loads a dataset path from the environment, builds a context around
 that source, asks the orchestrator to create an extraction plan for the
 ``spatial_ecological`` metadata standard, executes the plan, and writes the
 resulting metadata JSON to disk.
+
+Run from the repository root as a module (running the file directly breaks
+the ``examples`` package import)::
+
+    python -m examples.generation
 """
 
 from src.orchestrator import Orchestrator
