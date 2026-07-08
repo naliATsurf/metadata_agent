@@ -157,12 +157,12 @@ class Player:
         ]) if self.tools else "No tools available."
         
         # Build context info section
-        is_multi_csv = context_info.get("is_multi_csv", False)
+        is_multi_resource = context_info.get("is_multi_resource", False)
         resources = context_info.get("resources", [])
         target_resources = target_resources or []
-        
-        if is_multi_csv:
-            ctx_info = f"Multi-CSV Context: {context_info.get('name', 'context')}\n"
+
+        if is_multi_resource:
+            ctx_info = f"Multi-resource Context: {context_info.get('name', 'context')}\n"
             ctx_info += f"Context type: {context_info.get('context_type', 'unknown')}\n"
             ctx_info += f"Resources: {', '.join(resources)}\n"
             if target_resources:
@@ -263,7 +263,7 @@ Execute this task and provide a comprehensive response. Include:
         
         # Get LLM analysis
         target_info = ", ".join(target_resources) if target_resources else (
-            "All resources" if is_multi_csv else "N/A"
+            "All resources" if is_multi_resource else "N/A"
         )
         llm_response = chain.invoke({
             "task": task,
@@ -277,7 +277,7 @@ Execute this task and provide a comprehensive response. Include:
             "tool_results": tool_results,
             "analysis": llm_response,
             "success": True,
-            "is_multi_csv": is_multi_csv,
+            "is_multi_resource": is_multi_resource,
         }
     
     def generate_initial_work(

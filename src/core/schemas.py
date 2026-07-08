@@ -69,6 +69,7 @@ class Plan(BaseModel):
         Best-effort validation that the inputs for each task are produced by a previous task.
 
         IMPORTANT:
+
         - This validator is **non-fatal**: it logs a warning on unmet dependencies
           but does NOT raise, to avoid hard failures on imperfect LLM plans.
         """

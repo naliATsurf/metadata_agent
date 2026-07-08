@@ -7,16 +7,31 @@ common data models used across the system.
 The ExecutionContext abstraction provides a unified interface for the "world"
 in which the agents operate. This can be:
 - A structured data source (database, CSVs)
+- A free-text corpus (plain text, Markdown)
 - A codebase (file system)
 - An API
 - A website
 - etc.
+
+The class hierarchy separates the universal contract from modality-specific
+data access:
+
+- ``ExecutionContext``: what every source can answer — which resources exist,
+  their basic properties (``ResourceInfo``), and how they relate.
+- ``TabularContext``: adds row/column access (``read_resource`` returning a
+  ``pd.DataFrame``). Implemented by CSV and SQLite contexts.
+- ``TextContext`` (see ``text_context.py``): adds document access
+  (``read_text``, ``iter_chunks``, ``search``).
+
+Tools that need a specific access style gate on the subclass
+(``isinstance(ctx, TabularContext)``) rather than assuming every context is
+tabular.
 """
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, ClassVar, Dict, Iterator, List, Optional, Union
 
 import pandas as pd
 
@@ -59,43 +74,127 @@ class FieldInfo:
 
 @dataclass
 class ResourceInfo:
-    """Information about a single resource in the execution context."""
+    """
+    Modality-agnostic information about a single resource.
+
+    Holds only what every source can report. Modality-specific metadata lives
+    on subclasses (:class:`TabularResourceInfo`, :class:`TextResourceInfo`),
+    each of which extends :meth:`to_dict` and :meth:`summary` — so consumers
+    (schema serialization, the orchestrator's context summary) render the
+    right vocabulary without branching on context type.
+    """
+
+    kind: ClassVar[str] = "resource"
 
     name: str
-    item_count: Optional[int] = None  # e.g., row_count
-    field_count: Optional[int] = None  # e.g., column_count
-    fields: List[FieldInfo] = field(default_factory=list)
-    primary_key: Optional[str] = None
-    location: Optional[str] = None  # For file-based or URL-based resources
+    item_count: Optional[int] = None  # rows, chunks, records, ...
+    location: Optional[str] = None  # for file-based or URL-based resources
     size_in_bytes: Optional[int] = None
     description: Optional[str] = None
 
-    @property
-    def field_names(self) -> List[str]:
-        return [f.name for f in self.fields]
-
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "kind": self.kind,
             "name": self.name,
             "item_count": self.item_count,
-            "field_count": self.field_count,
-            "fields": [f.to_dict() for f in self.fields],
-            "primary_key": self.primary_key,
             "location": self.location,
             "size_in_bytes": self.size_in_bytes,
             "description": self.description,
         }
 
+    def summary(self) -> str:
+        """One-line human/LLM-facing description of this resource."""
+        return f"{self.item_count} items" if self.item_count is not None else "resource"
+
+
+@dataclass
+class TabularResourceInfo(ResourceInfo):
+    """Resource metadata for row/column sources (CSV, SQLite)."""
+
+    kind: ClassVar[str] = "tabular"
+
+    fields: List[FieldInfo] = field(default_factory=list)
+    primary_key: Optional[Union[str, List[str]]] = None
+
+    @property
+    def field_names(self) -> List[str]:
+        return [f.name for f in self.fields]
+
+    @property
+    def field_count(self) -> int:
+        return len(self.fields)
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = super().to_dict()
+        data.update(
+            {
+                "field_count": self.field_count,
+                "fields": [f.to_dict() for f in self.fields],
+                "primary_key": self.primary_key,
+            }
+        )
+        return data
+
+    def summary(self) -> str:
+        preview = ", ".join(self.field_names[:5])
+        if len(self.field_names) > 5:
+            preview += "..."
+        return f"{self.item_count} rows, {self.field_count} fields ({preview})"
+
+
+@dataclass
+class TextResourceInfo(ResourceInfo):
+    """Resource metadata for free-text documents (plain text, Markdown)."""
+
+    kind: ClassVar[str] = "text"
+
+    char_count: Optional[int] = None
+    word_count: Optional[int] = None
+    line_count: Optional[int] = None
+    language: Optional[str] = None
+    encoding: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = super().to_dict()
+        data.update(
+            {
+                "char_count": self.char_count,
+                "word_count": self.word_count,
+                "line_count": self.line_count,
+                "language": self.language,
+                "encoding": self.encoding,
+            }
+        )
+        return data
+
+    def summary(self) -> str:
+        parts = [f"{self.item_count} chunks"]
+        if self.word_count is not None:
+            parts.append(f"{self.word_count} words")
+        if self.language:
+            parts.append(f"lang={self.language}")
+        return ", ".join(parts)
+
 
 @dataclass
 class RelationshipInfo:
-    """Information about a relationship between resources."""
+    """
+    Information about a relationship between resources.
+
+    Relationships are resource-level by default. ``from_field``/``to_field``
+    are the tabular refinement: for CSV/SQLite they name the joined columns
+    (foreign keys), but they stay ``None`` for relationships that hold between
+    whole resources — e.g. one document citing another, or two documents
+    sharing an entity. ``relationship_type`` is a free string, so besides the
+    tabular cardinalities ("one-to-one", "one-to-many", "many-to-many") it can
+    carry values like "cites" or "shared-entity".
+    """
 
     from_resource: str
-    from_field: str
     to_resource: str
-    to_field: str
-    relationship_type: str  # "one-to-one", "one-to-many", "many-to-many"
+    relationship_type: str
+    from_field: Optional[str] = None
+    to_field: Optional[str] = None
     confidence: float = 0.0
     is_verified: bool = False
     description: Optional[str] = None
@@ -112,11 +211,25 @@ class RelationshipInfo:
             "description": self.description,
         }
 
+    def describe(self) -> str:
+        """One-line rendering that degrades gracefully when fields are absent."""
+        if self.from_field and self.to_field:
+            endpoints = (
+                f"{self.from_resource}.{self.from_field} -> "
+                f"{self.to_resource}.{self.to_field}"
+            )
+        else:
+            endpoints = f"{self.from_resource} -> {self.to_resource}"
+        return f"{endpoints} ({self.relationship_type})"
+
 
 class ExecutionContext(ABC):
     """
     Abstract base class for all execution contexts.
-    Provides a unified interface for accessing the operational environment.
+
+    Holds only the modality-agnostic contract: resource inventory, resource
+    metadata, schema, and relationships. Data access methods live on
+    modality-specific subclasses such as :class:`TabularContext`.
     """
 
     def __init__(self, name: str = "context", description: Optional[str] = None):
@@ -142,24 +255,6 @@ class ExecutionContext(ABC):
         """Load metadata for a specific resource."""
         pass
 
-    @abstractmethod
-    def read_resource(
-        self,
-        resource: str,
-        fields: Optional[List[str]] = None,
-        limit: Optional[int] = None,
-        **kwargs,
-    ) -> pd.DataFrame:
-        """Read a resource into a pandas DataFrame."""
-        pass
-
-    @abstractmethod
-    def iter_resource(
-        self, resource: str, chunksize: int = 10000, **kwargs
-    ) -> Iterator[pd.DataFrame]:
-        """Iterate over a resource in chunks."""
-        pass
-
     @property
     def name(self) -> str:
         return self._name
@@ -169,12 +264,14 @@ class ExecutionContext(ABC):
         return self._description
 
     @property
-    def is_multi_csv(self) -> bool:
-        return self.context_type == ContextType.MULTI_CSV
+    def is_multi_resource(self) -> bool:
+        """True when the context holds more than one resource.
 
-    @property
-    def primary_resource(self) -> Optional[str]:
-        return self.resources[0] if self.resources else None
+        Modality-agnostic: true for multi-CSV, multi-table, and multi-document
+        corpora alike. Drives whether pipeline steps target resources
+        individually or operate context-wide.
+        """
+        return len(self.resources) > 1
 
     def get_resource_info(self, resource: str) -> ResourceInfo:
         if resource not in self.resources:
@@ -197,7 +294,7 @@ class ExecutionContext(ABC):
             "name": self.name,
             "description": self.description,
             "context_type": self.context_type.value,
-            "is_multi_csv": self.is_multi_csv,
+            "is_multi_resource": self.is_multi_resource,
             "resources": {
                 name: info.to_dict()
                 for name, info in self.get_all_resource_info().items()
@@ -212,15 +309,6 @@ class ExecutionContext(ABC):
 
     def _discover_relationships(self) -> List[RelationshipInfo]:
         return []
-
-    def get_field_values(
-        self, resource: str, field: str, limit: Optional[int] = None
-    ) -> List[Any]:
-        df = self.read_resource(resource, fields=[field])
-        values = df[field].dropna().unique().tolist()
-        if limit:
-            return values[:limit]
-        return values
 
     def validate(self) -> bool:
         if not self.resources:
@@ -237,7 +325,7 @@ class ExecutionContext(ABC):
             "description": self.description,
             "context_type": self.context_type.value,
             "resources": self.resources,
-            "is_multi_csv": self.is_multi_csv,
+            "is_multi_resource": self.is_multi_resource,
         }
 
     def __repr__(self) -> str:
@@ -251,7 +339,44 @@ class ExecutionContext(ABC):
     def __str__(self) -> str:
         resource_info = (
             f"{len(self.resources)} resource(s)"
-            if self.is_multi_csv
+            if len(self.resources) != 1
             else self.resources[0]
         )
         return f"{self.name} ({self.context_type.value}: {resource_info})"
+
+
+class TabularContext(ExecutionContext):
+    """
+    Abstract base class for row/column-oriented execution contexts.
+
+    Adds DataFrame-based access on top of the universal contract. CSV and
+    SQLite contexts implement this; tools that operate on columns (statistics,
+    missing values, temporal/spatial column detection) require it.
+    """
+
+    @abstractmethod
+    def read_resource(
+        self,
+        resource: str,
+        fields: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+        **kwargs,
+    ) -> pd.DataFrame:
+        """Read a resource into a pandas DataFrame."""
+        pass
+
+    @abstractmethod
+    def iter_resource(
+        self, resource: str, chunksize: int = 10000, **kwargs
+    ) -> Iterator[pd.DataFrame]:
+        """Iterate over a resource in chunks."""
+        pass
+
+    def get_field_values(
+        self, resource: str, field: str, limit: Optional[int] = None
+    ) -> List[Any]:
+        df = self.read_resource(resource, fields=[field])
+        values = df[field].dropna().unique().tolist()
+        if limit:
+            return values[:limit]
+        return values

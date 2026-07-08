@@ -9,14 +9,14 @@ from pathlib import Path
 
 from src.context.base_context import (
     ContextType,
-    ExecutionContext,
     FieldInfo,
     RelationshipInfo,
-    ResourceInfo,
+    TabularContext,
+    TabularResourceInfo,
 )
 
 
-class SQLiteContext(ExecutionContext):
+class SQLiteContext(TabularContext):
     """
     ExecutionContext implementation for SQLite databases.
     """
@@ -65,7 +65,7 @@ class SQLiteContext(ExecutionContext):
         self._resources_cache = [r for r in all_resources if r not in self._exclude_resources]
         return self._resources_cache
     
-    def _load_resource_info(self, resource: str) -> ResourceInfo:
+    def _load_resource_info(self, resource: str) -> TabularResourceInfo:
         with self._get_connection() as conn:
             cursor = conn.execute(f"PRAGMA table_info('{resource}')")
             pragma_info = cursor.fetchall()
@@ -107,10 +107,9 @@ class SQLiteContext(ExecutionContext):
             if pk_fields:
                 primary_key = list(pk_fields)[0] if len(pk_fields) == 1 else list(pk_fields)
         
-        return ResourceInfo(
+        return TabularResourceInfo(
             name=resource,
             item_count=item_count,
-            field_count=len(fields),
             fields=fields,
             primary_key=primary_key,
             location=self._db_path

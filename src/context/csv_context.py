@@ -8,14 +8,14 @@ from pathlib import Path
 
 from src.context.base_context import (
     ContextType,
-    ExecutionContext,
     FieldInfo,
     RelationshipInfo,
-    ResourceInfo,
+    TabularContext,
+    TabularResourceInfo,
 )
 
 
-class CSVContext(ExecutionContext):
+class CSVContext(TabularContext):
     """
     ExecutionContext implementation for CSV files.
     """
@@ -124,7 +124,7 @@ class CSVContext(ExecutionContext):
     def resources(self) -> List[str]:
         return list(self._resources.keys())
     
-    def _load_resource_info(self, resource: str) -> ResourceInfo:
+    def _load_resource_info(self, resource: str) -> TabularResourceInfo:
         """Load metadata for a CSV file."""
         file_path = self._resources[resource]
         kwargs = self._get_read_kwargs(resource)
@@ -156,10 +156,9 @@ class CSVContext(ExecutionContext):
                 sample_values=col_data.dropna().head(5).tolist()
             ))
         
-        return ResourceInfo(
+        return TabularResourceInfo(
             name=resource,
             item_count=item_count,
-            field_count=len(fields),
             fields=fields,
             location=file_path,
             size_in_bytes=file_size
@@ -214,7 +213,7 @@ class CSVContext(ExecutionContext):
         return self._detect_delimiter(file_path)
     
     def _discover_relationships(self) -> List[RelationshipInfo]:
-        if not self.is_multi_csv:
+        if not self.is_multi_resource:
             return []
         
         relationships = []

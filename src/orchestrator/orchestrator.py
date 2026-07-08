@@ -157,7 +157,7 @@ class Orchestrator:
         info_parts = [
             f"Context Name: {context.name}",
             f"Context Type: {context.context_type.value}",
-            f"Multi-CSV: {context.is_multi_csv}",
+            f"Resource Count: {len(context.resources)}",
             f"Resources: {', '.join(context.resources)}",
         ]
 
@@ -168,10 +168,7 @@ class Orchestrator:
         for resource in context.resources:
             try:
                 resource_info = context.get_resource_info(resource)
-                info_parts.append(
-                    f"  - {resource}: {resource_info.item_count} items, "
-                    f"{resource_info.field_count} fields ({', '.join(resource_info.field_names[:5])}{'...' if len(resource_info.field_names) > 5 else ''})"
-                )
+                info_parts.append(f"  - {resource}: {resource_info.summary()}")
             except Exception:
                 info_parts.append(f"  - {resource}: (info unavailable)")
 
@@ -179,10 +176,7 @@ class Orchestrator:
         if relationships:
             info_parts.append("\nDiscovered Relationships:")
             for rel in relationships[:5]:
-                info_parts.append(
-                    f"  - {rel.from_resource}.{rel.from_field} -> "
-                    f"{rel.to_resource}.{rel.to_field} ({rel.relationship_type})"
-                )
+                info_parts.append(f"  - {rel.describe()}")
             if len(relationships) > 5:
                 info_parts.append(f"  ... and {len(relationships) - 5} more")
 

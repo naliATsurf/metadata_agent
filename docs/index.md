@@ -3,7 +3,7 @@
 ```{toctree}
 :maxdepth: 1
 
-development/extension
+development/index
 tutorial
 examples
 demo

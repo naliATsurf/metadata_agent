@@ -50,11 +50,11 @@ def execute_parallel_node(state: StepExecutionState) -> Dict[str, Any]:
     workspace = state["workspace"]
     input_mappings = state["input_mappings"]
     
-    is_multi_csv = context_info.get("is_multi_csv", False)
-    
-    if is_multi_csv:
+    is_multi_resource = context_info.get("is_multi_resource", False)
+
+    if is_multi_resource:
         logging.info(
-            f"  Multi-CSV mode: {len(context_info.get('resources', []))} resources"
+            f"  Multi-resource mode: {len(context_info.get('resources', []))} resources"
         )
         if target_resources:
             logging.info(f"  Target resources: {target_resources}")

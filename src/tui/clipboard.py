@@ -39,10 +39,10 @@ def app_quit_bindings() -> List[tuple[str, str, str]]:
 def copy_paste_bindings() -> List["Binding"]:
     """OS-appropriate copy/paste shortcuts layered on Textual's native Ctrl+C/V.
 
-    Linux: add Ctrl+Shift+C / Ctrl+Shift+V (the terminal copy/paste convention).
-           Note: many terminals grab Ctrl+Shift+C for their own copy and never
-           forward it to the app, in which case plain Ctrl+C still works.
-    macOS/Windows: nothing extra — rely on native Cmd+C / Ctrl+C handling.
+    - Linux: add Ctrl+Shift+C / Ctrl+Shift+V (the terminal copy/paste
+      convention). Note: many terminals grab Ctrl+Shift+C for their own copy
+      and never forward it to the app, in which case plain Ctrl+C still works.
+    - macOS/Windows: nothing extra — rely on native Cmd+C / Ctrl+C handling.
     """
     from textual.binding import Binding
 

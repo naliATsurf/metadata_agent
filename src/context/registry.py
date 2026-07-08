@@ -11,6 +11,9 @@ EXTENSION_MAP = {
     ".csv": ContextType.SINGLE_CSV,
     ".tsv": ContextType.SINGLE_CSV,
     ".txt": ContextType.TEXT,
+    ".md": ContextType.TEXT,
+    ".markdown": ContextType.TEXT,
+    ".rst": ContextType.TEXT,
     ".sqlite": ContextType.SQLITE,
     ".sqlite3": ContextType.SQLITE,
     ".db": ContextType.SQLITE,
@@ -26,3 +29,8 @@ def detect_type_from_extension(path: str) -> ContextType:
 def is_csv_type(context_type: ContextType) -> bool:
     """Return True if a context type is a CSV variant."""
     return context_type in {ContextType.SINGLE_CSV, ContextType.MULTI_CSV}
+
+
+def is_text_type(context_type: ContextType) -> bool:
+    """Return True if a context type is text-based."""
+    return context_type == ContextType.TEXT

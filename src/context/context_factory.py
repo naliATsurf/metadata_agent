@@ -8,8 +8,13 @@ import glob
 
 from src.context.base_context import ContextType, ExecutionContext
 from src.context.csv_context import CSVContext
-from src.context.registry import detect_type_from_extension, is_csv_type
+from src.context.registry import (
+    detect_type_from_extension,
+    is_csv_type,
+    is_text_type,
+)
 from src.context.sqlite_context import SQLiteContext
+from src.context.text_context import TextContext
 
 
 class ContextFactory:
@@ -91,11 +96,14 @@ class ContextFactory:
             expanded_paths.append(p)
         
         context_type = cls._detect_type_from_extension(expanded_paths[0])
-        
+        resources = {Path(p).stem: p for p in expanded_paths}
+
         if is_csv_type(context_type):
-            resources = {Path(p).stem: p for p in expanded_paths}
             return CSVContext(resources, name=name, description=description, **kwargs)
-        
+
+        if is_text_type(context_type):
+            return TextContext(resources, name=name, description=description, **kwargs)
+
         raise ValueError(
             f"List of {context_type.value} files not supported."
         )
@@ -122,9 +130,12 @@ class ContextFactory:
         
         if is_csv_type(context_type):
             return CSVContext(resources, name=name, description=description, **kwargs)
-        
+
+        if is_text_type(context_type):
+            return TextContext(resources, name=name, description=description, **kwargs)
+
         raise ValueError(
-            f"Dict of {context_type.value} files not supported as multi_csv context."
+            f"Dict of {context_type.value} files not supported."
         )
     
     @classmethod
@@ -142,17 +153,26 @@ class ContextFactory:
         
         search_pattern = os.path.join(dir_path, pattern)
         files = glob.glob(search_pattern)
-        
+
+        # Default pattern is CSV-oriented; fall back to text files when the
+        # directory holds none.
+        if not files and pattern == "*.csv":
+            files = [
+                os.path.join(dir_path, f)
+                for f in sorted(os.listdir(dir_path))
+                if is_text_type(detect_type_from_extension(f))
+            ]
+
         if not files:
             raise FileNotFoundError(
                 f"No files matching '{pattern}' found in {dir_path}"
             )
-        
+
         resources = {Path(f).stem: f for f in files}
-        
-        if pattern.endswith('.csv') or pattern.endswith('.tsv'):
-            return CSVContext(resources, name=name, description=description, **kwargs)
-        
+
+        if is_text_type(cls._detect_type_from_extension(files[0])):
+            return TextContext(resources, name=name, description=description, **kwargs)
+
         return CSVContext(resources, name=name, description=description, **kwargs)
     
     @classmethod
@@ -172,10 +192,13 @@ class ContextFactory:
         """Create a specific ExecutionContext type."""
         if is_csv_type(context_type):
             return CSVContext(path, name=name, description=description, **kwargs)
-        
+
         elif context_type == ContextType.SQLITE:
             return SQLiteContext(path, name=name, description=description, **kwargs)
-        
+
+        elif context_type == ContextType.TEXT:
+            return TextContext(path, name=name, description=description, **kwargs)
+
         else:
             return CSVContext(path, name=name, description=description, **kwargs)
 

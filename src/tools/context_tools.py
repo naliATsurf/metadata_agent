@@ -7,7 +7,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 from langchain_core.tools import tool
-from src.context.base_context import ContextType
+from src.context.base_context import ContextType, TabularContext
+from src.context.text_context import TextContext
 
 _context_registry: Dict[str, Any] = {}
 
@@ -32,6 +33,17 @@ def clear_registry():
     _context_registry.clear()
 
 
+def _get_tabular_context(key: str) -> TabularContext:
+    """Get a context from the registry, requiring row/column access."""
+    ctx = get_context(key)
+    if not isinstance(ctx, TabularContext):
+        raise TypeError(
+            f"This tool requires a tabular context (CSV/SQLite), but "
+            f"'{key}' is a '{ctx.context_type.value}' context."
+        )
+    return ctx
+
+
 @tool
 def get_context_overview(context_key: str) -> Dict[str, Any]:
     """
@@ -40,22 +52,18 @@ def get_context_overview(context_key: str) -> Dict[str, Any]:
     try:
         ctx = get_context(context_key)
 
-        resources_info = {}
-        for resource in ctx.resources:
-            info = ctx.get_resource_info(resource)
-            resources_info[resource] = {
-                "item_count": info.item_count,
-                "field_count": info.field_count,
-                "fields": info.field_names,
-                "primary_key": info.primary_key,
-            }
+        # info.to_dict() is polymorphic: tabular resources report fields and
+        # keys, text resources report word/char counts — no branching here.
+        resources_info = {
+            resource: ctx.get_resource_info(resource).to_dict()
+            for resource in ctx.resources
+        }
 
         relationships = [r.to_dict() for r in ctx.get_relationships()]
 
         return {
             "name": ctx.name,
             "context_type": ctx.context_type.value,
-            "is_multi_csv": ctx.is_multi_csv,
             "resource_count": len(ctx.resources),
             "resources": resources_info,
             "relationships": relationships,
@@ -119,10 +127,10 @@ def get_item_count(context_key: str, resource: str = "") -> int | str:
 @tool
 def get_field_names(context_key: str, resource: str = "") -> List[str]:
     """
-    Get the field names for a resource.
+    Get the field names for a resource. Tabular contexts only.
     """
     try:
-        ctx = get_context(context_key)
+        ctx = _get_tabular_context(context_key)
         resource = resource or ctx.resources[0]
         info = ctx.get_resource_info(resource)
         return info.field_names
@@ -133,10 +141,10 @@ def get_field_names(context_key: str, resource: str = "") -> List[str]:
 @tool
 def get_field_types(context_key: str, resource: str = "") -> Dict[str, str]:
     """
-    Get data types for all fields in a resource.
+    Get data types for all fields in a resource. Tabular contexts only.
     """
     try:
-        ctx = get_context(context_key)
+        ctx = _get_tabular_context(context_key)
         resource = resource or ctx.resources[0]
         info = ctx.get_resource_info(resource)
         return {field.name: field.dtype for field in info.fields}
@@ -155,7 +163,10 @@ def get_sample_items(context_key: str, resource: str = "", n: int = 5) -> str:
     try:
         ctx = get_context(context_key)
         resource = resource or ctx.resources[0]
-        df = ctx.read_resource(resource, limit=n)
+        if isinstance(ctx, TextContext):
+            chunks = ctx.get_chunks(resource)[:n]
+            return "\n\n".join(chunk.text for chunk in chunks)
+        df = _get_tabular_context(context_key).read_resource(resource, limit=n)
         return df.to_string()
     except Exception as e:
         return f"Error: {str(e)}"
@@ -167,7 +178,7 @@ def get_field_statistics(context_key: str, resource: str = "") -> Dict[str, Any]
     Get statistics for all fields in a resource.
     """
     try:
-        ctx = get_context(context_key)
+        ctx = _get_tabular_context(context_key)
         resource = resource or ctx.resources[0]
         df = ctx.read_resource(resource)
         return df.describe(include="all").to_dict()
@@ -181,7 +192,7 @@ def get_missing_values(context_key: str, resource: str = "") -> Dict[str, int | 
     Get count of missing values per field.
     """
     try:
-        ctx = get_context(context_key)
+        ctx = _get_tabular_context(context_key)
         resource = resource or ctx.resources[0]
         df = ctx.read_resource(resource)
         return df.isnull().sum().to_dict()
@@ -197,7 +208,7 @@ def get_unique_values(
     Get unique values from a specific field.
     """
     try:
-        ctx = get_context(context_key)
+        ctx = _get_tabular_context(context_key)
         values = ctx.get_field_values(resource, field, limit=limit)
         return values
     except Exception as e:
@@ -421,10 +432,10 @@ def detect_temporal_columns(context_key: str, resource: str = "") -> Dict[str, A
     Returns column names, detected types, and temporal characteristics.
     """
     try:
-        ctx = get_context(context_key)
+        ctx = _get_tabular_context(context_key)
         resource = resource or ctx.resources[0]
         df = ctx.read_resource(resource)
-        
+
         temporal_columns = {}
         
         for col in df.columns:
@@ -464,7 +475,7 @@ def analyze_temporal_column(
     Returns date range, granularity, format patterns, and temporal coverage.
     """
     try:
-        ctx = get_context(context_key)
+        ctx = _get_tabular_context(context_key)
         df = ctx.read_resource(resource)
         
         if column not in df.columns:
@@ -548,7 +559,7 @@ def detect_spatial_columns(context_key: str, resource: str = "") -> Dict[str, An
     Use ``get_spatial_extent_from_tuple_column`` for extent on those columns.
     """
     try:
-        ctx = get_context(context_key)
+        ctx = _get_tabular_context(context_key)
         resource = resource or ctx.resources[0]
         df = ctx.read_resource(resource)
 
@@ -637,7 +648,7 @@ def analyze_spatial_column(
     Returns coordinate ranges, geometry types, and spatial extent information.
     """
     try:
-        ctx = get_context(context_key)
+        ctx = _get_tabular_context(context_key)
         df = ctx.read_resource(resource)
         
         if column not in df.columns:
@@ -708,9 +719,9 @@ def get_spatial_extent(
     Returns min/max coordinates and center point.
     """
     try:
-        ctx = get_context(context_key)
+        ctx = _get_tabular_context(context_key)
         df = ctx.read_resource(resource)
-        
+
         if lat_column not in df.columns:
             return {"error": f"Column '{lat_column}' not found"}
         if lon_column not in df.columns:
@@ -779,7 +790,7 @@ def get_spatial_extent_from_tuple_column(
         if order not in ("lon_lat", "lat_lon"):
             return {"error": f"Invalid tuple_order '{tuple_order}'; use lon_lat or lat_lon"}
 
-        ctx = get_context(context_key)
+        ctx = _get_tabular_context(context_key)
         df = ctx.read_resource(resource)
         if column not in df.columns:
             return {"error": f"Column '{column}' not found"}
@@ -851,9 +862,9 @@ def get_temporal_extent(
     Returns time range, coverage statistics, and temporal distribution info.
     """
     try:
-        ctx = get_context(context_key)
+        ctx = _get_tabular_context(context_key)
         df = ctx.read_resource(resource)
-        
+
         if time_column not in df.columns:
             return {"error": f"Column '{time_column}' not found"}
         

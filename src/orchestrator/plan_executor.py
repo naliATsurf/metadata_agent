@@ -131,7 +131,7 @@ class PlanExecutor:
             logging.info(f"Rationale: {step_dict.get('rationale', 'None')}")
             if target_resources:
                 logging.info(f"Target resources: {target_resources}")
-            elif context.is_multi_csv:
+            elif context.is_multi_resource:
                 logging.info("Target resources: ALL (context-level)")
 
             try:
@@ -193,7 +193,7 @@ class PlanExecutor:
                 workspace.update(produced_artifacts)
 
                 # Collect per-resource metadata
-                if context.is_multi_csv and target_resources:
+                if context.is_multi_resource and target_resources:
                     for resource in target_resources:
                         if resource not in resource_metadata:
                             resource_metadata[resource] = {}
@@ -260,7 +260,7 @@ class PlanExecutor:
         logging.info("PLAN EXECUTION COMPLETE")
         logging.info(f"Steps completed: {successful_steps}/{len(plan_steps)}")
         logging.info(f"Overall success: {overall_success}")
-        if context.is_multi_csv:
+        if context.is_multi_resource:
             logging.info(f"Resources: {context.resources}")
             logging.info(f"Relationships: {len(relationships)}")
         logging.info("=" * 60)
@@ -331,7 +331,7 @@ class PlanExecutor:
                     return value
         
         # Legacy fallback: organize artifacts by resource
-        if context.is_multi_csv:
+        if context.is_multi_resource:
             # Organize artifacts by resource
             resource_artifacts: Dict[str, Dict[str, Any]] = {}
             context_level: Dict[str, Any] = {}

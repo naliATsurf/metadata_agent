@@ -6,7 +6,7 @@ PYTHON-VERSION := 3.11
 PYTHON := $(VENV)/bin/python
 RUFF := $(VENV)/bin/ruff
 
-.PHONY: help uv-setup uv-clean activate install-docs docs docs-update docs-clean install-demo demo docker-install-demo docker-run-demo docker-build docker-up docker-down docker-logs lint compile test ci
+.PHONY: help uv-setup uv-clean activate docs-install docs docs-rebuild docs-update docs-clean install-demo demo docker-install-demo docker-run-demo docker-build docker-up docker-down docker-logs lint compile test ci
 
 help:
 	@printf '%s\n' \
@@ -14,9 +14,10 @@ help:
 		'  make uv-setup   - create the uv virtual environment and install only basic dependencies' \
 		'  make activate   - print the command to activate the virtual environment' \
 		'  make uv-clean   - clean the uv virtual environment and uv lock, keep pyproject.toml' \
-		'  make install-docs - build packages from . and install basic dependencies plus those under the docs group' \
-		'  make docs       - build the documentation and open it in the browser' \
-		'  make docs-update - update the documentation' \
+		'  make docs-install - install basic dependencies plus those under the docs group' \
+		'  make docs       - incrementally build the documentation and open it in the browser' \
+		'  make docs-rebuild - rebuild all documentation from a fresh Sphinx environment' \
+		'  make docs-update - watch docs and incrementally rebuild on changes' \
 		'  make docs-clean - clean the generated documentation files' \
 		'  make demo       - install demo dependencies and launch Streamlit locally' \
 		'  make docker-install-demo - install locked demo dependencies for Docker' \
@@ -54,13 +55,17 @@ docs-install:
 	$(UV) pip install -e .
 	$(UV) sync --no-default-groups --group docs  # install dependencies for docs group
 
-docs: docs-install
+docs:
 	$(UV) run sphinx-build -b html docs docs/_build/html
 	open docs/_build/html/index.html
 
+docs-rebuild:
+	$(UV) run sphinx-build -E -a -b html docs docs/_build/html
+	open docs/_build/html/index.html
+
 docs-update:
-	$(UV) run sphinx-build -b html docs docs/_build/html
-	
+	$(UV) run sphinx-autobuild docs docs/_build/html
+
 docs-clean:
 	rm -rf docs/_build docs/generated
 
@@ -109,4 +114,3 @@ tui:
 
 tracking-install: 
 	$(UV) sync --no-default-groups --group tracking
-

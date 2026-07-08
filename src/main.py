@@ -121,7 +121,7 @@ def main():
     logging.info(f"Context Name: {context.name}")
     logging.info(f"Context Type: {context.context_type.value}")
     logging.info(f"Resources: {context.resources}")
-    logging.info(f"Multi-CSV: {context.is_multi_csv}")
+    logging.info(f"Multi-resource: {context.is_multi_resource}")
     logging.info(f"Topology: {args.topology}")
     logging.info(f"Metadata Standard: {args.metadata_standard}")
     logging.info("=" * 60)
