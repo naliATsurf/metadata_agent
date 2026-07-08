@@ -1,3 +1,4 @@
+"""Connection tests for the SURF API."""
 import os
 import unittest
 
@@ -9,9 +10,12 @@ load_dotenv()
 
 
 class TestSurfConnection(unittest.TestCase):
+    """Verify basic authenticated connectivity to SURF API endpoints."""
+
     def setUp(self):
+        """Load SURF API configuration and prepare request headers."""
         self.api_key = os.getenv("SURF_API_KEY")
-        self.base_url = os.getenv("SURF_API_BASE", "https://willma.surf.nl/api/v0")
+        self.base_url = os.getenv("SURF_API_BASE")
 
         if not self.api_key:
             self.skipTest("SURF_API_KEY is not set")
@@ -22,6 +26,7 @@ class TestSurfConnection(unittest.TestCase):
         }
 
     def test_can_list_text_sequences(self):
+        """Confirm the API returns at least one text sequence with metadata."""
         response = requests.get(
             f"{self.base_url}/sequences",
             headers=self.headers,
