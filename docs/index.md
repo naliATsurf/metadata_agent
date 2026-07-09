@@ -4,6 +4,7 @@
 :maxdepth: 1
 
 development/index
+philosophy
 tutorial
 examples
 demo
