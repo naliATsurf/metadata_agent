@@ -121,12 +121,36 @@ than a neutral party. Multi-agent debate derives most of its value from
 than to genuine adversarial review. The role diversity in this system is real,
 but it lives *across* steps, not within them.
 
-Relatedly, the tools a player runs are not chosen by the model. Every tool the
-role owns is fired, and the results are placed into the prompt. So the LLM is an
-interpreter of a fixed evidence bundle, not an agent selecting instruments. This
-is a defensible trade — it is more predictable and more auditable — but it means
-"agentic" here describes the plan-and-debate layer, not the tool layer.
+The first assumption — *tools observe, models interpret* — holds, but the
+observing half is currently narrower than the tool surface suggests.
 
-Both are places where the architecture leaves room to grow: heterogeneous player
-pools within a step, an independent synthesizer, and model-driven tool selection
-are all additive changes, not rewrites.
+The tools a player runs are not chosen by the model. Every tool the role owns is
+fired, and the arguments are guessed by matching the tool's *name* against a
+fixed keyword list. So the LLM is an interpreter of a fixed evidence bundle, not
+an agent selecting instruments. Predictability and auditability are the intended
+trade, and they are real. But the mechanism cannot pass an argument it did not
+anticipate: any tool needing more than a resource name — a column, a field, a
+coordinate pair — is never successfully called. In practice this means every
+tool that *detects* something works, and every tool that would then *analyze*
+what was detected fails. The evidence bundle has a ceiling, and the reasoning
+layer cannot raise it by asking better questions.
+
+That is the sharper form of the point. The tool layer is not merely
+non-agentic; it is unable to express half of what the tools can do. A player
+whose role is defined by parameterized analysis is, structurally, unable to
+perform it.
+
+A parallel gap sits in the modality gating. The tool-compatibility table that
+the planner and validator consult recognizes only CSV contexts, so the
+modality-agnostic tools — the ones the context abstraction exists to enable —
+are never offered to the text and database contexts they were written for. The
+abstraction is sound; the table in front of it has not caught up.
+
+None of this is fatal to the design, and that is the point worth keeping:
+heterogeneous player pools within a step, an independent synthesizer,
+model-driven tool selection, and a modality-aware compatibility table are all
+additive changes. The architecture leaves room for each. What the current state
+shows is that a clean abstraction does not by itself deliver its own benefits —
+the layers above it have to actually ask.
+
+*(Both gaps are measured and documented in the 2026-07-09 development log.)*
