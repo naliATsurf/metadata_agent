@@ -68,12 +68,12 @@ str/list/dict/existing-`ExecutionContext` and:
 
 ### How it's used downstream
 
-The orchestrator calls `create_context(source)` once and gets back one object
-with a `context_type`. Everything branches off that: which planning prompt to
-use (single vs. multi), which tools are compatible
-(`filter_tools_by_context_type` in `src/tools/context_tools.py` checks against
-`ContextType`), and whether `relationship_analyst` gets added to the player
-pool.
+The orchestrator calls `create_context(source)` once and gets back one object.
+Everything follows from it: which planning prompt to use (single vs. multi),
+whether `relationship_analyst` gets added to the player pool, and which tools
+are available — `tools_for(context)` in `src/tools/base.py` offers a tool iff
+the context satisfies the capability that tool declared, so there is no
+context-type table to keep in sync.
 
 This is the cleanest extension point in the codebase — adding a new source
 type means writing one class here plus a registry entry, not touching the

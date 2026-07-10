@@ -107,11 +107,13 @@ PLANNING_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE_PLANNING", "0.0"))
 # Can be overridden by environment variable: LLM_TEMPERATURE_PLAYER  
 PLAYER_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE_PLAYER", "0.3"))
 
-# Player tool execution: "llm" = model chooses tools and arguments (bind_tools loop);
-# "eager" = invoke all compatible tools deterministically (legacy).
-PLAYER_TOOL_EXECUTION_MODE = os.getenv("PLAYER_TOOL_EXECUTION_MODE", "eager")
+# Player tool execution.
+#   "investigate" — after the deterministic survey, let the model call the tools
+#                   whose arguments only it can supply (column names, and so on).
+#   "survey"      — survey only; tools needing model-chosen arguments never run.
+PLAYER_TOOL_EXECUTION_MODE = os.getenv("PLAYER_TOOL_EXECUTION_MODE", "investigate")
 
-# Max model↔tool rounds per task when tool_execution_mode is "llm".
+# Max model↔tool rounds per task during the investigation phase.
 PLAYER_MAX_TOOL_ITERATIONS = int(os.getenv("PLAYER_MAX_TOOL_ITERATIONS", "8"))
 
 

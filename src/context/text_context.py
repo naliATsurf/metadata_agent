@@ -161,6 +161,10 @@ class TextContext(ExecutionContext):
         """Return all chunks of a resource as a list."""
         return list(self.iter_chunks(resource))
 
+    def preview(self, resource: str, n: int = 5) -> str:
+        """Render the first ``n`` chunks as text."""
+        return "\n\n".join(chunk.text for chunk in self.get_chunks(resource)[:n])
+
     def search(
         self,
         query: str,

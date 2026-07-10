@@ -12,14 +12,52 @@ it can use to accomplish tasks.
 Uses the unified :class:`~src.context.ExecutionContext` abstraction for all data
 access.
 """
+import logging
 from typing import List, Dict, Any, Optional, Union, Type
 
 from pydantic import BaseModel
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-from src.config import LLM_PROVIDER, PLAYER_TEMPERATURE, create_llm
+from src.config import (
+    LLM_PROVIDER,
+    PLAYER_MAX_TOOL_ITERATIONS,
+    PLAYER_TEMPERATURE,
+    PLAYER_TOOL_EXECUTION_MODE,
+    create_llm,
+)
+from src.context.base_context import ExecutionContext
+from src.tools.base import is_auto_fireable, is_resource_scoped, resolve_toolsets
+
+
+def _format_args(args: Dict[str, Any]) -> str:
+    """Render tool-call arguments for use as a result key."""
+    return ", ".join(f"{k}={v!r}" for k, v in args.items() if k != "context_key")
+
+
+def _describe_context(
+    context_info: Dict[str, Any], target_resources: List[str], context_key: str
+) -> str:
+    """Build the context preamble shown to the player."""
+    resources = context_info.get("resources", [])
+    lines = [
+        f"Context: {context_info.get('name', 'context')}",
+        f"Context type: {context_info.get('context_type', 'unknown')}",
+    ]
+
+    if context_info.get("is_multi_resource", False):
+        lines.append(f"Resources: {', '.join(resources)}")
+        if target_resources:
+            lines.append(
+                f"Target resources for this step: {', '.join(target_resources)}"
+            )
+    else:
+        lines.append(f"Resource: {resources[0] if resources else 'unknown'}")
+
+    lines.append(f"\nTo use tools, pass context_key='{context_key}'")
+    return "\n".join(lines)
 
 
 class Player:
@@ -84,6 +122,106 @@ class Player:
         manifest += f"  Tools:\n" + "\n".join([f"    - {task}" for task in tasks])
         return manifest
     
+    def _survey(
+        self,
+        context_key: str,
+        resources: List[str],
+    ) -> Dict[str, Any]:
+        """Run every tool that needs no arguments beyond a resource name.
+
+        Deterministic and cheap: this is the evidence bundle the player always
+        gathers. Resource-scoped tools run once per target resource; the rest
+        run once for the whole context.
+        """
+        results: Dict[str, Any] = {}
+
+        for tool in self.tools:
+            if not is_auto_fireable(tool):
+                continue
+
+            if is_resource_scoped(tool):
+                for resource in resources:
+                    key = f"{resource}:{tool.name}"
+                    try:
+                        results[key] = tool.invoke(
+                            {"context_key": context_key, "resource": resource}
+                        )
+                    except Exception as e:
+                        results[key] = f"Error: {e}"
+            else:
+                try:
+                    results[tool.name] = tool.invoke({"context_key": context_key})
+                except Exception as e:
+                    results[tool.name] = f"Error: {e}"
+
+        return results
+
+    def _investigate(
+        self,
+        task: str,
+        context_key: str,
+        survey: Dict[str, Any],
+        tools: List[BaseTool],
+    ) -> Dict[str, Any]:
+        """Let the model call the tools whose arguments only it can supply.
+
+        Tools needing a column or field name cannot be fired blindly. The survey
+        is passed in as the seed, so the model already knows which columns exist
+        before choosing what to analyze.
+        """
+        try:
+            llm_with_tools = self.llm.bind_tools(tools)
+        except (AttributeError, NotImplementedError) as e:
+            logging.warning(
+                "Provider does not support tool calling (%s); "
+                "skipping investigation phase for '%s'.", e, self.name
+            )
+            return {}
+
+        by_name = {tool.name: tool for tool in tools}
+        messages: List[Any] = [
+            SystemMessage(
+                content=(
+                    f"You are {self.name}. {self.role_prompt}\n\n"
+                    f"Call the available tools to investigate the task. Always pass "
+                    f"context_key='{context_key}'. Use the survey below to choose "
+                    f"concrete column and field names — never guess them. Stop "
+                    f"calling tools once you have what the task needs."
+                )
+            ),
+            HumanMessage(
+                content=f"Task: {task}\n\nSurvey of the context:\n{survey}"
+            ),
+        ]
+
+        results: Dict[str, Any] = {}
+        for _ in range(PLAYER_MAX_TOOL_ITERATIONS):
+            response = llm_with_tools.invoke(messages)
+            messages.append(response)
+
+            tool_calls = getattr(response, "tool_calls", None)
+            if not tool_calls:
+                break
+
+            for call in tool_calls:
+                tool = by_name.get(call["name"])
+                if tool is None:
+                    output = f"Error: unknown tool '{call['name']}'"
+                else:
+                    # The key is ours to supply, never the model's to invent.
+                    args = {**call["args"], "context_key": context_key}
+                    try:
+                        output = tool.invoke(args)
+                    except Exception as e:
+                        output = f"Error: {e}"
+
+                results[f"{call['name']}({_format_args(call['args'])})"] = output
+                messages.append(
+                    ToolMessage(content=str(output), tool_call_id=call["id"])
+                )
+
+        return results
+
     def execute_task(
         self,
         task: str,
@@ -95,42 +233,13 @@ class Player:
     ) -> Dict[str, Any]:
         """
         Execute a specific task using available tools.
-        
-        This is the main execution method where the player uses its tools
-        to accomplish a task from the plan.
 
-        Prompt used:
-            System:
-                You are {player_name}. {role_prompt}
+        Tools are gathered in two phases. The *survey* fires every tool whose
+        arguments the runner can supply on its own. The *investigation* then
+        offers the remaining tools — the ones needing a column or field name —
+        to the model, seeded with the survey so it can choose real arguments.
+        The player finally reasons over the combined evidence.
 
-                You have access to the following tools:
-                {tool_descriptions}
-
-                Your task is to analyze the context and provide a detailed
-                response. When you need to use a tool, describe what you would
-                do and provide your analysis.
-
-                {context_info}
-
-                For multi-CSV contexts (multiple CSV resources), consider:
-                - How resources might relate to each other
-                - Common fields that could be foreign keys
-                - Data integrity across resources
-
-            Human:
-                Task: {task}
-
-                Target resources for this step: {target_resources}
-
-                Input context from previous steps:
-                {input_context}
-
-                Execute this task and provide a comprehensive response.
-                Include:
-                1. Your approach to the task
-                2. Any relevant observations or findings
-                3. The result of your analysis
-        
         Args:
             task: The task description to execute
             context_key: Key for the ExecutionContext in the tool registry
@@ -138,55 +247,44 @@ class Player:
             workspace: Dictionary of artifacts from previous steps
             inputs: Mapping of parameter names to artifact names in workspace
             target_resources: List of specific resources this task targets
-            
+
         Returns:
             Dictionary containing the execution result and any produced artifacts
         """
-        # Resolve input artifacts from workspace
-        resolved_inputs = {}
-        for param_name, artifact_name in inputs.items():
-            if artifact_name in workspace:
-                resolved_inputs[param_name] = workspace[artifact_name]
-            else:
-                resolved_inputs[param_name] = f"[MISSING: {artifact_name}]"
-        
-        # Build the execution prompt
-        tool_descriptions = "\n".join([
-            f"- {tool.name}: {tool.description}" 
-            for tool in self.tools
-        ]) if self.tools else "No tools available."
-        
-        # Build context info section
+        resolved_inputs = {
+            param_name: workspace.get(artifact_name, f"[MISSING: {artifact_name}]")
+            for param_name, artifact_name in inputs.items()
+        }
+
         is_multi_resource = context_info.get("is_multi_resource", False)
         resources = context_info.get("resources", [])
         target_resources = target_resources or []
+        resources_to_analyze = target_resources or resources
 
-        if is_multi_resource:
-            ctx_info = f"Multi-resource Context: {context_info.get('name', 'context')}\n"
-            ctx_info += f"Context type: {context_info.get('context_type', 'unknown')}\n"
-            ctx_info += f"Resources: {', '.join(resources)}\n"
-            if target_resources:
-                ctx_info += f"Target resources for this step: {', '.join(target_resources)}\n"
-            ctx_info += f"\nTo use tools, pass context_key='{context_key}'"
-        else:
-            resource_name = resources[0] if resources else "unknown"
-            ctx_info = f"Context: {context_info.get('name', 'context')}\n"
-            ctx_info += f"Context type: {context_info.get('context_type', 'unknown')}\n"
-            ctx_info += f"Resource: {resource_name}\n"
-            ctx_info += f"\nTo use tools, pass context_key='{context_key}'"
-        
+        tool_results = self._survey(context_key, resources_to_analyze)
+
+        investigable = [t for t in self.tools if not is_auto_fireable(t)]
+        if investigable and PLAYER_TOOL_EXECUTION_MODE == "investigate":
+            tool_results.update(
+                self._investigate(task, context_key, tool_results, investigable)
+            )
+
+        ctx_info = _describe_context(context_info, target_resources, context_key)
+        tool_descriptions = "\n".join(
+            f"- {tool.name}: {tool.description}" for tool in self.tools
+        ) or "No tools available."
+
         prompt = ChatPromptTemplate.from_messages([
             ("system", f"""You are {self.name}. {self.role_prompt}
 
-You have access to the following tools:
+The following tools were run on your behalf; their results are provided below.
 {tool_descriptions}
 
-Your task is to analyze the context and provide a detailed response.
-When you need to use a tool, describe what you would do and provide your analysis.
+Base every factual claim on those results. Do not invent values.
 
 {ctx_info}
 
-For multi-CSV contexts (multiple CSV resources), consider:
+For multi-resource contexts, consider:
 - How resources might relate to each other
 - Common fields that could be foreign keys
 - Data integrity across resources
@@ -203,74 +301,20 @@ Execute this task and provide a comprehensive response. Include:
 2. Any relevant observations or findings
 3. The result of your analysis""")
         ])
-        
-        input_context = "\n".join([
+
+        input_context = "\n".join(
             f"- {k}: {v}" for k, v in resolved_inputs.items()
-        ]) if resolved_inputs else "No inputs from previous steps."
-        
-        # Execute with LLM
+        ) or "No inputs from previous steps."
+
         chain = prompt | self.llm | self._output_parser
-        
-        # Actually invoke tools if available
-        tool_results = {}
-        
-        # Invoke tools with context_key
-        for tool in self.tools:
-            tool_name = tool.name.lower()
-            try:
-                # Determine which tables to analyze
-                if target_resources:
-                    resources_to_analyze = target_resources
-                else:
-                    resources_to_analyze = resources
-                
-                # Check if tool needs table parameter
-                if any(
-                    kw in tool_name
-                    for kw in [
-                        "resource_info",
-                        "item_count",
-                        "field",
-                        "sample",
-                        "statistics",
-                        "missing",
-                        "unique",
-                    ]
-                ):
-                    # Resource-specific tools - run on each target resource
-                    for resource in resources_to_analyze:
-                        try:
-                            result = tool.invoke({
-                                "context_key": context_key,
-                                "resource": resource
-                            })
-                            tool_results[f"{resource}:{tool.name}"] = result
-                        except Exception as e:
-                            # Try without table parameter
-                            try:
-                                result = tool.invoke({"context_key": context_key})
-                                tool_results[tool.name] = result
-                                break
-                            except Exception:
-                                tool_results[f"{resource}:{tool.name}"] = f"Error: {str(e)}"
-                else:
-                    # Context-level tools
-                    result = tool.invoke({"context_key": context_key})
-                    tool_results[tool.name] = result
-                    
-            except Exception as e:
-                tool_results[tool.name] = f"Error: {str(e)}"
-        
-        # Get LLM analysis
-        target_info = ", ".join(target_resources) if target_resources else (
-            "All resources" if is_multi_resource else "N/A"
-        )
         llm_response = chain.invoke({
             "task": task,
-            "target_resources": target_info,
-            "input_context": input_context + "\n\nTool Results:\n" + str(tool_results)
+            "target_resources": ", ".join(target_resources) if target_resources else (
+                "All resources" if is_multi_resource else "N/A"
+            ),
+            "input_context": input_context + "\n\nTool Results:\n" + str(tool_results),
         })
-        
+
         return {
             "player": self.name,
             "task": task,
@@ -647,21 +691,32 @@ Generate the final structured output.""")
         return f"Player(name={self.name}, tools={len(self.tools)})"
 
 
+def tools_for_role(config: Dict[str, Any], context: ExecutionContext) -> List[BaseTool]:
+    """Resolve a role's requested toolsets against what a context can serve."""
+    return resolve_toolsets(config.get("toolsets", []), context)
+
+
 def create_player_from_config(
-    config: Dict[str, Any], 
+    config: Dict[str, Any],
     name: str,
+    context: ExecutionContext,
     provider: Optional[str] = None,
     role_key: Optional[str] = None,
 ) -> Player:
     """
     Factory function to create a Player from a configuration dictionary.
-    
+
+    The role's ``toolsets`` are resolved against ``context``, so a player is
+    only ever handed tools the context can actually serve.
+
     Args:
-        config: Dictionary with 'role_prompt', 'tools', and optional 'model_name', 'temperature'
+        config: Dictionary with 'role_prompt', 'toolsets', and optional
+            'model_name', 'temperature'
         name: The name to assign to this player instance
+        context: The ExecutionContext the player will operate on
         provider: LLM provider to use (default from config)
         role_key: Canonical player role key from PLAYER_CONFIGS
-        
+
     Returns:
         Configured Player instance
     """
@@ -669,7 +724,7 @@ def create_player_from_config(
     return Player(
         name=name,
         role_prompt=config.get("role_prompt", "You are a helpful analyst."),
-        tools=config.get("tools", []),
+        tools=tools_for_role(config, context),
         model_name=config.get("model_name"),  # None means use config default
         temperature=config.get("temperature"),  # None means use config default
         provider=provider,

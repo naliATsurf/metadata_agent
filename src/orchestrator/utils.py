@@ -1,9 +1,9 @@
 from typing import List, Dict, Any, Tuple, Optional, Set
 
-from src.context.base_context import ContextType
+from src.context.base_context import ExecutionContext
 from src.core.constants import DEFAULT_WORKSPACE_ARTIFACTS
 from src.players.configs import PLAYER_CONFIGS
-from src.tools.context_tools import filter_tools_by_context_type
+from src.tools.base import resolve_toolsets
 
 
 def validate_plan_dataflow(
@@ -53,17 +53,17 @@ def validate_plan_dataflow(
 
 def validate_plan_tool_compatibility(
     plan: List[Dict[str, Any]],
-    context_type: ContextType,
+    context: ExecutionContext,
     allowed_players: Optional[Set[str]] = None,
 ) -> Tuple[bool, str]:
     """
-    Validate that planned players are usable in the given context type.
+    Validate that planned players are usable against the given context.
 
     Checks:
     - The planned player exists in PLAYER_CONFIGS.
     - The planned player is in the allowed player pool (if provided).
-    - If a player has configured tools, at least one tool is compatible with context_type.
-      (Players intentionally configured with zero tools are allowed.)
+    - If a player requests toolsets, at least one resolves for this context.
+      (Players intentionally configured with zero toolsets are allowed.)
     """
     errors: List[str] = []
 
@@ -84,12 +84,12 @@ def validate_plan_tool_compatibility(
             )
             continue
 
-        configured_tools = PLAYER_CONFIGS[player_name].get("tools", [])
-        compatible_tools = filter_tools_by_context_type(configured_tools, context_type)
-        if configured_tools and not compatible_tools:
+        requested = PLAYER_CONFIGS[player_name].get("toolsets", [])
+        if requested and not resolve_toolsets(requested, context):
             errors.append(
                 f"Step {i+1} ('{task_name}') uses player '{player_name}' but none of its "
-                f"tools are compatible with context type '{context_type.value}'."
+                f"toolsets {requested} resolve for a "
+                f"'{context.context_type.value}' context."
             )
 
     if errors:

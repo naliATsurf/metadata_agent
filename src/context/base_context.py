@@ -255,6 +255,16 @@ class ExecutionContext(ABC):
         """Load metadata for a specific resource."""
         pass
 
+    @abstractmethod
+    def preview(self, resource: str, n: int = 5) -> str:
+        """Render the first ``n`` items of a resource as readable text.
+
+        Universal question, per-modality answer: rows for a table, chunks for a
+        document. Lets sampling be a modality-agnostic tool rather than one
+        that branches on context type.
+        """
+        pass
+
     @property
     def name(self) -> str:
         return self._name
@@ -380,3 +390,6 @@ class TabularContext(ExecutionContext):
         if limit:
             return values[:limit]
         return values
+
+    def preview(self, resource: str, n: int = 5) -> str:
+        return self.read_resource(resource, limit=n).to_string()

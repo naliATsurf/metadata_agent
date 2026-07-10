@@ -10,14 +10,11 @@ from langchain_core.output_parsers import PydanticOutputParser
 
 from src.core import ExecutionResult, Plan
 
-from src.config import DEFAULT_TOPOLOGY, LLM_PROVIDER, create_llm
+from src.config import DEFAULT_TOPOLOGY, LLM_PROVIDER, PLANNING_TEMPERATURE, create_llm
 from src.context import ContextType, ExecutionContext, create_context
 from src.context.context_classifier import classify_context_type
 from src.players import PLAYER_CONFIGS, Player, create_player_from_config
-from src.tools.context_tools import (
-    register_context,
-    filter_tools_by_context_type,
-)
+from src.tools.base import register_context
 from src.topology import EXECUTION_TOPOLOGIES
 from src.orchestrator.plan_executor import PlanExecutor
 from src.orchestrator.prompts import get_multi_csv_planning_prompt, get_single_csv_planning_prompt
@@ -124,7 +121,7 @@ class Orchestrator:
         allowed_players = set(self._get_effective_player_pool(context))
         tools_ok, tools_msg = validate_plan_tool_compatibility(
             plan=plan_dict,
-            context_type=context.context_type,
+            context=context,
             allowed_players=allowed_players,
         )
         if not tools_ok:
@@ -133,20 +130,16 @@ class Orchestrator:
 
         return True
 
-    def _generate_player_manifest(self, context: ExecutionContext = None) -> str:
+    def _generate_player_manifest(self, context: ExecutionContext) -> str:
         player_pool = self._get_effective_player_pool(context)
 
         manifest_parts = []
         for role_name in player_pool:
             if role_name in PLAYER_CONFIGS:
-                config = PLAYER_CONFIGS[role_name].copy()
-                if context is not None:
-                    config["tools"] = filter_tools_by_context_type(
-                        config.get("tools", []), context.context_type
-                    )
                 player = create_player_from_config(
-                    config,
+                    PLAYER_CONFIGS[role_name],
                     name=role_name,
+                    context=context,
                     role_key=role_name,
                 )
                 manifest_parts.append(player.get_tool_manifest())

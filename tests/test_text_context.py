@@ -22,7 +22,9 @@ from src.context import (
     create_context,
 )
 from src.context.text_context import TextChunk, fixed_size_chunker
-from src.tools import context_tools
+from src.tools import universal
+from src.tools.base import clear_registry, register_context, tools_for
+from src.tools.tabular import profiling, spatial, temporal
 
 
 REPORT = (
@@ -211,33 +213,39 @@ class TestToolGating(TextContextTestBase):
     def setUp(self):
         super().setUp()
         self.ctx = TextContext(self.report_path)
-        self.key = context_tools.register_context(
-            f"ctx_test_text_{uuid.uuid4().hex[:8]}", self.ctx
-        )
+        self.key = register_context(f"ctx_test_text_{uuid.uuid4().hex[:8]}", self.ctx)
 
     def tearDown(self):
-        context_tools.clear_registry()
+        clear_registry()
         super().tearDown()
 
     def test_generic_tools_work_on_text(self):
-        overview = context_tools.get_context_overview.invoke({"context_key": self.key})
+        overview = universal.get_context_overview.invoke({"context_key": self.key})
         self.assertEqual(overview["context_type"], "text")
-        self.assertEqual(context_tools.get_item_count.invoke({"context_key": self.key}), 3)
+        self.assertEqual(universal.get_item_count.invoke({"context_key": self.key}), 3)
 
     def test_sample_items_returns_chunks(self):
-        sample = context_tools.get_sample_items.invoke({"context_key": self.key, "n": 2})
+        sample = universal.get_sample_items.invoke({"context_key": self.key, "n": 2})
         self.assertIn("Butterfly Monitoring Report", sample)
 
     def test_tabular_tools_refuse_text(self):
-        for tool, kwargs in [
-            (context_tools.get_field_statistics, {"context_key": self.key}),
-            (context_tools.get_field_names, {"context_key": self.key}),
-            (context_tools.detect_temporal_columns, {"context_key": self.key}),
-            (context_tools.detect_spatial_columns, {"context_key": self.key}),
+        for tool in [
+            profiling.get_field_statistics,
+            profiling.get_field_names,
+            temporal.detect_temporal_columns,
+            spatial.detect_spatial_columns,
         ]:
-            result = tool.invoke(kwargs)
-            text = str(result)
-            self.assertIn("tabular", text, f"{tool.name} should refuse text contexts")
+            with self.assertRaises(TypeError) as cm:
+                tool.invoke({"context_key": self.key})
+            self.assertIn("TabularContext", str(cm.exception))
+
+    def test_text_context_is_offered_only_universal_tools(self):
+        """Capability gating replaces the old context-type table."""
+        offered = {t.name for t in tools_for(self.ctx)}
+        self.assertIn("get_context_overview", offered)
+        self.assertIn("get_sample_items", offered)
+        self.assertNotIn("get_field_names", offered)
+        self.assertNotIn("detect_spatial_columns", offered)
 
 
 class TestRealSampleDocument(unittest.TestCase):

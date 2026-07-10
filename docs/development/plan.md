@@ -48,6 +48,32 @@ tests`; existing pipeline green).
   `is_multi_csv = False`, so the planner silently treated multi-file text
   corpora as single-resource. Deleted the unused `primary_resource` property.
 
+## Tool module refactor ✅
+
+Done 2026-07-09 (see the [change log](09-07-2026_change.log.md)); it was not in
+the original plan but was forced by the same tabular assumptions.
+
+- **Capability gating.** Tools declare `@context_tool(toolset=...,
+  requires=TabularContext)`; `tools_for(context)` is an `isinstance` check.
+  Deleted the hand-maintained context-type compatibility table. A new modality
+  is unlocked by a context subclass, not a table edit.
+- **Dispatch derived from the signature.** `auto_fireable` / `resource_scoped`
+  are read off each tool's own argument schema. `Player.execute_task` now runs
+  a **survey** phase (fire every auto-fireable tool) then an **investigate**
+  phase (bind the rest to the model, seeded with the survey). This made the six
+  parameterized tools reachable for the first time, and exposed two bugs: the
+  `detect_*_columns` tools had only ever scanned `resources[0]`, and
+  `get_relationships` was gated on format when it needed cardinality.
+- **Roles request toolsets, not tools.** `PLAYER_CONFIGS` carries `"toolsets":
+  ["universal", "tabular.spatial"]`, resolved against the live context at
+  player construction. Roles are modality-independent.
+- **Layout.** `src/tools/{base,universal}.py` + `tabular/{detection,profiling,
+  temporal,spatial}.py`, keyed on capability (`tabular/` serves CSV *and*
+  SQLite). Deleted `context_tools.py` and the unused `pandas_tools.py`.
+
+Text and SQLite contexts had previously failed plan validation and aborted
+every run; both now execute (SQLite 18/19 tools, text 6/19).
+
 ## Phase 1 — `TextContext` ✅
 
 Implemented in `src/context/text_context.py` (previously a placeholder).
@@ -82,10 +108,10 @@ now — see Phase 5.
 
 ## Phase 3 — Text tools 🔲
 
-The column-oriented tools in `src/tools/context_tools.py` (field statistics,
-missing values, FK discovery, temporal/spatial *column* detection) are now
-**gated** to tabular contexts (see Phase 4), but agents still have no
-text-specific tools. Add a `src/tools/text_tools.py`:
+Text contexts run, but on the six `universal` tools only — agents still have no
+text-specific tools. Add a `src/tools/text/` package whose tools declare
+`requires=TextContext`; the tool module refactor above is what makes this a
+matter of adding a file rather than editing a gating table.
 
 - `get_sample_passages(context_key, resource, n)` — representative chunks
   (head/middle/tail).
@@ -98,12 +124,12 @@ text-specific tools. Add a `src/tools/text_tools.py`:
 
 ## Phase 4 — Players and planning 🟡
 
-- **Tool gating 🟡.** Done *structurally*, not yet per-config: column tools
-  call `_get_tabular_context()` and return a clear "requires a tabular
-  context" message on text contexts; `get_sample_items` is dual-mode (rows vs.
-  chunks); `get_context_overview` serializes `info.to_dict()` polymorphically.
-  Still open: declaring per-player tool applicability by `ContextType` so the
-  planner never *schedules* a tabular tool against prose in the first place.
+- **Tool gating ✅.** Resolved by the tool module refactor. `tools_for_role()`
+  expands a role's toolset globs against the live context, so a player is never
+  *constructed* holding a tool the context cannot serve, and plan validation
+  passes on every context type. Sampling went polymorphic too: the
+  `isinstance(ctx, TextContext)` branch in `get_sample_items` became an
+  abstract `ExecutionContext.preview()`.
 - **`text_analyst` player 🔲.** Add a role (or text-specific prompts for
   `data_analyst`) that reasons in documents/passages, equipped with the Phase 3
   tools. `metadata_generator` / `critic` / `metadata_specialist` are
@@ -149,7 +175,14 @@ already in place (see Context module refactor).
 
 ## Remaining order of work
 
-The refactor and Phases 1–2 are done. Phase 3 (text tools) unblocks a real
-agent run on text; then Phase 4's `text_analyst` + planner wiring; then Phase
-5 (standard) for useful output; Phase 6 (tests/example/docs) throughout.
-Phases 3–5 are the minimum for a first end-to-end text extraction.
+The context refactor, the tool refactor, Phases 1–2, and Phase 4's tool gating
+are done. Phase 3 (text tools) unblocks a *useful* agent run on text — text
+contexts already execute, but see only universal tools. Then Phase 4's
+`text_analyst` + planner wiring; then Phase 5 (standard) for useful output;
+Phase 6 (tests/example/docs) throughout. Phases 3–5 remain the minimum for a
+first end-to-end text extraction.
+
+Two loose ends from the tool refactor: the investigate phase has only been
+exercised against a scripted LLM, never a live provider; and roles now see a
+slightly wider tool set than their old hand-listed one (intentional, but the
+output-quality impact is unmeasured).

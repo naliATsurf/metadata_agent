@@ -368,7 +368,7 @@ Now execute the plan to extract metadata:
 
 ```python
 from src.orchestrator.plan_executor import PlanExecutor
-from src.tools.context_tools import register_context
+from src.tools import register_context
 
 # Register context for tool access
 context_key = "ctx_biota_multi"
@@ -590,7 +590,7 @@ from src.orchestrator import Orchestrator, run_metadata_extraction
 from src.standards import METADATA_STANDARDS
 from src.context.context_factory import create_context
 from src.orchestrator.plan_executor import PlanExecutor
-from src.tools.context_tools import register_context
+from src.tools import register_context
 from src.config import LLM_PROVIDER, PLANNING_TEMPERATURE, get_default_model
 
 # 1. Define source

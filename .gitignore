@@ -121,3 +121,7 @@ temp/
 
 # W&B files
 wandb/
+
+
+# AI related
+.claude/

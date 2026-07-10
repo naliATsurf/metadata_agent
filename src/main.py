@@ -79,6 +79,24 @@ def main():
         )
     )
     parser.add_argument(
+        "--model-name",
+        type=str,
+        default=None,
+        help="LLM model name. Uses the provider default when omitted."
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="LLM temperature for planning. Uses the config default when omitted."
+    )
+    parser.add_argument(
+        "--provider",
+        type=str,
+        default=None,
+        help="LLM provider. Uses the config default when omitted."
+    )
+    parser.add_argument(
         "--log-level",
         type=str,
         default="INFO",

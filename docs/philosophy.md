@@ -36,9 +36,11 @@ point is written against the context contract, not against CSVs.
 
 The orchestrator hands an LLM two things: a summary of the context (its
 resources, their shapes, discovered relationships) and a *manifest* of the
-available agent roles along with the tools each one carries. Crucially, the
-manifest is filtered by modality first — a role whose tools only make sense on
-tabular data is not advertised when the context is text.
+available agent roles along with the tools each one carries. Crucially, each
+role's tools are resolved against the context first: a role requests
+*capabilities* ("give me column profiling"), and only the tools this context can
+actually serve reach the manifest. The planner is never shown an instrument that
+would not work.
 
 The LLM's job is to emit an ordered plan. Each step declares:
 
@@ -121,36 +123,49 @@ than a neutral party. Multi-agent debate derives most of its value from
 than to genuine adversarial review. The role diversity in this system is real,
 but it lives *across* steps, not within them.
 
-The first assumption — *tools observe, models interpret* — holds, but the
-observing half is currently narrower than the tool surface suggests.
+The first assumption — *tools observe, models interpret* — is the one that has
+been tested hardest, and it needed two repairs to hold.
 
-The tools a player runs are not chosen by the model. Every tool the role owns is
-fired, and the arguments are guessed by matching the tool's *name* against a
-fixed keyword list. So the LLM is an interpreter of a fixed evidence bundle, not
-an agent selecting instruments. Predictability and auditability are the intended
-trade, and they are real. But the mechanism cannot pass an argument it did not
-anticipate: any tool needing more than a resource name — a column, a field, a
-coordinate pair — is never successfully called. In practice this means every
-tool that *detects* something works, and every tool that would then *analyze*
-what was detected fails. The evidence bundle has a ceiling, and the reasoning
-layer cannot raise it by asking better questions.
+Observation happens in two phases, and the split is not arbitrary. Tools whose
+arguments the runner can supply on its own — "what columns exist," "what do the
+dates look like" — are fired deterministically as a *survey*. Tools that need an
+argument only judgment can produce — *which* column to take the extent of — are
+offered to the model, seeded with the survey. So the model chooses what to look
+at but never what is true. Evidence still comes from code; only the questions
+come from the model.
 
-That is the sharper form of the point. The tool layer is not merely
-non-agentic; it is unable to express half of what the tools can do. A player
-whose role is defined by parameterized analysis is, structurally, unable to
-perform it.
+An earlier version fired every tool by matching its *name* against a keyword
+list, which meant no tool could receive an argument the runner had not
+anticipated. Every tool that *detected* something worked, and every tool that
+would then *analyze* what was detected failed. The lesson generalizes past the
+bug: **the reasoning layer must be able to ask a question the evidence layer did
+not anticipate**, or the evidence bundle has a ceiling that no amount of
+reasoning can raise.
 
-A parallel gap sits in the modality gating. The tool-compatibility table that
-the planner and validator consult recognizes only CSV contexts, so the
-modality-agnostic tools — the ones the context abstraction exists to enable —
-are never offered to the text and database contexts they were written for. The
-abstraction is sound; the table in front of it has not caught up.
+The parallel repair is in gating. Tools now declare the context *capability*
+they need — "I require row/column access" — rather than being listed against the
+context *types* they were once known to work on. Whether a tool is offered is
+then a property of the tool and the context, computed, not a table that a human
+must remember to update. The old table recognized only CSV, so the
+modality-agnostic tools that the context abstraction exists to enable were never
+offered to the text and database contexts they were written for. The abstraction
+was sound; the table in front of it had silently not caught up.
 
-None of this is fatal to the design, and that is the point worth keeping:
-heterogeneous player pools within a step, an independent synthesizer,
-model-driven tool selection, and a modality-aware compatibility table are all
-additive changes. The architecture leaves room for each. What the current state
-shows is that a clean abstraction does not by itself deliver its own benefits —
-the layers above it have to actually ask.
+That failure is the general hazard of this architecture and worth stating
+plainly: **a clean abstraction does not deliver its own benefits.** The layers
+above it have to actually ask, and a side table that restates what a type
+already knows will drift away from it. The remedy is to make each fact
+derivable from one declaration, so drift becomes impossible rather than merely
+unlikely.
 
-*(Both gaps are measured and documented in the 2026-07-09 development log.)*
+What remains open is the debate loop. The agents within a step are still clones
+of the same role — same persona, same prompt, same temperature — and the
+synthesizer is one of the debaters rather than a neutral party. Multi-agent
+debate derives most of its value from *diverse* priors; as configured, the loop
+is closer to self-consistency sampling than to genuine adversarial review. The
+role diversity in this system is real, but it lives *across* steps, not within
+them. Heterogeneous player pools within a step and an independent synthesizer
+are additive changes; the architecture leaves room for both.
+
+*(The tool audit that prompted these repairs is in the 2026-07-09 development
+log.)*

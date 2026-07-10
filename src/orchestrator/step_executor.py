@@ -22,7 +22,6 @@ from langgraph.graph import StateGraph, END
 
 from src.core import DebateEntry, PlayerResult, StepExecutionState
 from src.players import PLAYER_CONFIGS, Player, create_player_from_config
-from src.tools.context_tools import filter_tools_by_context_type
 
 
 # ===================================================================
@@ -443,14 +442,12 @@ def create_step_state(
         role_to_use = "data_analyst"  # Ultimate fallback
     
     # Create multiple instances of the same player type
-    config = PLAYER_CONFIGS.get(role_to_use, {}).copy()
-    config["tools"] = filter_tools_by_context_type(
-        config.get("tools", []), context.context_type
-    )
+    config = PLAYER_CONFIGS.get(role_to_use, {})
     for i in range(players_per_step):
         player = create_player_from_config(
             config,
             name=f"{role_to_use}_{i+1}",
+            context=context,
             role_key=role_to_use,
         )
         players.append(player)

@@ -1,52 +1,49 @@
 """
 Tools module for the multi-agent system.
+
+Tools are declared with :func:`~src.tools.base.context_tool`, which records the
+context capability each one needs. Gating is then a capability check rather
+than a hand-maintained table, so a new modality is unlocked by adding a context
+subclass, not by editing a list here.
+
+Importing this package registers every tool. Query them with
+:func:`~src.tools.base.tools_for` (what can run against this context?) or
+:func:`~src.tools.base.resolve_toolsets` (what did this player ask for?).
 """
 
-from . import context_tools
+from src.tools import universal  # noqa: F401  (registers universal tools)
+from src.tools import tabular  # noqa: F401  (registers tabular tools)
 
-from .context_tools import (
-    register_context,
-    get_context,
+from src.tools.base import (
+    all_tools,
     clear_registry,
-    get_all_context_tools,
-    filter_tools_by_context_type,
-    get_tools_for_context_type,
-    get_single_csv_tools,
-    get_multi_csv_tools,
-    get_context_overview,
-    list_resources,
-    get_context_schema,
-    get_resource_info,
-    get_item_count,
-    get_field_names,
-    get_field_types,
-    get_sample_items,
-    get_field_statistics,
-    get_missing_values,
-    get_unique_values,
-    get_relationships,
+    context_tool,
+    get_context,
+    is_auto_fireable,
+    is_resource_scoped,
+    register_context,
+    registered_toolsets,
+    requires_of,
+    resolve_toolsets,
+    tool_meta,
+    tools_for,
+    toolset_of,
 )
 
 __all__ = [
-    "context_tools",
-    "register_context",
-    "get_context",
+    "all_tools",
     "clear_registry",
-    "get_all_context_tools",
-    "filter_tools_by_context_type",
-    "get_tools_for_context_type",
-    "get_single_csv_tools",
-    "get_multi_csv_tools",
-    "get_context_overview",
-    "list_resources",
-    "get_context_schema",
-    "get_resource_info",
-    "get_item_count",
-    "get_field_names",
-    "get_field_types",
-    "get_sample_items",
-    "get_field_statistics",
-    "get_missing_values",
-    "get_unique_values",
-    "get_relationships",
+    "context_tool",
+    "get_context",
+    "is_auto_fireable",
+    "is_resource_scoped",
+    "register_context",
+    "registered_toolsets",
+    "requires_of",
+    "resolve_toolsets",
+    "tabular",
+    "tool_meta",
+    "tools_for",
+    "toolset_of",
+    "universal",
 ]

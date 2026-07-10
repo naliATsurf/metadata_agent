@@ -7,7 +7,8 @@ import uuid
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.context.context_factory import create_context
-from src.tools import context_tools
+from src.tools.base import register_context
+from src.tools.tabular import spatial
 
 
 class TestSpatialTupleTools(unittest.TestCase):
@@ -28,16 +29,16 @@ class TestSpatialTupleTools(unittest.TestCase):
             self.skipTest(f"S2BMS fixture missing: {self._csv}")
 
         ctx = create_context({"event": self._csv}, name="s2bms_tuple_test")
-        key = context_tools.register_context(f"ctx_test_spatial_tuple_{uuid.uuid4().hex[:8]}", ctx)
+        key = register_context(f"ctx_test_spatial_tuple_{uuid.uuid4().hex[:8]}", ctx)
 
-        det = context_tools.detect_spatial_columns.invoke(
+        det = spatial.detect_spatial_columns.invoke(
             {"context_key": key, "resource": "event"}
         )
         self.assertNotIn("error", det)
         tcc = det.get("tuple_coord_columns") or []
         self.assertTrue(any(c.get("column") == "tuple_coords" for c in tcc))
 
-        ext = context_tools.get_spatial_extent_from_tuple_column.invoke(
+        ext = spatial.get_spatial_extent_from_tuple_column.invoke(
             {
                 "context_key": key,
                 "resource": "event",

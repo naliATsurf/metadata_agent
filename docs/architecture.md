@@ -194,28 +194,32 @@ EXECUTION_TOPOLOGIES = {
 
 ## Tools (`src/tools/`)
 
-### Unified Context Tools (`src/tools/context_tools.py`)
+Tools are grouped into *toolsets* by the context capability they need, not by
+the file format they came from — so `tabular/` serves CSV and SQLite alike.
 
-All tools work with the ExecutionContext abstraction:
+| Toolset | Requires | Tools |
+|---------|----------|-------|
+| `universal` | `ExecutionContext` | `get_context_overview`, `list_resources`, `get_context_schema`, `get_resource_info`, `get_item_count`, `get_sample_items` |
+| `universal.relationships` | `ExecutionContext` (multi-resource) | `get_relationships` |
+| `tabular.profiling` | `TabularContext` | `get_field_names`, `get_field_types`, `get_field_statistics`, `get_missing_values`, `get_unique_values` |
+| `tabular.temporal` | `TabularContext` | `detect_temporal_columns`, `analyze_temporal_column`, `get_temporal_extent` |
+| `tabular.spatial` | `TabularContext` | `detect_spatial_columns`, `analyze_spatial_column`, `get_spatial_extent`, `get_spatial_extent_from_tuple_column` |
 
-| Tool | Description |
-|------|-------------|
-| `get_dataset_overview` | Overview of the entire dataset |
-| `list_tables` | List all tables |
-| `get_dataset_schema` | Complete schema with relationships |
-| `get_resource_info` | Detailed resource information |
-| `get_row_count` | Row count for a table |
-| `get_column_names` | Column names |
-| `get_column_types` | Column data types |
-| `get_sample_rows` | Preview rows |
-| `get_column_statistics` | Statistics for all columns |
-| `get_missing_values` | Missing value counts |
-| `get_unique_values` | Unique values in a column |
-| `get_relationships` | Get discovered relationships |
-| `analyze_potential_relationship` | Analyze a specific relationship |
-| `preview_join` | Preview joining two tables |
-| `find_common_columns` | Find shared columns across tables |
-| `compare_table_schemas` | Compare table structures |
+`tools_for(context)` offers a tool iff the context is an instance of the tool's
+declared `requires` class. There is no context-type compatibility table.
+
+### How tools are invoked
+
+Each tool's argument schema decides how it can be called, so nothing needs to be
+declared twice:
+
+- **auto-fireable** — `context_key` and `resource` are its only required
+  arguments, so the player fires it deterministically in the *survey* phase.
+- **model-invoked** — it needs an argument only judgment can supply (a `column`,
+  a `field`), so it is bound to the model in the *investigation* phase, seeded
+  with the survey output.
+
+Players request toolsets, never individual tools; see `PLAYER_CONFIGS`.
 
 ## Metadata Standards (`src/standards.py`)
 
@@ -323,8 +327,14 @@ src/
 │   ├── player.py              # Unified Player class
 │   └── configs.py             # Player role configurations
 └── tools/
-    ├── __init__.py            # Exports all tools
-    └── context_tools.py       # Unified ExecutionContext tools
+    ├── __init__.py            # Registers all toolsets; exports the registry API
+    ├── base.py                # @context_tool, capability gating, tools_for()
+    ├── universal.py           # Tools needing only ExecutionContext
+    └── tabular/               # Tools needing TabularContext (CSV + SQLite)
+        ├── detection.py       # Pure column heuristics, no context needed
+        ├── profiling.py
+        ├── temporal.py
+        └── spatial.py
 ```
 
 ## Configuration
@@ -363,15 +373,33 @@ class ParquetContext(ExecutionContext):
 
 ### Adding New Tools
 
-Add to `src/tools/context_tools.py`:
+Add the tool to the module for its capability — `src/tools/universal.py` if it
+needs nothing beyond the base contract, `src/tools/tabular/` if it needs
+rows and columns:
 
 ```python
-@tool
-def my_new_tool(context_key: str, ...) -> Dict[str, Any]:
-    """Description of what this tool does."""
-    ctx = get_context(context_key)
-    # Implementation using ExecutionContext API
-    return result
+@context_tool(toolset="tabular.profiling", requires=TabularContext)
+def my_new_tool(ctx: TabularContext, resource: str = "") -> Dict[str, Any]:
+    """Description the planner and the model will both read."""
+    return {...}
 ```
 
-Then add to player configs in `src/players/configs.py`.
+The decorator resolves and type-checks the context, so the body receives a live
+`ctx` and may raise freely. Declare `requires` honestly: it is what makes the
+tool appear for the right contexts and refuse the wrong ones.
+
+Nothing else needs updating. Whether the tool is fired automatically or offered
+to the model is derived from its signature, and any player whose `toolsets`
+match its `toolset` picks it up. To reach a role that does not yet request that
+toolset, add the toolset name to `PLAYER_CONFIGS`.
+
+Use `available_when=` only for constraints capability cannot express — for
+instance `lambda ctx: ctx.is_multi_resource`.
+
+### Adding a New Modality
+
+Subclass `ExecutionContext` (or a capability mixin like `TabularContext`),
+implement `preview()` and the resource-info contract, register the extension in
+`src/context/registry.py`, and add a toolset package if the modality has tools
+of its own. Every `universal` tool works on it immediately; no gating table
+exists to update.
