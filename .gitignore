@@ -111,6 +111,7 @@ venv.bak
 data/sample/
 data/output/
 data/schema/
+data/end2end_test/
 logs/
 
 # Apple 

@@ -1,3 +1,4 @@
 data/sample/
+data/end2end_test/
 logs/
 .env
