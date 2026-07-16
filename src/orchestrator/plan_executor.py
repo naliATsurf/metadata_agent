@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from src.core import ExecutionResult, Plan, StepResult
 from src.context import ExecutionContext
+from src.provenance import attribute_metadata, get_evidence, serialize_evidence
 from src.standards import get_schema_for_standard
 
 from src.orchestrator.step_executor import create_step_state, get_step_execution_graph
@@ -265,18 +266,46 @@ class PlanExecutor:
             logging.info(f"Relationships: {len(relationships)}")
         logging.info("=" * 60)
 
+        final_metadata = self._extract_final_metadata(workspace, context)
+        final_provenance = self._build_provenance(
+            final_metadata, output_schema, context_key
+        )
+
         return ExecutionResult(
             plan_steps_count=len(plan_steps),
             steps_completed=successful_steps,
             step_results=step_results,
             final_workspace=self._filter_workspace(workspace),
-            final_metadata=self._extract_final_metadata(workspace, context),
+            final_metadata=final_metadata,
+            final_provenance=final_provenance,
+            final_evidence=serialize_evidence(context_key),
             context_info=context.to_dict(),
             resource_metadata=resource_metadata,
             relationships=relationships,
             success=overall_success,
             error=None if overall_success else "Some steps failed",
         )
+
+    def _build_provenance(
+        self,
+        final_metadata: Optional[Dict[str, Any]],
+        output_schema: Optional[Type[BaseModel]],
+        context_key: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Attribute each standard field to the tool evidence that supports it.
+
+        Runs only for schema-backed runs: ``output_schema`` gives the exact field
+        set to trace, so provenance covers the standard's fields rather than
+        whatever incidental keys a fallback record carries. Attribution is
+        deterministic — see :func:`src.provenance.attribute_metadata`.
+        """
+        if final_metadata is None or output_schema is None:
+            return None
+
+        fields = {
+            name: final_metadata.get(name) for name in output_schema.model_fields
+        }
+        return attribute_metadata(fields, get_evidence(context_key))
 
     def _filter_workspace(self, workspace: Dict[str, Any]) -> Dict[str, Any]:
         """Filter out internal workspace keys."""

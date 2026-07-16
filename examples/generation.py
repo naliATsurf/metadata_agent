@@ -81,6 +81,10 @@ step_start = log_step_timing("Define source", step_start)
 log_step_section(2, "Create context")
 context = create_context(source=source, name="my_dataset")
 step_start = log_step_timing("Create context", step_start)
+logging.info(f"Context: {context.name}")
+logging.info(f"Context type: {context.context_type.value}")
+logging.info(f"Resources: {context.resources}")
+logging.info("=" * 60)
 
 
 # 3. Ask the orchestrator to generate a metadata extraction plan for the target
@@ -116,21 +120,51 @@ result = orchestrator.execute_plan(
 )
 step_start = log_step_timing("Execute plan", step_start)
 
-# 5. Collect and persist the final metadata output produced by the plan.
-log_step_section(5, "Write metadata")
+# 5. Collect and persist the final metadata output produced by the plan, plus its
+# per-field provenance sidecar (which tool's output supports each value).
+log_step_section(5, "Write metadata and provenance")
 
-metadata_output = result.final_workspace['metadata_output']
+# A rejected or failed plan produces no metadata_output; surface that instead of
+# crashing on a missing key.
+metadata_output = result.final_workspace.get('metadata_output')
+if metadata_output is None:
+    logger.error(
+        "No metadata produced — the plan was rejected or execution failed: %s",
+        result.error,
+    )
+    logger.info("**************************** End of Workflow (aborted) ****************************")
+    raise SystemExit(1)
+
+provenance = result.final_provenance or {}
+evidence = result.final_evidence or []
 output_dir = Path(example_config.OUTPUT_DIR)
 output_dir.mkdir(parents=True, exist_ok=True)
 with (output_dir / f"metadata_{context.name}.json").open("w", encoding="utf-8") as f:
     json.dump(metadata_output, f, ensure_ascii=False, indent=2, default=str)
+with (output_dir / f"provenance_{context.name}.json").open("w", encoding="utf-8") as f:
+    json.dump(provenance, f, ensure_ascii=False, indent=2, default=str)
+with (output_dir / f"evidence_{context.name}.json").open("w", encoding="utf-8") as f:
+    json.dump(evidence, f, ensure_ascii=False, indent=2, default=str)
 
-logger.info("Extracted Metadata:")
 metadata_json = json.dumps(metadata_output, ensure_ascii=False, indent=2, default=str)
+provenance_json = json.dumps(provenance, ensure_ascii=False, indent=2, default=str)
+# The evidence ledger can be large; log a one-line-per-fact summary and leave the
+# full payload for evidence_<name>.json. Seeing what the tools produced is what
+# makes an 'unverifiable' field interpretable.
+evidence_summary = "\n".join(
+    f"  {e['id']}  {e['citation']}" for e in evidence
+) or "  (no tool evidence captured this run)"
 if example_config.LOG_MODE == "quiet":
     print(metadata_json)
+    print("\nProvenance:")
+    print(provenance_json)
+    print(f"\nEvidence ({len(evidence)} facts):")
+    print(evidence_summary)
 else:
+    logger.info("Extracted Metadata:")
     logger.info("%s", metadata_json)
-step_start = log_step_timing("Write metadata", step_start)
+    logger.info("Provenance:\n%s", provenance_json)
+    logger.info("Evidence (%d facts captured):\n%s", len(evidence), evidence_summary)
+step_start = log_step_timing("Write metadata, provenance and evidence", step_start)
 logger.info("[timer] Whole process: %.3fs", step_start - process_start)
 logger.info("**************************** End of Workflow ****************************")

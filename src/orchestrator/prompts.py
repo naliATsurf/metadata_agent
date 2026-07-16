@@ -73,8 +73,17 @@ def get_single_csv_planning_prompt() -> ChatPromptTemplate:
         [
             (
                 "system",
-                """You are an expert data analysis agent that functions as a dataflow orchestrator. 
+                """You are an expert data analysis agent that functions as a dataflow orchestrator.
 Your goal is to generate a step-by-step plan to extract metadata from a resource.
+
+**Context Overview (the actual data you are planning for):**
+{dataset_info}
+
+**Grounding rules (CRITICAL — read before planning):**
+- Use the **exact resource name(s)** from the Context Overview in `target_resources`. Never use the file type (e.g. "SINGLE_CSV") as a resource name.
+- **Never invent column names.** Do not assume columns such as `latitude`, `longitude`, or `timestamp` exist. Refer only to columns shown in the overview.
+- `inputs` is **only** for workspace artifacts produced by previous steps. Never put tool arguments (such as a column name) in `inputs`.
+- Which column is spatial or temporal is discovered automatically at execution time — the `spatial_temporal_specialist` detects the relevant columns itself. Do not name columns in the plan.
 
 **Key Instructions:**
 1.  **Be CONCISE**: Create the MINIMUM number of steps needed. Combine related analyses into single steps.
@@ -103,7 +112,7 @@ Your goal is to generate a step-by-step plan to extract metadata from a resource
 - If the context has multiple resources, run `get_field_statistics` for each resource (or a combined step that still produces per-resource `field_stats` artifacts).
 - If **Metadata Standard** indicates spatial/geospatial requirements, you MUST include a `spatial_temporal_specialist` step before final metadata generation.
 - Infer this from the text of `{metadata_standard}` (for example: spatial, geospatial, geometry, coordinate, latitude, longitude, bbox/bounding box, CRS, extent, coverage). Do not rely on standard name matching.
-- If coordinates are stored in one column as ``(lon, lat)`` or ``(lat, lon)`` text tuples (e.g. ``tuple_coords``), the `spatial_temporal_specialist` can use ``get_spatial_extent_from_tuple_column`` for bounding boxes; use ``get_spatial_extent`` only when separate numeric latitude and longitude columns exist.
+- When you add a `spatial_temporal_specialist` step, do **not** name columns or pick tools for it. It detects spatial and temporal columns (separate lat/lon, tuple coordinates, or timestamps) at execution time and chooses the right tool itself. Give it an empty `inputs` and let it discover the columns.
 
 **MANDATORY - FINAL STEP Requirements:**
 The last step MUST:
@@ -139,7 +148,7 @@ You MUST output **ONLY** a JSON object that conforms to the following schema:
             ),
             (
                 "human",
-                """Generate a CONCISE metadata extraction plan for a resource of type: '{file_type}'.
+                """Generate a CONCISE metadata extraction plan for the data described in the Context Overview above (type: '{file_type}').
 
 REQUIREMENTS:
 
@@ -148,6 +157,7 @@ REQUIREMENTS:
 3. FINAL STEP inputs MUST include: ``{{"metadata_standard": "metadata_standard"}}``
 4. FINAL STEP outputs MUST be exactly: ``["metadata_output"]``
 5. Even for small datasets, include a ``data_analyst`` step that runs ``get_field_statistics`` (and optionally ``get_missing_values``) before the final step.
+6. Use the exact resource and column names from the Context Overview. Do NOT invent columns, and do NOT put column names in ``inputs``.
 
 Keep the plan SHORT.""",
             ),

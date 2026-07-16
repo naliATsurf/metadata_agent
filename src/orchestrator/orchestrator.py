@@ -18,7 +18,11 @@ from src.tools.base import register_context
 from src.topology import EXECUTION_TOPOLOGIES
 from src.orchestrator.plan_executor import PlanExecutor
 from src.orchestrator.prompts import get_multi_csv_planning_prompt, get_single_csv_planning_prompt
-from src.orchestrator.utils import validate_plan_dataflow, validate_plan_tool_compatibility
+from src.orchestrator.utils import (
+    validate_plan_columns,
+    validate_plan_dataflow,
+    validate_plan_tool_compatibility,
+)
 
 
 class Orchestrator:
@@ -113,6 +117,11 @@ class Orchestrator:
         """
         plan_dict = plan.to_dict_list()
 
+        columns_ok, columns_msg = validate_plan_columns(plan_dict, context)
+        if not columns_ok:
+            logging.error("Plan column validation failed: %s", columns_msg)
+            return False
+
         dataflow_ok, dataflow_msg = validate_plan_dataflow(plan_dict)
         if not dataflow_ok:
             logging.error("Plan dataflow validation failed: %s", dataflow_msg)
@@ -197,12 +206,8 @@ class Orchestrator:
         logging.info("[ui] planning")
         logging.info("=" * 60)
         logging.info("GENERATING PLAN")
-        logging.info(f"Context: {context.name}")
-        logging.info(f"Context type: {context.context_type.value}")
         logging.info(f"Classified planning type: {classified_type.value}")
-        logging.info(f"Resources: {context.resources}")
         logging.info(f"Is multi-context: {is_multi_context}")
-        logging.info("=" * 60)
 
         manifest = self._generate_player_manifest(context)
         context_info = self._generate_context_info(context)
@@ -230,6 +235,7 @@ class Orchestrator:
                 generated_plan = planning_chain.invoke(prompt_inputs)
             else:
                 prompt_inputs = {
+                    "dataset_info": context_info,
                     "file_type": context.context_type.value.upper(),
                     "available_players": manifest,
                     "metadata_standard": metadata_standard,
@@ -290,6 +296,18 @@ class Orchestrator:
         Returns:
             ExecutionResult produced by the plan executor.
         """
+        # Validate before executing, so a plan is never run just because a caller
+        # reached execute_plan directly (bypassing run()). Returns a failed result
+        # rather than raising, keeping the ExecutionResult contract.
+        if not self._validate_plan(plan, context):
+            logging.error("Plan failed validation; aborting execution.")
+            return ExecutionResult(
+                plan_steps_count=len(plan.steps),
+                steps_completed=0,
+                success=False,
+                error="Plan failed validation before execution (see logs).",
+            )
+
         context_key = f"ctx_{uuid.uuid4().hex[:8]}"
         register_context(context_key, context)
 

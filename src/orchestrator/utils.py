@@ -96,3 +96,62 @@ def validate_plan_tool_compatibility(
         return False, " | ".join(errors)
 
     return True, "Plan tool compatibility is valid."
+
+
+# Column arguments leak into a step's ``inputs`` under these suffixes
+# (``lat_column``, ``lon_column``, ``time_column``, ``timestamp_column``, ...).
+# Restricted to the ``_column``/``_col`` forms on purpose: artifact-wiring keys
+# (``field_stats``, ``columns``, ``metadata_standard``) never take this shape, so
+# the check cannot misfire on a legitimate input.
+_COLUMN_KEY_SUFFIXES = ("_column", "_columns", "_col", "_cols")
+
+
+def _looks_like_column_param(key: str) -> bool:
+    return key.lower().endswith(_COLUMN_KEY_SUFFIXES)
+
+
+def _context_columns(context: ExecutionContext) -> Set[str]:
+    """Lower-cased column names across every tabular resource in the context."""
+    columns: Set[str] = set()
+    for info in context.get_all_resource_info().values():
+        for name in getattr(info, "field_names", None) or []:
+            columns.add(str(name).lower())
+    return columns
+
+
+def validate_plan_columns(
+    plan: List[Dict[str, Any]],
+    context: ExecutionContext,
+) -> Tuple[bool, str]:
+    """Reject a plan that references a column the data does not contain.
+
+    Planners sometimes invent column names (``latitude``, ``longitude``,
+    ``timestamp``) when a spatial/temporal standard asks for coverage a dataset
+    cannot provide. Such a column surfaces as a step-input value under a
+    ``*_column`` key; every such value must name a real column of some resource.
+
+    Matching is case-insensitive and lenient across resources: a column is valid
+    if it exists in *any* resource, so a mistaken ``target_resources`` never
+    causes a false rejection. A context with no columns at all (e.g. text)
+    rejects any column reference, which is correct.
+    """
+    real_columns = _context_columns(context)
+    errors: List[str] = []
+
+    for i, step in enumerate(plan):
+        task_name = step.get("task", "<unknown>")
+        for key, value in step.get("inputs", {}).items():
+            if not _looks_like_column_param(key):
+                continue
+            candidates = value if isinstance(value, list) else str(value).split(",")
+            for col in (c.strip() for c in candidates):
+                if col and col.lower() not in real_columns:
+                    errors.append(
+                        f"Step {i+1} ('{task_name}') references column '{col}' via "
+                        f"'{key}', which is not a column of any resource in the context."
+                    )
+
+    if errors:
+        return False, " | ".join(errors)
+
+    return True, "Plan column references are valid."

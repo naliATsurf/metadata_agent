@@ -43,6 +43,7 @@ from typing import Any, Callable, Dict, List, Optional, Type
 from langchain_core.tools import BaseTool, tool as _lc_tool
 
 from src.context.base_context import ExecutionContext
+from src.provenance import clear_evidence, record_evidence
 
 # Arguments the runner can always supply itself. Any other required argument
 # (column, field, lat_column, ...) means the tool needs a model to call it.
@@ -74,8 +75,9 @@ def get_context(key: str) -> ExecutionContext:
 
 
 def clear_registry() -> None:
-    """Clear all registered ExecutionContexts."""
+    """Clear all registered ExecutionContexts and their captured evidence."""
     _CONTEXT_REGISTRY.clear()
+    clear_evidence()
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +146,21 @@ def _build_llm_facing_function(
                 f"'{key}' is a {type(ctx).__name__} "
                 f"({ctx.context_type.value} context)."
             )
-        return fn(ctx, **bound.arguments)
+        result = fn(ctx, **bound.arguments)
+
+        # Provenance: capture the fact this tool just produced, keyed by the run's
+        # context. Every tool passes through here, so this one site instruments
+        # the whole tool surface. Recording is a pure append and cannot alter the
+        # returned value. Runs after ``fn`` so a raising tool records nothing.
+        call_args = {k: v for k, v in bound.arguments.items() if k != "resource"}
+        record_evidence(
+            context_key=key,
+            tool=fn.__name__,
+            resource=bound.arguments.get("resource"),
+            args=call_args,
+            result=result,
+        )
+        return result
 
     # LangChain reads both of these to build the argument schema; functools.wraps
     # copies the original annotations (which name ``ctx``), so replace them.

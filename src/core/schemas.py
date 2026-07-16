@@ -161,6 +161,9 @@ class ExecutionResult(BaseModel):
         step_results: Results from each step.
         final_workspace: Final state of the workspace with all artifacts.
         final_metadata: The final extracted metadata.
+        final_provenance: Per-field provenance, parallel to final_metadata.
+        final_evidence: Every fact the tools produced during the run — the raw
+            material the provenance sidecar cites by evidence_id.
         context_info: Information about the ExecutionContext used.
         resource_metadata: Per-resource metadata, keyed by resource name.
         relationships: Relationships between resources (from ExecutionContext).
@@ -180,6 +183,23 @@ class ExecutionResult(BaseModel):
     )
     final_metadata: Optional[Dict[str, Any]] = Field(
         default=None, description="The final extracted metadata."
+    )
+    final_provenance: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Per-field provenance, parallel to final_metadata: for each field, "
+            "the tool call whose captured output supports the value (or an "
+            "unverifiable/not_present status when nothing does)."
+        ),
+    )
+    final_evidence: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Every tool invocation captured during the run, in order: the fact "
+            "each tool produced, addressable by evidence_id. The raw material the "
+            "provenance sidecar attributes values to, and what makes an "
+            "'unverifiable' field interpretable — you can see what was available."
+        ),
     )
 
     context_info: Dict[str, Any] = Field(
