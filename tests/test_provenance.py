@@ -17,7 +17,12 @@ from src.provenance import (
     get_evidence,
     serialize_evidence,
 )
-from src.tools.base import clear_registry, register_context
+from src.tools.base import (
+    clear_registry,
+    get_context,
+    register_context,
+    unregister_context,
+)
 from src.tools import universal
 from src.tools.tabular import profiling
 
@@ -106,6 +111,25 @@ class EvidenceLedgerTest(unittest.TestCase):
 
         clear_registry()
         self.assertEqual(get_evidence(self.key), [])
+
+    def test_unregister_removes_only_its_own_context_and_evidence(self):
+        """Per-run teardown drops one run's context and evidence, not others'."""
+        other_ctx = create_context(self.csv, name="other")
+        other_key = register_context(f"k_{uuid.uuid4().hex[:8]}", other_ctx)
+
+        self._invoke(universal.list_resources)                       # under self.key
+        other_ctx_tool = universal.list_resources
+        other_ctx_tool.invoke({"context_key": other_key})            # under other_key
+
+        unregister_context(self.key)
+
+        # self.key is gone — context unresolvable, evidence dropped
+        self.assertEqual(get_evidence(self.key), [])
+        with self.assertRaises(KeyError):
+            get_context(self.key)
+        # the other run is untouched
+        self.assertTrue(get_evidence(other_key))
+        self.assertIsNotNone(get_context(other_key))
 
 
 class TabularAttributionTest(unittest.TestCase):

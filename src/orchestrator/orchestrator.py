@@ -14,7 +14,7 @@ from src.config import DEFAULT_TOPOLOGY, LLM_PROVIDER, PLANNING_TEMPERATURE, cre
 from src.context import ContextType, ExecutionContext, create_context
 from src.context.context_classifier import classify_context_type
 from src.players import PLAYER_CONFIGS, Player, create_player_from_config
-from src.tools.base import register_context
+from src.tools.base import register_context, unregister_context
 from src.topology import EXECUTION_TOPOLOGIES
 from src.orchestrator.plan_executor import PlanExecutor
 from src.orchestrator.prompts import get_multi_csv_planning_prompt, get_single_csv_planning_prompt
@@ -323,7 +323,11 @@ class Orchestrator:
                 player_pool=effective_player_pool,
             )
         finally:
-            pass
+            # Per-run teardown. executor.execute has already serialized the
+            # evidence into ExecutionResult.final_evidence by the time it returns,
+            # so dropping it from the global ledger here is safe and keeps the
+            # registries from growing across runs.
+            unregister_context(context_key)
     
     # decorators for logging?
     def run(

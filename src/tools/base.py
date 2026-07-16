@@ -74,6 +74,18 @@ def get_context(key: str) -> ExecutionContext:
     return _CONTEXT_REGISTRY[key]
 
 
+def unregister_context(key: str) -> None:
+    """Remove a single context and its captured evidence from the registries.
+
+    The per-run teardown counterpart to :func:`register_context`: the owner of a
+    run (``Orchestrator.execute_plan``) registers a context under a fresh key and
+    unregisters it when the run ends, so contexts and their evidence do not
+    accumulate across runs in a long-lived process.
+    """
+    _CONTEXT_REGISTRY.pop(key, None)
+    clear_evidence(key)
+
+
 def clear_registry() -> None:
     """Clear all registered ExecutionContexts and their captured evidence."""
     _CONTEXT_REGISTRY.clear()
