@@ -99,10 +99,7 @@ def validate_plan_tool_compatibility(
 
 
 # Column arguments leak into a step's ``inputs`` under these suffixes
-# (``lat_column``, ``lon_column``, ``time_column``, ``timestamp_column``, ...).
-# Restricted to the ``_column``/``_col`` forms on purpose: artifact-wiring keys
-# (``field_stats``, ``columns``, ``metadata_standard``) never take this shape, so
-# the check cannot misfire on a legitimate input.
+# (``lat_column``, ``lon_column``, ``time_column``, ``spatial_columns``, ...).
 _COLUMN_KEY_SUFFIXES = ("_column", "_columns", "_col", "_cols")
 
 
@@ -126,18 +123,27 @@ def validate_plan_columns(
     """Reject a plan that references a column the data does not contain.
 
     Planners sometimes invent column names (``latitude``, ``longitude``,
-    ``timestamp``) when a spatial/temporal standard asks for coverage a dataset
-    cannot provide. Such a column surfaces as a step-input value under a
-    ``*_column`` key; every such value must name a real column of some resource.
+    ``timestamp``) when a standard asks for information a dataset cannot provide.
+    Such a column surfaces as a step-input value under a ``*_column`` key.
+
+    A value under such a key is flagged only when it is **neither** a real column
+    of some resource **nor** an artifact produced by a step. The second exclusion
+    matters: a key like ``spatial_columns`` can carry the *artifact* output of a
+    prior detection step (legitimate dataflow wiring), and whether that artifact
+    resolves in order is the dataflow validator's job, not this one's. This check
+    is strictly about *invented columns* — values that name nothing at all.
 
     Matching is case-insensitive and lenient across resources: a column is valid
     if it exists in *any* resource, so a mistaken ``target_resources`` never
-    causes a false rejection. A context with no columns at all (e.g. text)
-    rejects any column reference, which is correct.
+    causes a false rejection.
     """
     real_columns = _context_columns(context)
-    errors: List[str] = []
 
+    produced_artifacts = set(DEFAULT_WORKSPACE_ARTIFACTS)
+    for step in plan:
+        produced_artifacts.update(step.get("outputs", []))
+
+    errors: List[str] = []
     for i, step in enumerate(plan):
         task_name = step.get("task", "<unknown>")
         for key, value in step.get("inputs", {}).items():
@@ -145,11 +151,17 @@ def validate_plan_columns(
                 continue
             candidates = value if isinstance(value, list) else str(value).split(",")
             for col in (c.strip() for c in candidates):
-                if col and col.lower() not in real_columns:
-                    errors.append(
-                        f"Step {i+1} ('{task_name}') references column '{col}' via "
-                        f"'{key}', which is not a column of any resource in the context."
-                    )
+                if not col:
+                    continue
+                if col.lower() in real_columns:
+                    continue  # a real column — fine
+                if col in produced_artifacts:
+                    continue  # an artifact reference — dataflow's concern, not ours
+                errors.append(
+                    f"Step {i+1} ('{task_name}') references column '{col}' via "
+                    f"'{key}', which is neither a column of any resource nor an "
+                    "artifact produced by a step."
+                )
 
     if errors:
         return False, " | ".join(errors)

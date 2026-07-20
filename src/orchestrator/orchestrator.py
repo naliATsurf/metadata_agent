@@ -14,7 +14,12 @@ from src.config import DEFAULT_TOPOLOGY, LLM_PROVIDER, PLANNING_TEMPERATURE, cre
 from src.context import ContextType, ExecutionContext, create_context
 from src.context.context_classifier import classify_context_type
 from src.players import PLAYER_CONFIGS, Player, create_player_from_config
-from src.tools.base import register_context, unregister_context
+from src.tools.base import (
+    register_context,
+    survey_tools,
+    tools_for,
+    unregister_context,
+)
 from src.topology import EXECUTION_TOPOLOGIES
 from src.orchestrator.plan_executor import PlanExecutor
 from src.orchestrator.prompts import get_multi_csv_planning_prompt, get_single_csv_planning_prompt
@@ -184,6 +189,35 @@ class Orchestrator:
 
         return "\n".join(info_parts)
 
+    def _inspect_context(self, context: ExecutionContext) -> str:
+        """Deterministically inspect the data so the planner sees content, not just names.
+
+        The "inspect" in inspect-then-plan. Runs the same auto-fireable tool sweep
+        the player survey uses (:func:`~src.tools.base.survey_tools`) over whatever
+        tools the context serves, and hands the raw results to the planner. It is
+        standard-agnostic: it reports *whatever the available tools find* — field
+        stats, detected columns, samples — not any one standard's notion of what
+        matters. No LLM involved.
+        """
+        key = f"inspect_{uuid.uuid4().hex[:8]}"
+        register_context(key, context)
+        try:
+            findings = survey_tools(key, tools_for(context), context.resources)
+            if not findings:
+                return "Data profile: no inspection tools available for this context."
+            lines = []
+            for name, value in findings.items():
+                rendered = str(value)
+                if len(rendered) > 300:
+                    rendered = rendered[:300] + " …(truncated)"
+                lines.append(f"- {name}: {rendered}")
+            return (
+                "Data profile (from inspecting the actual data with the available "
+                "tools):\n" + "\n".join(lines)
+            )
+        finally:
+            unregister_context(key)
+
     def generate_plan(
         self, context: ExecutionContext, metadata_standard: str
     ) -> Optional[Plan]:
@@ -211,6 +245,8 @@ class Orchestrator:
 
         manifest = self._generate_player_manifest(context)
         context_info = self._generate_context_info(context)
+        # Inspect-then-plan: ground the plan in what the data actually contains.
+        context_info += "\n\n" + self._inspect_context(context)
 
         logging.info("Prepared planning inputs.")
         logging.info("  Context summary length: %d chars", len(context_info))

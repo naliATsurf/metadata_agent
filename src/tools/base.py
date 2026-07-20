@@ -52,6 +52,20 @@ RUNNER_SUPPLIED_ARGS = frozenset({"context_key", "resource"})
 _TOOL_REGISTRY: List[BaseTool] = []
 _CONTEXT_REGISTRY: Dict[str, ExecutionContext] = {}
 
+# Per-run memo of tool results: context_key -> {call signature -> result}.
+# Every player surveys the context independently, and they share the universal
+# toolset, so the same context-level tools would otherwise re-run once per player.
+# Tools are pure reads over a context that does not change within a run, so a
+# result is safe to reuse. Cleared with the context it belongs to.
+_RESULT_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _cache_signature(tool_name: str, resource: Optional[str], args: Dict[str, Any]) -> str:
+    """Stable key for one tool invocation: same tool + resource + args ⇒ same result."""
+    import json
+
+    return f"{tool_name}|{resource}|{json.dumps(args, sort_keys=True, default=str)}"
+
 
 # ---------------------------------------------------------------------------
 # Context registry
@@ -83,12 +97,14 @@ def unregister_context(key: str) -> None:
     accumulate across runs in a long-lived process.
     """
     _CONTEXT_REGISTRY.pop(key, None)
+    _RESULT_CACHE.pop(key, None)
     clear_evidence(key)
 
 
 def clear_registry() -> None:
-    """Clear all registered ExecutionContexts and their captured evidence."""
+    """Clear all registered ExecutionContexts, cached results, and evidence."""
     _CONTEXT_REGISTRY.clear()
+    _RESULT_CACHE.clear()
     clear_evidence()
 
 
@@ -158,17 +174,29 @@ def _build_llm_facing_function(
                 f"'{key}' is a {type(ctx).__name__} "
                 f"({ctx.context_type.value} context)."
             )
+
+        resource = bound.arguments.get("resource")
+        call_args = {k: v for k, v in bound.arguments.items() if k != "resource"}
+        signature = _cache_signature(fn.__name__, resource, call_args)
+        run_cache = _RESULT_CACHE.setdefault(key, {})
+
+        # Cache hit: an identical call already ran this run. Skip re-execution and,
+        # since the fact was already captured, skip the duplicate evidence record.
+        if signature in run_cache:
+            return run_cache[signature]
+
         result = fn(ctx, **bound.arguments)
+        run_cache[signature] = result
 
         # Provenance: capture the fact this tool just produced, keyed by the run's
         # context. Every tool passes through here, so this one site instruments
         # the whole tool surface. Recording is a pure append and cannot alter the
-        # returned value. Runs after ``fn`` so a raising tool records nothing.
-        call_args = {k: v for k, v in bound.arguments.items() if k != "resource"}
+        # returned value. Runs after ``fn`` so a raising tool records nothing, and
+        # only on a cache miss so the ledger holds each distinct fact once.
         record_evidence(
             context_key=key,
             tool=fn.__name__,
-            resource=bound.arguments.get("resource"),
+            resource=resource,
             args=call_args,
             result=result,
         )
@@ -270,3 +298,41 @@ def resolve_toolsets(
 def registered_toolsets() -> List[str]:
     """Sorted list of every toolset name currently registered."""
     return sorted({toolset_of(t) for t in _TOOL_REGISTRY})
+
+
+def survey_tools(
+    context_key: str,
+    tools: List[BaseTool],
+    resources: List[str],
+) -> Dict[str, Any]:
+    """Fire every auto-fireable tool over a context and collect the results.
+
+    Auto-fireable tools need only ``context_key`` (plus a ``resource``), so the
+    runner can call them with no model. Resource-scoped tools run once per
+    resource; the rest run once for the context. Errors are captured per tool,
+    not raised, so one failure does not sink the sweep.
+
+    This is the modality-agnostic evidence sweep. It is shared by the player's
+    survey phase and the orchestrator's inspect-then-plan pass — neither knows
+    or cares *which* tools apply; whatever toolsets a context serves are what get
+    run, so the sweep generalizes across standards and modalities for free.
+    """
+    results: Dict[str, Any] = {}
+    for tool in tools:
+        if not is_auto_fireable(tool):
+            continue
+        if is_resource_scoped(tool):
+            for resource in resources:
+                slot = f"{resource}:{tool.name}"
+                try:
+                    results[slot] = tool.invoke(
+                        {"context_key": context_key, "resource": resource}
+                    )
+                except Exception as e:
+                    results[slot] = f"Error: {e}"
+        else:
+            try:
+                results[tool.name] = tool.invoke({"context_key": context_key})
+            except Exception as e:
+                results[tool.name] = f"Error: {e}"
+    return results

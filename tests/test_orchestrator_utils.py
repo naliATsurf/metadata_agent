@@ -9,8 +9,9 @@ import pandas as pd
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.context.context_factory import create_context
+from src.orchestrator.orchestrator import Orchestrator
 from src.orchestrator.utils import validate_plan_columns, validate_plan_dataflow
-from src.tools.base import clear_registry
+from src.tools.base import _CONTEXT_REGISTRY, clear_registry
 
 class TestPlanValidation(unittest.TestCase):
 
@@ -149,6 +150,31 @@ class TestColumnValidation(unittest.TestCase):
         ok, _ = validate_plan_columns(plan, self.ctx)
         self.assertTrue(ok)
 
+    def test_produced_artifact_under_a_column_key_is_allowed(self):
+        """Regression: a detection output wired into a later step is not a column.
+
+        A `*_columns` key can legitimately carry the artifact a prior step
+        produced; that is dataflow wiring, not an invented column.
+        """
+        plan = [
+            {"task": "detect_spatial_columns", "inputs": {},
+             "outputs": ["spatial_columns"]},
+            {"task": "get_spatial_extent",
+             "inputs": {"spatial_columns": "spatial_columns"}, "outputs": ["extent"]},
+        ]
+        ok, msg = validate_plan_columns(plan, self.ctx)
+        self.assertTrue(ok, msg)
+
+    def test_value_that_is_neither_column_nor_artifact_still_rejected(self):
+        """The real failure mode survives: a value naming nothing at all."""
+        plan = [
+            {"task": "get_spatial_extent",
+             "inputs": {"lat_column": "latitude"}, "outputs": ["extent"]},
+        ]
+        ok, msg = validate_plan_columns(plan, self.ctx)
+        self.assertFalse(ok)
+        self.assertIn("latitude", msg)
+
     def test_column_reference_on_text_context_is_rejected(self):
         plan = [{"task": "get_spatial_extent", "inputs": {"lat_column": "lat"}}]
         ok, msg = validate_plan_columns(plan, self.text_ctx)
@@ -158,6 +184,46 @@ class TestColumnValidation(unittest.TestCase):
         plan = [{"task": "get_field_statistics", "inputs": {}, "outputs": ["stats"]}]
         ok, _ = validate_plan_columns(plan, self.ctx)
         self.assertTrue(ok)
+
+
+class TestContextInspection(unittest.TestCase):
+    """inspect-then-plan: the planner is handed detected content, not just names."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        # Skip __init__ (needs an LLM provider); _inspect_context needs no state.
+        self.orch = Orchestrator.__new__(Orchestrator)
+
+    def tearDown(self):
+        clear_registry()
+
+    def _csv(self, name, frame):
+        path = os.path.join(self.dir, name)
+        pd.DataFrame(frame).to_csv(path, index=False)
+        return create_context(path, name=name.replace(".csv", ""))
+
+    def test_profile_reports_the_real_columns(self):
+        """The profile is a generic tool sweep — it surfaces the actual schema."""
+        ctx = self._csv("plain.csv", {"species": ["ab", "cd"], "count": [1000, 2000]})
+        profile = self.orch._inspect_context(ctx)
+        self.assertIn("get_field_names", profile)   # the sweep ran
+        self.assertIn("species", profile)           # real columns surfaced
+        self.assertIn("count", profile)
+
+    def test_profile_surfaces_detected_coordinates_generically(self):
+        """No spatial-specific code: detection appears because the tool ran."""
+        ctx = self._csv(
+            "sight.csv",
+            {"lat": [54.1, 54.2], "lon": [-7.8, -7.9], "observed": ["2019-01", "2019-06"]},
+        )
+        profile = self.orch._inspect_context(ctx)
+        self.assertIn("detect_spatial_columns", profile)
+        self.assertIn("lat", profile)
+
+    def test_inspection_leaves_no_registered_context_behind(self):
+        ctx = self._csv("plain.csv", {"a": [1, 2]})
+        self.orch._inspect_context(ctx)
+        self.assertFalse([k for k in _CONTEXT_REGISTRY if k.startswith("inspect_")])
 
 
 if __name__ == '__main__':

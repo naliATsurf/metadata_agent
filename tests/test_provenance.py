@@ -20,7 +20,9 @@ from src.provenance import (
 from src.tools.base import (
     clear_registry,
     get_context,
+    is_auto_fireable,
     register_context,
+    tools_for,
     unregister_context,
 )
 from src.tools import universal
@@ -130,6 +132,55 @@ class EvidenceLedgerTest(unittest.TestCase):
         # the other run is untouched
         self.assertTrue(get_evidence(other_key))
         self.assertIsNotNone(get_context(other_key))
+
+
+class ToolResultCacheTest(unittest.TestCase):
+    """Repeated identical tool calls within a run are served from cache."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.csv = os.path.join(self.dir, "obs.csv")
+        pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}).to_csv(self.csv, index=False)
+        self.ctx = create_context(self.csv, name="obs")
+        self.key = register_context(f"k_{uuid.uuid4().hex[:8]}", self.ctx)
+        clear_evidence()
+
+    def tearDown(self):
+        clear_registry()
+
+    def test_identical_call_is_served_from_cache(self):
+        r1 = universal.list_resources.invoke({"context_key": self.key})
+        r2 = universal.list_resources.invoke({"context_key": self.key})
+        self.assertEqual(r1, r2)
+        # Recorded once → the second call was a cache hit (no re-run, no duplicate).
+        self.assertEqual(len(get_evidence(self.key)), 1)
+
+    def test_different_args_are_cached_separately(self):
+        universal.get_sample_items.invoke({"context_key": self.key, "resource": "obs", "n": 2})
+        universal.get_sample_items.invoke({"context_key": self.key, "resource": "obs", "n": 3})
+        self.assertEqual(len(get_evidence(self.key)), 2)
+
+    def test_repeated_survey_sweeps_collapse(self):
+        """Three players surveying the same context leave one fact per tool."""
+        for _ in range(3):
+            for tool in tools_for(self.ctx):
+                if is_auto_fireable(tool):
+                    payload = {"context_key": self.key}
+                    if "resource" in tool.args:
+                        payload["resource"] = "obs"
+                    tool.invoke(payload)
+        cited = [e.describe() for e in get_evidence(self.key)]
+        self.assertEqual(len(cited), len(set(cited)))  # no duplicates
+
+    def test_cache_is_cleared_with_the_context(self):
+        universal.list_resources.invoke({"context_key": self.key})
+        self.assertEqual(len(get_evidence(self.key)), 1)
+
+        unregister_context(self.key)
+        register_context(self.key, self.ctx)  # same key, fresh run
+        universal.list_resources.invoke({"context_key": self.key})
+        # A fresh record proves the cache was cleared (a stale hit would record 0).
+        self.assertEqual(len(get_evidence(self.key)), 1)
 
 
 class TabularAttributionTest(unittest.TestCase):

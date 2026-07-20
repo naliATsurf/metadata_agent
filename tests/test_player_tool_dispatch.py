@@ -15,7 +15,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from src.context.context_factory import create_context
 from src.players.configs import PLAYER_CONFIGS
 from src.players.player import create_player_from_config, tools_for_role
+from src.standards import get_schema_for_standard
 from src.tools.base import clear_registry, register_context
+
+DummyMetadata = get_schema_for_standard("dummy_standard")
 
 
 class ScriptedLLM:
@@ -169,6 +172,54 @@ class TestInvestigatePhase(PlayerDispatchTestBase):
         player = self._player("spatial_temporal_specialist", NoToolsLLM())
         results = player._investigate("x", self.key, {}, list(player.tools))
         self.assertEqual(results, {})
+
+
+class TestSynthesis(PlayerDispatchTestBase):
+    def test_single_player_string_synthesis_is_verbatim_and_llm_free(self):
+        llm = ScriptedLLM([])
+        player = self._player("metadata_specialist", llm)
+
+        with patch.object(player, "_synthesize_string") as string_synth:
+            result = player.synthesize_results(
+                task="summarize",
+                all_results=[{"player": "p", "analysis": "THE RESULT", "tool_results": {}}],
+                output_schema=None,
+            )
+
+        self.assertEqual(result, "THE RESULT")   # the player's analysis, verbatim
+        string_synth.assert_not_called()         # no model synthesis
+        self.assertEqual(llm.invocations, 0)     # no model round-trip at all
+
+    def test_multiple_players_still_synthesize_via_model(self):
+        """The passthrough is narrow: >1 result still goes through the model."""
+        player = self._player("metadata_specialist", ScriptedLLM([]))
+
+        with patch.object(player, "_synthesize_string", return_value="merged") as string_synth:
+            result = player.synthesize_results(
+                task="summarize",
+                all_results=[
+                    {"player": "a", "analysis": "one", "tool_results": {}},
+                    {"player": "b", "analysis": "two", "tool_results": {}},
+                ],
+                output_schema=None,
+            )
+
+        self.assertEqual(result, "merged")
+        string_synth.assert_called_once()
+
+    def test_single_player_structured_output_still_uses_model(self):
+        """Structured output is excluded: mapping onto a schema is not a no-op."""
+        player = self._player("metadata_specialist", ScriptedLLM([]))
+
+        with patch.object(player, "_synthesize_structured", return_value="structured") as struct_synth:
+            result = player.synthesize_results(
+                task="summarize",
+                all_results=[{"player": "p", "analysis": "THE RESULT", "tool_results": {}}],
+                output_schema=DummyMetadata,
+            )
+
+        self.assertEqual(result, "structured")
+        struct_synth.assert_called_once()
 
 
 class TestToolsetResolutionForRoles(PlayerDispatchTestBase):

@@ -81,9 +81,9 @@ Your goal is to generate a step-by-step plan to extract metadata from a resource
 
 **Grounding rules (CRITICAL — read before planning):**
 - Use the **exact resource name(s)** from the Context Overview in `target_resources`. Never use the file type (e.g. "SINGLE_CSV") as a resource name.
-- **Never invent column names.** Do not assume columns such as `latitude`, `longitude`, or `timestamp` exist. Refer only to columns shown in the overview.
+- **Never invent column names.** Refer only to columns shown in the Context Overview and Data profile. Do not assume a column exists because the standard mentions a concept.
 - `inputs` is **only** for workspace artifacts produced by previous steps. Never put tool arguments (such as a column name) in `inputs`.
-- Which column is spatial or temporal is discovered automatically at execution time — the `spatial_temporal_specialist` detects the relevant columns itself. Do not name columns in the plan.
+- Do not name specific columns or pick tools for a step. Which columns a step works on is discovered at execution time by the assigned player's own tools; your job is to choose steps and players, not their arguments.
 
 **Key Instructions:**
 1.  **Be CONCISE**: Create the MINIMUM number of steps needed. Combine related analyses into single steps.
@@ -93,7 +93,7 @@ Your goal is to generate a step-by-step plan to extract metadata from a resource
     -   **One artifact per `inputs` value**: Each value must be exactly **one** workspace artifact name. Never use comma-separated lists in a single value—the runtime treats the entire string as one artifact id and does not split on commas. If several prior artifacts are needed, use **multiple** parameter keys (one per artifact) or add an earlier step whose **single** `outputs` entry bundles them under one new name, then reference only that name.
 3.  **Use Available Players**: You can only assign tasks to players from the provided list.
 4.  **Provide Rationale**: Briefly explain the purpose of each step in the `rationale` field.
-5.  **Conditional Spatial Step**: If the metadata standard contains spatial/geospatial requirements, add a `spatial_temporal_specialist` step before final generation.
+5.  **Match steps to what the data supports**: The Metadata Standard defines the fields to fill; the Data profile shows what the data actually contains. Add an analysis step (with the appropriate specialist player) to gather a field's information **only when the profile shows the data supports it**. If the standard asks for something the profile shows the data lacks, do not add a step for it — leave that field for the generator to set to null.
 
 **Metadata Standard to Adhere To:**
 ```
@@ -105,14 +105,13 @@ Your goal is to generate a step-by-step plan to extract metadata from a resource
 - For simple standards (≤5 fields): Use 2-3 steps maximum (1 analysis step + 1 generation step)
 - For medium standards (6-10 fields): Use 3-4 steps maximum
 - For complex standards (>10 fields): Group related fields and use 4-6 steps maximum
-- If spatial/geospatial requirements are detected in `{metadata_standard}`, the plan SHOULD be exactly 4 steps: (1) data profiling, (2) supporting analysis if needed, (3) `spatial_temporal_specialist`, (4) final `metadata_generator`.
+- Add a specialist analysis step only when the standard needs information a specialist player can extract **and** the Data profile shows the data supports it. When no such step is warranted, keep the plan to profiling + generation.
 
 **CRITICAL - Data Profiling Requirement (Even for Small Datasets):**
 - At least one step BEFORE the final generation MUST be executed by `data_analyst` and MUST run `get_field_statistics` (optionally also `get_missing_values`) so numeric ranges and distributions are available for metadata values.
 - If the context has multiple resources, run `get_field_statistics` for each resource (or a combined step that still produces per-resource `field_stats` artifacts).
-- If **Metadata Standard** indicates spatial/geospatial requirements, you MUST include a `spatial_temporal_specialist` step before final metadata generation.
-- Infer this from the text of `{metadata_standard}` (for example: spatial, geospatial, geometry, coordinate, latitude, longitude, bbox/bounding box, CRS, extent, coverage). Do not rely on standard name matching.
-- When you add a `spatial_temporal_specialist` step, do **not** name columns or pick tools for it. It detects spatial and temporal columns (separate lat/lon, tuple coordinates, or timestamps) at execution time and chooses the right tool itself. Give it an empty `inputs` and let it discover the columns.
+- The Data profile is authoritative about what the data contains; the standard's wording is only a statement of *desire*. Add analysis steps only for information the profile shows the data actually supports, and leave unsupportable fields for the generator to set to null.
+- Give analysis steps an empty `inputs` and let the assigned player discover the relevant columns at execution; never name columns or choose tools in the plan.
 
 **MANDATORY - FINAL STEP Requirements:**
 The last step MUST:

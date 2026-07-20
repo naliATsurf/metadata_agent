@@ -29,7 +29,11 @@ from src.config import (
     create_llm,
 )
 from src.context.base_context import ExecutionContext
-from src.tools.base import is_auto_fireable, is_resource_scoped, resolve_toolsets
+from src.tools.base import (
+    is_auto_fireable,
+    resolve_toolsets,
+    survey_tools,
+)
 
 
 def _format_args(args: Dict[str, Any]) -> str:
@@ -127,34 +131,14 @@ class Player:
         context_key: str,
         resources: List[str],
     ) -> Dict[str, Any]:
-        """Run every tool that needs no arguments beyond a resource name.
+        """Run every auto-fireable tool this player owns over the context.
 
-        Deterministic and cheap: this is the evidence bundle the player always
-        gathers. Resource-scoped tools run once per target resource; the rest
-        run once for the whole context.
+        Deterministic and cheap: the evidence bundle the player always gathers,
+        before the model chooses any parameterized tools. Delegates to the shared
+        :func:`~src.tools.base.survey_tools` so the same sweep backs both this
+        phase and the orchestrator's inspect-then-plan pass.
         """
-        results: Dict[str, Any] = {}
-
-        for tool in self.tools:
-            if not is_auto_fireable(tool):
-                continue
-
-            if is_resource_scoped(tool):
-                for resource in resources:
-                    key = f"{resource}:{tool.name}"
-                    try:
-                        results[key] = tool.invoke(
-                            {"context_key": context_key, "resource": resource}
-                        )
-                    except Exception as e:
-                        results[key] = f"Error: {e}"
-            else:
-                try:
-                    results[tool.name] = tool.invoke({"context_key": context_key})
-                except Exception as e:
-                    results[tool.name] = f"Error: {e}"
-
-        return results
+        return survey_tools(context_key, self.tools, resources)
 
     def _investigate(
         self,
@@ -599,11 +583,20 @@ while maintaining accuracy and your analytical perspective.""")
         Returns:
             Synthesized result as a string or Pydantic model instance
         """
+        # Single-player, string output: there is nothing to consolidate, so return
+        # the sole player's analysis verbatim. This makes single-player synthesis
+        # deterministic and avoids a redundant LLM round-trip. The structured case
+        # is excluded — it still needs the model to map the analysis onto the
+        # schema, which is not a no-op even for one result.
+        if output_schema is None and len(all_results) == 1:
+            sole = all_results[0]
+            return sole.get("analysis", str(sole))
+
         results_str = "\n\n".join([
             f"=== {r.get('player', 'Unknown')} ===\n{r.get('analysis', str(r))}"
             for r in all_results
         ])
-        
+
         if output_schema is not None:
             # Use structured output with Pydantic schema
             return self._synthesize_structured(task, results_str, output_schema)
