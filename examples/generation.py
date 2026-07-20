@@ -18,6 +18,7 @@ from src import config as agent_config
 from examples import config as example_config
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 
@@ -68,6 +69,7 @@ logger.info("**************************** Start of Workflow ********************
 # 1. Define the input source. DATA_FILE should point at the dataset that will be
 # inspected when the context is created.
 log_step_section(1, "Define source")
+dataset_name = Path(example_config.DATA_FILE).stem
 source = {"data": example_config.DATA_FILE}
 topology_name = agent_config.DEFAULT_TOPOLOGY
 
@@ -79,12 +81,12 @@ step_start = log_step_timing("Define source", step_start)
 # 2. Create a context object. The context wraps the source data and gives the
 # planner/executor a stable dataset name to reference.
 log_step_section(2, "Create context")
-context = create_context(source=source, name="my_dataset")
+context = create_context(source=source, name=dataset_name)
 step_start = log_step_timing("Create context", step_start)
-logging.info(f"Context: {context.name}")
-logging.info(f"Context type: {context.context_type.value}")
-logging.info(f"Resources: {context.resources}")
-logging.info("=" * 60)
+logger.info(f"Context: {context.name}")
+logger.info(f"Context type: {context.context_type.value}")
+logger.info(f"Resources: {context.resources}")
+logger.info("=" * 60)
 
 
 # 3. Ask the orchestrator to generate a metadata extraction plan for the target
@@ -139,11 +141,13 @@ provenance = result.final_provenance or {}
 evidence = result.final_evidence or []
 output_dir = Path(example_config.OUTPUT_DIR)
 output_dir.mkdir(parents=True, exist_ok=True)
-with (output_dir / f"metadata_{context.name}.json").open("w", encoding="utf-8") as f:
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+with (output_dir / f"metadata_{dataset_name}_{timestamp}.json").open("w", encoding="utf-8") as f:
     json.dump(metadata_output, f, ensure_ascii=False, indent=2, default=str)
-with (output_dir / f"provenance_{context.name}.json").open("w", encoding="utf-8") as f:
+with (output_dir / f"provenance_{dataset_name}_{timestamp}.json").open("w", encoding="utf-8") as f:
     json.dump(provenance, f, ensure_ascii=False, indent=2, default=str)
-with (output_dir / f"evidence_{context.name}.json").open("w", encoding="utf-8") as f:
+with (output_dir / f"evidence_{dataset_name}_{timestamp}.json").open("w", encoding="utf-8") as f:
     json.dump(evidence, f, ensure_ascii=False, indent=2, default=str)
 
 metadata_json = json.dumps(metadata_output, ensure_ascii=False, indent=2, default=str)

@@ -5,6 +5,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).parent / "_ext"))
 
 project = "Metadata Agent"
 # author = "Your Name"
@@ -22,6 +23,7 @@ extensions = [
     "sphinx.ext.viewcode",
     "myst_parser",
     "sphinx_copybutton",
+    "promptdocs",  # generates prompts.md from the live prompt templates
 ]
 
 autoapi_type = "python"
@@ -33,6 +35,14 @@ autoapi_options = [
     "show-module-summary",
     "imported-members",
 ]
+
+# Generate `#slug` anchors for h1-h3 so pages can link to their own sections.
+myst_heading_anchors = 3
+
+# The prompt reference renders the templates' own ```json examples, which use
+# ellipses and so aren't valid JSON. Pygments falls back to relaxed lexing and
+# renders them fine; the warning is noise.
+suppress_warnings = ["misc.highlighting_failure"]
 
 napoleon_google_docstring = True
 napoleon_numpy_docstring = False

@@ -10,5 +10,6 @@ examples
 demo
 architecture
 modules
+prompts
 reference/index
 ```
