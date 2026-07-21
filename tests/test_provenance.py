@@ -12,7 +12,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from src.context.context_factory import create_context
 from src.provenance import (
+    Caller,
     attribute_metadata,
+    attributed_to,
     clear_evidence,
     get_evidence,
     serialize_evidence,
@@ -105,6 +107,7 @@ class EvidenceLedgerTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(set(rows[0]), {
             "id", "context_key", "tool", "resource", "args", "result", "citation",
+            "used_by",
         })
 
     def test_clear_registry_also_clears_evidence(self):
@@ -181,6 +184,62 @@ class ToolResultCacheTest(unittest.TestCase):
         universal.list_resources.invoke({"context_key": self.key})
         # A fresh record proves the cache was cleared (a stale hit would record 0).
         self.assertEqual(len(get_evidence(self.key)), 1)
+
+
+class CallerAttributionTest(unittest.TestCase):
+    """Every fact records who fired it and at which step, even under dedup."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.csv = os.path.join(self.dir, "obs.csv")
+        pd.DataFrame({"a": [1, 2, 3]}).to_csv(self.csv, index=False)
+        self.ctx = create_context(self.csv, name="obs")
+        self.key = register_context(f"k_{uuid.uuid4().hex[:8]}", self.ctx)
+        clear_evidence()
+
+    def tearDown(self):
+        clear_registry()
+
+    def _invoke(self):
+        universal.list_resources.invoke({"context_key": self.key})
+
+    def test_producing_call_records_its_caller(self):
+        with attributed_to(Caller(agent="player", role="profiler", step=2, phase="survey")):
+            self._invoke()
+        used_by = get_evidence(self.key)[0].used_by
+        self.assertEqual(len(used_by), 1)
+        self.assertEqual(
+            used_by[0],
+            {"agent": "player", "role": "profiler", "step": 2,
+             "phase": "survey", "cached": False},
+        )
+
+    def test_cache_hit_appends_reuse_by_a_different_caller(self):
+        """The same fact, reused by a later step, records the second caller too."""
+        with attributed_to(Caller(agent="player", role="profiler", step=0, phase="survey")):
+            self._invoke()
+        with attributed_to(Caller(agent="player", role="spatial", step=1, phase="survey")):
+            self._invoke()  # cache hit: no new entry, but a new use
+
+        entries = get_evidence(self.key)
+        self.assertEqual(len(entries), 1)                      # still one fact
+        uses = entries[0].used_by
+        self.assertEqual([u["cached"] for u in uses], [False, True])
+        self.assertEqual([u["role"] for u in uses], ["profiler", "spatial"])
+        self.assertEqual([u["step"] for u in uses], [0, 1])
+
+    def test_call_outside_a_scope_is_attributed_to_unknown(self):
+        self._invoke()  # no attributed_to scope
+        use = get_evidence(self.key)[0].used_by[0]
+        self.assertEqual(use["agent"], "unknown")
+        self.assertIsNone(use["step"])
+
+    def test_used_by_survives_serialization(self):
+        with attributed_to(Caller(agent="orchestrator", phase="inspect")):
+            self._invoke()
+        row = serialize_evidence(self.key)[0]
+        self.assertEqual(row["used_by"][0]["agent"], "orchestrator")
+        self.assertEqual(row["used_by"][0]["phase"], "inspect")
 
 
 class TabularAttributionTest(unittest.TestCase):

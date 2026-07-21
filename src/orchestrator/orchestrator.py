@@ -14,6 +14,7 @@ from src.config import DEFAULT_TOPOLOGY, LLM_PROVIDER, PLANNING_TEMPERATURE, cre
 from src.context import ContextType, ExecutionContext, create_context
 from src.context.context_classifier import classify_context_type
 from src.players import PLAYER_CONFIGS, Player, create_player_from_config
+from src.provenance import Caller, attributed_to
 from src.tools.base import (
     register_context,
     survey_tools,
@@ -202,7 +203,8 @@ class Orchestrator:
         key = f"inspect_{uuid.uuid4().hex[:8]}"
         register_context(key, context)
         try:
-            findings = survey_tools(key, tools_for(context), context.resources)
+            with attributed_to(Caller(agent="orchestrator", phase="inspect")):
+                findings = survey_tools(key, tools_for(context), context.resources)
             if not findings:
                 return "Data profile: no inspection tools available for this context."
             lines = []

@@ -198,7 +198,10 @@ class ExecutionResult(BaseModel):
             "Every tool invocation captured during the run, in order: the fact "
             "each tool produced, addressable by evidence_id. The raw material the "
             "provenance sidecar attributes values to, and what makes an "
-            "'unverifiable' field interpretable — you can see what was available."
+            "'unverifiable' field interpretable — you can see what was available. "
+            "Each entry's 'used_by' lists the callers (agent/role/step/phase) that "
+            "produced or reused the fact, so a deduplicated fact still shows who "
+            "asked and at which step."
         ),
     )
 

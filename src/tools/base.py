@@ -43,7 +43,7 @@ from typing import Any, Callable, Dict, List, Optional, Type
 from langchain_core.tools import BaseTool, tool as _lc_tool
 
 from src.context.base_context import ExecutionContext
-from src.provenance import clear_evidence, record_evidence
+from src.provenance import clear_evidence, record_evidence, record_reuse
 
 # Arguments the runner can always supply itself. Any other required argument
 # (column, field, lat_column, ...) means the tool needs a model to call it.
@@ -52,11 +52,12 @@ RUNNER_SUPPLIED_ARGS = frozenset({"context_key", "resource"})
 _TOOL_REGISTRY: List[BaseTool] = []
 _CONTEXT_REGISTRY: Dict[str, ExecutionContext] = {}
 
-# Per-run memo of tool results: context_key -> {call signature -> result}.
+# Per-run memo of tool results: context_key -> {call signature -> (result, entry)}.
 # Every player surveys the context independently, and they share the universal
 # toolset, so the same context-level tools would otherwise re-run once per player.
 # Tools are pure reads over a context that does not change within a run, so a
-# result is safe to reuse. Cleared with the context it belongs to.
+# result is safe to reuse. The captured evidence entry is memoized alongside so a
+# cache hit can attribute its reuse to the fact. Cleared with the context.
 _RESULT_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
@@ -180,26 +181,32 @@ def _build_llm_facing_function(
         signature = _cache_signature(fn.__name__, resource, call_args)
         run_cache = _RESULT_CACHE.setdefault(key, {})
 
-        # Cache hit: an identical call already ran this run. Skip re-execution and,
-        # since the fact was already captured, skip the duplicate evidence record.
+        # Cache hit: an identical call already ran this run. Skip re-execution and
+        # the duplicate evidence record, but still note the reuse — this caller
+        # (a different step or player) relied on the fact, which is exactly the
+        # attribution that would otherwise be lost to deduplication.
         if signature in run_cache:
-            return run_cache[signature]
+            result, entry = run_cache[signature]
+            record_reuse(entry)
+            return result
 
         result = fn(ctx, **bound.arguments)
-        run_cache[signature] = result
 
         # Provenance: capture the fact this tool just produced, keyed by the run's
         # context. Every tool passes through here, so this one site instruments
         # the whole tool surface. Recording is a pure append and cannot alter the
         # returned value. Runs after ``fn`` so a raising tool records nothing, and
-        # only on a cache miss so the ledger holds each distinct fact once.
-        record_evidence(
+        # only on a cache miss so the ledger holds each distinct fact once. The
+        # entry is cached alongside the result so later cache hits can attribute
+        # their reuse to it.
+        entry = record_evidence(
             context_key=key,
             tool=fn.__name__,
             resource=resource,
             args=call_args,
             result=result,
         )
+        run_cache[signature] = (result, entry)
         return result
 
     # LangChain reads both of these to build the argument schema; functools.wraps

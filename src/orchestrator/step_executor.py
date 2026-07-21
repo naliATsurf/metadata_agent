@@ -70,7 +70,8 @@ def execute_parallel_node(state: StepExecutionState) -> Dict[str, Any]:
                 context_info=context_info,
                 workspace=workspace,
                 inputs=input_mappings,
-                target_resources=target_resources
+                target_resources=target_resources,
+                step_index=state["step_index"]
             )
             
             player_results.append({

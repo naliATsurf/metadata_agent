@@ -28,17 +28,93 @@ enough for a generator to cite (``source_ref``), for a human to read
 (``describe``), and for a verifier to *replay* — re-invoke the same tool with the
 same args and check the value still follows. Tabular evidence is a reproducible
 computation, not a quotation, which is what makes it the most verifiable kind.
+
+Each entry also carries ``used_by``: the callers that relied on it, in order.
+A fact is produced once but requested by many (the orchestrator's inspect pass,
+then several players across steps); deduplication would erase who asked, so the
+callers are recorded as a list of uses rather than a single field. See ``Caller``
+and ``attributed_to`` below.
 """
 
 from __future__ import annotations
 
+import contextvars
 import itertools
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 
 _counter = itertools.count(1)
 _LEDGER: Dict[str, List["EvidenceEntry"]] = {}
+
+
+# ---------------------------------------------------------------------------
+# Caller attribution — who asked, at which step
+#
+# A fact is deduplicated by (tool, resource, args): the orchestrator's inspect
+# pass and several players may each request it, but it is produced once. So the
+# caller cannot live on the fact as a single value — it is a *list of uses*. The
+# current caller is carried ambiently in a contextvar rather than threaded
+# through every tool signature, because the tool boundary is reached through
+# LangChain's ``tool.invoke`` and the model's own tool-calling loop, neither of
+# which we can add a parameter to. Each phase enters an ``attributed_to`` scope
+# around the tools it fires; the capture site reads the scope on production and
+# on every cache hit, so one fact records every step and player that used it.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Caller:
+    """Identity of whatever is firing tools right now."""
+
+    agent: str                      # "orchestrator" | "player"
+    role: Optional[str] = None      # player role key; None for the orchestrator
+    step: Optional[int] = None      # plan step index; None before a plan exists
+    phase: Optional[str] = None     # "inspect" | "survey" | "investigate"
+
+    def as_use(self, *, cached: bool) -> Dict[str, Any]:
+        return {
+            "agent": self.agent,
+            "role": self.role,
+            "step": self.step,
+            "phase": self.phase,
+            "cached": cached,
+        }
+
+
+_UNKNOWN_USE = {
+    "agent": "unknown",
+    "role": None,
+    "step": None,
+    "phase": None,
+}
+
+_current_caller: contextvars.ContextVar[Optional[Caller]] = contextvars.ContextVar(
+    "current_caller", default=None
+)
+
+
+@contextmanager
+def attributed_to(caller: Caller) -> Iterator[None]:
+    """Scope in which tool calls are attributed to ``caller``."""
+    token = _current_caller.set(caller)
+    try:
+        yield
+    finally:
+        _current_caller.reset(token)
+
+
+def current_caller() -> Optional[Caller]:
+    """The caller tools are currently being fired on behalf of, if any."""
+    return _current_caller.get()
+
+
+def _use_of(caller: Optional[Caller], *, cached: bool) -> Dict[str, Any]:
+    """A usage record for the current caller, or an 'unknown' one outside a scope."""
+    if caller is None:
+        return {**_UNKNOWN_USE, "cached": cached}
+    return caller.as_use(cached=cached)
 
 
 @dataclass
@@ -51,6 +127,14 @@ class EvidenceEntry:
     resource: Optional[str]
     args: Dict[str, Any] = field(default_factory=dict)
     result: Any = None
+    # Every caller that used this fact, in order. The first is the producer
+    # (cached=False); the rest are cache hits (cached=True) — the same fact
+    # reused by later steps and players without re-running the tool.
+    used_by: List[Dict[str, Any]] = field(default_factory=list)
+
+    def add_use(self, caller: Optional["Caller"], *, cached: bool) -> None:
+        """Record that ``caller`` relied on this fact; ``cached`` if served from cache."""
+        self.used_by.append(_use_of(caller, cached=cached))
 
     def describe(self) -> str:
         """Human/LLM-facing citation, e.g. ``get_temporal_extent(measurements, {'time_column': 'date'})``."""
@@ -70,6 +154,7 @@ class EvidenceEntry:
             "args": self.args,
             "result": self.result,
             "citation": self.describe(),
+            "used_by": self.used_by,
         }
 
 
@@ -80,8 +165,12 @@ def record_evidence(
     resource: Optional[str],
     args: Dict[str, Any],
     result: Any,
-) -> str:
-    """Append a captured invocation to the ledger and return its evidence id."""
+) -> "EvidenceEntry":
+    """Append a captured invocation to the ledger and return the entry.
+
+    The call that produced the fact is itself its first use, attributed to
+    whichever caller scope is active (see :func:`attributed_to`).
+    """
     entry = EvidenceEntry(
         id=f"ev_{next(_counter):06d}",
         context_key=context_key,
@@ -90,8 +179,14 @@ def record_evidence(
         args=dict(args),
         result=result,
     )
+    entry.add_use(current_caller(), cached=False)
     _LEDGER.setdefault(context_key, []).append(entry)
-    return entry.id
+    return entry
+
+
+def record_reuse(entry: "EvidenceEntry") -> None:
+    """Note that the current caller reused an already-captured fact (a cache hit)."""
+    entry.add_use(current_caller(), cached=True)
 
 
 def get_evidence(context_key: str) -> List[EvidenceEntry]:

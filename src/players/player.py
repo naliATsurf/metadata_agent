@@ -29,6 +29,7 @@ from src.config import (
     create_llm,
 )
 from src.context.base_context import ExecutionContext
+from src.provenance import Caller, attributed_to
 from src.tools.base import (
     is_auto_fireable,
     resolve_toolsets,
@@ -213,7 +214,8 @@ class Player:
         context_info: Dict[str, Any],
         workspace: Dict[str, Any],
         inputs: Dict[str, str],
-        target_resources: Optional[List[str]] = None
+        target_resources: Optional[List[str]] = None,
+        step_index: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Execute a specific task using available tools.
@@ -231,6 +233,8 @@ class Player:
             workspace: Dictionary of artifacts from previous steps
             inputs: Mapping of parameter names to artifact names in workspace
             target_resources: List of specific resources this task targets
+            step_index: Index of this step in the plan, recorded on every fact
+                this player's tool calls produce or reuse (provenance attribution)
 
         Returns:
             Dictionary containing the execution result and any produced artifacts
@@ -245,13 +249,23 @@ class Player:
         target_resources = target_resources or []
         resources_to_analyze = target_resources or resources
 
-        tool_results = self._survey(context_key, resources_to_analyze)
+        # Attribute every fact this step's tools produce or reuse to this player,
+        # so the evidence ledger records who asked and at which step. The survey
+        # and investigation are distinct phases and tagged as such.
+        def _as(phase: str) -> Caller:
+            return Caller(
+                agent="player", role=self.role_key, step=step_index, phase=phase
+            )
+
+        with attributed_to(_as("survey")):
+            tool_results = self._survey(context_key, resources_to_analyze)
 
         investigable = [t for t in self.tools if not is_auto_fireable(t)]
         if investigable and PLAYER_TOOL_EXECUTION_MODE == "investigate":
-            tool_results.update(
-                self._investigate(task, context_key, tool_results, investigable)
-            )
+            with attributed_to(_as("investigate")):
+                tool_results.update(
+                    self._investigate(task, context_key, tool_results, investigable)
+                )
 
         ctx_info = _describe_context(context_info, target_resources, context_key)
         tool_descriptions = "\n".join(
