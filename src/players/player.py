@@ -267,13 +267,30 @@ class Player:
                     self._investigate(task, context_key, tool_results, investigable)
                 )
 
-        ctx_info = _describe_context(context_info, target_resources, context_key)
-        tool_descriptions = "\n".join(
-            f"- {tool.name}: {tool.description}" for tool in self.tools
-        ) or "No tools available."
+        # Every value the template needs, defined in one place. All are filled at
+        # invoke time as template variables — none are f-string-baked into the
+        # template text — which keeps them brace-safe: inserted values are not
+        # re-parsed for `{...}`, and tool results are dict reprs full of braces
+        # that would otherwise be misread as template placeholders.
+        prompt_vars = {
+            "name": self.name,
+            "role_prompt": self.role_prompt,
+            "tool_descriptions": "\n".join(
+                f"- {tool.name}: {tool.description}" for tool in self.tools
+            ) or "No tools available.",
+            "ctx_info": _describe_context(context_info, target_resources, context_key),
+            "task": task,
+            "target_resources": ", ".join(target_resources) if target_resources else (
+                "All resources" if is_multi_resource else "N/A"
+            ),
+            "input_context": "\n".join(
+                f"- {k}: {v}" for k, v in resolved_inputs.items()
+            ) or "No inputs from previous steps.",
+            "tool_results": str(tool_results),
+        }
 
         prompt = ChatPromptTemplate.from_messages([
-            ("system", f"""You are {self.name}. {self.role_prompt}
+            ("system", """You are {name}. {role_prompt}
 
 The following tools were run on your behalf; their results are provided below.
 {tool_descriptions}
@@ -294,24 +311,17 @@ Target resources for this step: {target_resources}
 Input context from previous steps:
 {input_context}
 
+Tool Results:
+{tool_results}
+
 Execute this task and provide a comprehensive response. Include:
 1. Your approach to the task
 2. Any relevant observations or findings
 3. The result of your analysis""")
         ])
 
-        input_context = "\n".join(
-            f"- {k}: {v}" for k, v in resolved_inputs.items()
-        ) or "No inputs from previous steps."
-
         chain = prompt | self.llm | self._output_parser
-        llm_response = chain.invoke({
-            "task": task,
-            "target_resources": ", ".join(target_resources) if target_resources else (
-                "All resources" if is_multi_resource else "N/A"
-            ),
-            "input_context": input_context + "\n\nTool Results:\n" + str(tool_results),
-        })
+        llm_response = chain.invoke(prompt_vars)
 
         return {
             "player": self.name,
