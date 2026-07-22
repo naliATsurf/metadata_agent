@@ -7,6 +7,13 @@ router machinery; the sources it routes over are :class:`~src.context.Searchable
 contexts.
 """
 
+from src.router.catalog import Catalog, ResolvedColumn, resolve_catalog
 from src.router.schema import FieldSpec, walk_schema
 
-__all__ = ["FieldSpec", "walk_schema"]
+__all__ = [
+    "Catalog",
+    "FieldSpec",
+    "ResolvedColumn",
+    "resolve_catalog",
+    "walk_schema",
+]

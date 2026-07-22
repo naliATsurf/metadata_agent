@@ -127,10 +127,16 @@ Linking escalates most-authoritative first, stopping at the first strong hit:
 
 Two properties keep this principled rather than a pile of heuristics:
 
-- **The value prior is the recomputable floor.** With no name signal and no
-  codebook, `la` ∈ [−90,90] paired with a [−180,180] column is strong,
-  *computable* evidence of lat/lon → high assurance, no text dependency. It is the
-  honest generalization of what `detect_spatial_columns` already does.
+- **The value prior is a referee, not a general identifier.** Values identify only
+  a few self-evident kinds — a coordinate range, a parseable date — and say nothing
+  about the long tail (pH, biomass, a trait score are all just "numeric, some
+  range"). So a column of that long tail *abstains* rather than borrow a
+  meaningless label; "unresolved" is a first-class outcome. What the prior is
+  reliable for is **refutation**: it need not know what `tmp` is to know its 4–22
+  values are not Kelvin. Resolution is also **doc-scale** — profiles come from a
+  *sample*, never a full-table scan; a million-row data table is sampled, never
+  indexed, and the codebook coverage test keeps it from being mistaken for a
+  dictionary.
 - **Text link and value prior cross-check.** Agreement → high confidence.
   Disagreement (codebook says latitude, values in [−180,180]) → **conflict,
   surfaced** — a stale codebook is exactly what field-driven routing should
@@ -190,13 +196,18 @@ Ordered so each is testable before the next and the migration stays incremental.
      free and deterministic. It scores ~0 for an opaque name against a semantic
      query *by design*; the embedding replacement is the open decision below, and
      catalog resolution (layer 3) closes the gap.
-3. **Catalog resolution (symbol linking).** A pre-routing pass that enriches the
-   raw schema catalog with descriptions harvested from the document surfaces, so
-   opaque columns (`la` → latitude) become routable. Escalates
-   structured-dictionary → lexical → value-prior → fuzzy; cross-checks text links
-   against value priors; caches per `context_key`; short-circuits when a
-   structured data dictionary is present. `N columns × M chunks`, done once, cheap
-   next to extraction. Feeds the enriched catalog to the router. See
+3. ✅ **Catalog resolution (symbol linking)** (`src/router/catalog.py`). A
+   pre-routing pass that enriches the raw catalog with descriptions harvested from
+   the other resources, so opaque columns (`la` → latitude) become routable.
+   `resolve_catalog(target, sources)` escalates structured-dictionary → lexical
+   prose → self-evident value type, and **abstains** when none apply — the long
+   tail the values cannot name is left unresolved, not mislabelled. The value
+   profile's dependable role is **refutation**: it cross-checks a link's claimed
+   units/meaning against the values (Kelvin/coordinate-range checks) regardless of
+   whether it can identify the column. `Catalog.search` ranks the *enriched*
+   columns, closing the gap `TabularContext.search` cannot. Doc-scale: profiles are
+   sampled, never a full scan. Deferred: retrieval-first discovery over unknown
+   sources, grounded LLM extraction from free prose, fuzzy linking, caching. See
    [The semantic gap](#the-semantic-gap-and-cross-file-symbol-resolution).
 4. **Router → `FieldPlan`.** For each `FieldSpec`, pick a bucket, run `search`
    over the *enriched* catalog where needed, produce a `FieldRouting`. Coverage
@@ -290,8 +301,11 @@ is contained to layers 1–6 and the swap is reversible.
   `src/context/base_context.py`, per-modality `search`, `src/tools/search.py`.
   Tests: `tests/test_router_schema.py`, `tests/test_searchable.py`. The literal
   `TextContext.search` grep was renamed `grep`. No planner change yet.
-- **M2 — Catalog resolution** (layer 3). Enriched catalog with link evidence;
-  measured against opaque-name datasets in isolation.
+- **M2 ✅ — Catalog resolution** (layer 3). `src/router/catalog.py`:
+  `resolve_catalog` / `Catalog` / `ResolvedColumn`, structured-dictionary +
+  lexical-prose + value-prior linking, units/range cross-check, and an enriched
+  `Catalog.search`. Tests: `tests/test_catalog.py`. Deferred: fuzzy linking,
+  caching.
 - **M3 — Router + `FieldPlan` + coverage report** (layer 4). Emits the artifact;
   still executes via the old planner for comparison.
 - **M4 — Compile + `Task.fields` + assembly task** (layer 5). Field-driven
