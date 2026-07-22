@@ -14,7 +14,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from src.context.context_factory import create_context
 from src.players.configs import PLAYER_CONFIGS
-from src.players.player import create_player_from_config, tools_for_role
+from src.players.player import (
+    _drop_subsumed_results,
+    create_player_from_config,
+    tools_for_role,
+)
 from src.standards import get_schema_for_standard
 from src.tools.base import clear_registry, register_context
 
@@ -251,6 +255,49 @@ class TestToolsetResolutionForRoles(PlayerDispatchTestBase):
 
     def test_critic_has_no_tools(self):
         self.assertEqual(tools_for_role(PLAYER_CONFIGS["critic"], self.ctx), [])
+
+
+class SubsumedResultDedupTest(unittest.TestCase):
+    """The survey feed drops describers wholly contained in a larger one."""
+
+    def test_strict_subset_describer_is_dropped(self):
+        overview = {"resources": {"data": {"fields": [f"c{i}" for i in range(30)]}}}
+        # Same 30 field names, nothing new — a strict leaf-subset of overview.
+        resource_info = {"fields": [f"c{i}" for i in range(30)]}
+        curated = _drop_subsumed_results(
+            {"get_context_overview": overview, "get_resource_info": resource_info}
+        )
+        self.assertIn("get_context_overview", curated)
+        self.assertNotIn("get_resource_info", curated)
+
+    def test_result_with_distinct_facts_is_kept(self):
+        overview = {"fields": [f"c{i}" for i in range(30)]}
+        # Statistics introduce leaves (means) absent from overview → not subsumed.
+        stats = {f"c{i}": {"mean": i * 1.5} for i in range(30)}
+        curated = _drop_subsumed_results(
+            {"get_context_overview": overview, "get_field_statistics": stats}
+        )
+        self.assertEqual(set(curated), {"get_context_overview", "get_field_statistics"})
+
+    def test_small_result_is_kept_even_if_contained(self):
+        """A degenerate result stays: its containment could be coincidental."""
+        overview = {"resources": {"data": {}}, "count": 0, "fields": ["a", "b"]}
+        curated = _drop_subsumed_results(
+            {
+                "get_context_overview": overview,
+                "list_resources": ["data"],       # {"data"} ⊆ overview, but tiny
+                "get_missing_values": {"a": 0},   # {0} ⊆ overview, but tiny
+            }
+        )
+        self.assertEqual(
+            set(curated),
+            {"get_context_overview", "list_resources", "get_missing_values"},
+        )
+
+    def test_identical_results_keep_exactly_one(self):
+        a = {"fields": [f"c{i}" for i in range(30)]}
+        curated = _drop_subsumed_results({"first": dict(a), "second": dict(a)})
+        self.assertEqual(len(curated), 1)
 
 
 if __name__ == "__main__":

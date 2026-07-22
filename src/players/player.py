@@ -42,6 +42,53 @@ def _format_args(args: Dict[str, Any]) -> str:
     return ", ".join(f"{k}={v!r}" for k, v in args.items() if k != "context_key")
 
 
+def _leaves(obj: Any):
+    """Every scalar leaf in a nested result, as strings."""
+    if isinstance(obj, dict):
+        for v in obj.values():
+            yield from _leaves(v)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            yield from _leaves(v)
+    else:
+        yield str(obj)
+
+
+def _drop_subsumed_results(
+    results: Dict[str, Any], min_leaves: int = 20
+) -> Dict[str, Any]:
+    """Drop survey results whose content is wholly contained in a larger one.
+
+    Several universal tools describe the whole context — a schema, an overview, a
+    per-resource dump — and overlap almost entirely: measured on a real run,
+    ``get_context_schema`` and ``get_resource_info`` are strict leaf-subsets of
+    ``get_context_overview``, so feeding all three floods the prompt with the same
+    facts three times. This collapses that redundancy value-first, without naming
+    any tool: a result is dropped when every one of its scalar leaves also appears
+    in a larger result, since the player can already see all of it there.
+
+    The ``min_leaves`` guard keeps small results whose containment would be
+    coincidental — a lone ``0`` from a missing-value count, or a resource name —
+    where a shared leaf does not mean the fact is genuinely restated. Only
+    substantial describers, where full containment cannot be accidental, collapse.
+    """
+    leafsets = {key: set(_leaves(value)) for key, value in results.items()}
+
+    # Largest first, so a subset is dropped in favour of its superset and two
+    # identical results keep whichever is seen first.
+    kept: List[str] = []
+    for key in sorted(results, key=lambda k: len(leafsets[k]), reverse=True):
+        leaves = leafsets[key]
+        subsumed = len(leaves) >= min_leaves and any(
+            leaves <= leafsets[other] for other in kept
+        )
+        if not subsumed:
+            kept.append(key)
+
+    kept_set = set(kept)
+    return {key: value for key, value in results.items() if key in kept_set}
+
+
 def _describe_context(
     context_info: Dict[str, Any], target_resources: List[str], context_key: str
 ) -> str:
@@ -286,7 +333,7 @@ class Player:
             "input_context": "\n".join(
                 f"- {k}: {v}" for k, v in resolved_inputs.items()
             ) or "No inputs from previous steps.",
-            "tool_results": str(tool_results),
+            "tool_results": str(_drop_subsumed_results(tool_results)),
         }
 
         prompt = ChatPromptTemplate.from_messages([
