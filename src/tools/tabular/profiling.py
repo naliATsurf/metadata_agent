@@ -6,7 +6,7 @@ from src.context.base_context import TabularContext
 from src.tools.base import context_tool
 
 
-@context_tool(toolset="tabular.profiling", requires=TabularContext)
+@context_tool(toolset="tabular.profiling", requires=TabularContext, answers_field=True)
 def get_field_names(ctx: TabularContext, resource: str = "") -> List[str]:
     """Get the field (column) names for a resource."""
     resource = resource or ctx.resources[0]

@@ -209,10 +209,21 @@ Ordered so each is testable before the next and the migration stays incremental.
    sampled, never a full scan. Deferred: retrieval-first discovery over unknown
    sources, grounded LLM extraction from free prose, fuzzy linking, caching. See
    [The semantic gap](#the-semantic-gap-and-cross-file-symbol-resolution).
-4. **Router → `FieldPlan`.** For each `FieldSpec`, pick a bucket, run `search`
-   over the *enriched* catalog where needed, produce a `FieldRouting`. Coverage
-   falls out: every field has a routing or is flagged `none` → `unverifiable`
-   *before* extraction.
+4. ✅ **Router → `FieldPlan`** (`src/router/route.py`). `route_fields(schema,
+   catalog, docs)` walks the schema and routes each field to a bucket —
+   **structural** (a whole-resource tool), **ambiguous-structural** (`Catalog.
+   search` over the enriched columns), or **narrative** (document search) —
+   producing a `FieldRouting` per field and a `FieldPlan`. **The bucket is
+   standard-agnostic:** no keyword table. Structural tools self-declare with
+   `answers_field=True` on `@context_tool`, and the router ranks the field query
+   against those tools' descriptions pooled with the columns (one BM25 ranking);
+   the winning candidate's kind names the bucket, and a field matching nothing
+   structured falls through to the documents. Assurance is two-hop for a computed
+   column (inherits the catalog resolution's confidence); a field neither corpus
+   answers is `unresolved` → `unverifiable` *before* extraction, reported by
+   `FieldPlan.coverage()`. M3 emits the artifact by calling the search methods;
+   firing them through the tool with `phase="route"` attribution comes with
+   execution (M4).
 5. **Compile `FieldPlan` → `Plan(List[Task])`.** The linchpin-1 step:
    - Group routings sharing (resource set, extractor) into one `Task`, **capped by
      a token budget** so grouping does not re-introduce flooding at the group
@@ -306,8 +317,11 @@ is contained to layers 1–6 and the swap is reversible.
   lexical-prose + value-prior linking, units/range cross-check, and an enriched
   `Catalog.search`. Tests: `tests/test_catalog.py`. Deferred: fuzzy linking,
   caching.
-- **M3 — Router + `FieldPlan` + coverage report** (layer 4). Emits the artifact;
-  still executes via the old planner for comparison.
+- **M3 ✅ — Router + `FieldPlan` + coverage report** (layer 4).
+  `src/router/route.py`: `route_fields` / `FieldPlan` / `FieldRouting`, three-bucket
+  routing over the enriched catalog and document sources, two-hop assurance, and a
+  coverage report with pre-extraction `unresolved` detection. Tests:
+  `tests/test_route.py`. Compile-to-`Task` and execution are M4.
 - **M4 — Compile + `Task.fields` + assembly task** (layer 5). Field-driven
   execution end to end behind the flag.
 - **M5 — Assurance axis + verify reconciliation** (layer 6, provenance). Closes

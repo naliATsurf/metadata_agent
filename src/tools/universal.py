@@ -49,9 +49,10 @@ def get_resource_info(ctx: ExecutionContext, resource: str) -> Dict[str, Any]:
     return ctx.get_resource_info(resource).to_dict()
 
 
-@context_tool(toolset="universal")
+@context_tool(toolset="universal", answers_field=True)
 def get_item_count(ctx: ExecutionContext, resource: str = "") -> int:
-    """Get the number of items in a resource (rows for tables, chunks for documents)."""
+    """Get the number of items in a resource: the row or record count for a table,
+    the chunk count for a document."""
     resource = resource or ctx.resources[0]
     return ctx.get_resource_info(resource).item_count
 
