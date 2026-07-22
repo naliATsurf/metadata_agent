@@ -13,8 +13,12 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 
 from src.context.base_context import (
     ContextType,
-    ExecutionContext,
+    EvidenceRef,
+    Searchable,
     TextResourceInfo,
+    bm25_scores,
+    content_terms,
+    tokenize,
 )
 
 
@@ -59,13 +63,42 @@ def fixed_size_chunker(chunk_size: int) -> Callable[[str], List[int]]:
     return _chunker
 
 
-class TextContext(ExecutionContext):
+_HEADING_RE = re.compile(r"(?m)^#{1,6}[ \t]")
+
+
+def markdown_chunker(text: str) -> List[int]:
+    """Return chunk start offsets, splitting *before* each Markdown heading.
+
+    Each chunk is a section — its heading line followed by its body — so the
+    heading travels with the content it introduces. Because a chunk literally
+    begins with its heading, the heading's terms are part of what ``search``
+    ranks (a section under ``## Licence`` scores for the ``license`` field) with
+    no separate context field and no break to the span/offset contract.
+    """
+    offsets = [0]
+    for match in _HEADING_RE.finditer(text):
+        if match.start() != 0:
+            offsets.append(match.start())
+    return sorted(set(offsets))
+
+
+def _default_chunker_for(text: str) -> Callable[[str], List[int]]:
+    """Pick a chunker from the content: heading-aware for Markdown, else paragraphs."""
+    return markdown_chunker if _HEADING_RE.search(text) else paragraph_chunker
+
+
+class TextContext(Searchable):
     """
     ExecutionContext implementation for free-text files.
 
     Each input file is one resource. Chunking is a read-time concern
     (``iter_chunks``), not a storage format: the default splits on blank
     lines (paragraphs); pass a different ``chunker`` to override.
+
+    As a :class:`Searchable`, it ranks its chunks against a query
+    (:meth:`search`, returning :class:`EvidenceRef` spans). :meth:`grep` is the
+    separate literal/regex match utility — exact, unranked — kept distinct from
+    the fuzzy capability search.
     """
 
     PREVIEW_CHARS = 500
@@ -82,7 +115,9 @@ class TextContext(ExecutionContext):
 
         self._resources: Dict[str, str] = self._normalize_source(source)
         self._encoding = encoding
-        self._chunker = chunker or paragraph_chunker
+        # None means "choose per resource from its content" (see iter_chunks);
+        # an explicit chunker overrides that everywhere.
+        self._chunker = chunker
         self._text_cache: Dict[str, str] = {}
 
     def _normalize_source(
@@ -143,18 +178,26 @@ class TextContext(ExecutionContext):
         """
         Iterate over a resource as chunks.
 
-        The chunker maps the full text to a list of chunk start offsets;
-        defaults to the context-level chunker (paragraphs).
+        The chunker maps the full text to a list of chunk start offsets. An
+        explicit ``chunker`` (here or on the context) wins; otherwise one is
+        chosen from the content — heading-aware for Markdown, paragraphs
+        otherwise (see :func:`_default_chunker_for`).
         """
         text = self.read_text(resource)
-        offsets = (chunker or self._chunker)(text)
+        selected = chunker or self._chunker or _default_chunker_for(text)
+        offsets = selected(text)
 
         for i, start in enumerate(offsets):
             end = offsets[i + 1] if i + 1 < len(offsets) else len(text)
-            chunk_text = text[start:end].strip()
+            raw = text[start:end]
+            chunk_text = raw.strip()
             if chunk_text:
+                # start_offset points at the first non-whitespace char, so
+                # text[start_offset : start_offset + len(chunk_text)] == chunk_text
+                # exactly — the span/offset contract the provenance verifier relies on.
+                lead = len(raw) - len(raw.lstrip())
                 yield TextChunk(
-                    resource=resource, index=i, text=chunk_text, start_offset=start
+                    resource=resource, index=i, text=chunk_text, start_offset=start + lead
                 )
 
     def get_chunks(self, resource: str) -> List[TextChunk]:
@@ -165,7 +208,38 @@ class TextContext(ExecutionContext):
         """Render the first ``n`` chunks as text."""
         return "\n\n".join(chunk.text for chunk in self.get_chunks(resource)[:n])
 
-    def search(
+    def search(self, query: str, resource: str = "", k: int = 5) -> List[EvidenceRef]:
+        """Rank chunks against the query and return the top ``k`` as spans.
+
+        The :class:`Searchable` capability: a fuzzy, ranked locate that may
+        return nothing. Chunks are scored by lexical overlap with the query (the
+        dependency-free baseline; an embedding scorer replaces it later) and
+        returned as ``quoted_span`` refs — pointers an extractor then quotes.
+        For exact substring/regex matching, use :meth:`grep` instead.
+        """
+        query_terms = content_terms(query)
+        targets = [resource] if resource else self.resources
+
+        chunks = [chunk for res in targets for chunk in self.iter_chunks(res)]
+        scores = bm25_scores(query_terms, [tokenize(c.text) for c in chunks])
+
+        refs: List[EvidenceRef] = []
+        for chunk, score in zip(chunks, scores):
+            if score > 0:
+                snippet = chunk.text[:200] + ("…" if len(chunk.text) > 200 else "")
+                refs.append(
+                    EvidenceRef(
+                        resource=chunk.resource,
+                        locator=(chunk.start_offset, chunk.start_offset + len(chunk.text)),
+                        kind="quoted_span",
+                        snippet=snippet,
+                        score=score,
+                    )
+                )
+        refs.sort(key=lambda r: r.score, reverse=True)
+        return refs[:k]
+
+    def grep(
         self,
         query: str,
         resource: Optional[str] = None,
@@ -174,8 +248,9 @@ class TextContext(ExecutionContext):
         max_results: int = 20,
     ) -> List[Dict[str, Any]]:
         """
-        Search for a query string (or regex) across one or all resources.
+        Literal (or regex) match of a query across one or all resources.
 
+        Exact and unranked — distinct from the fuzzy :meth:`search` capability.
         Returns matches with surrounding context, ordered by position.
         """
         pattern = re.compile(

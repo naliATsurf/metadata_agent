@@ -94,6 +94,55 @@ generalization is "given *any* field description, rank the columns that could
 satisfy it," after which the existing tabular tools do the real, recomputable
 work.
 
+### The semantic gap and cross-file symbol resolution
+
+The schema-catalog search assumes column *names* carry signal. Real datasets
+violate this constantly: a latitude column named `la`, `l`, or a random code. No
+embedding turns `la` into "latitude" — **the signal is not there.** But it is
+usually *elsewhere in the bundle*: a codebook, a data dictionary, or a README line
+`la = latitude, decimal degrees N`. So this is a **missing-context problem, not a
+retrieval-tuning problem**, and the fix is a step that imports the missing context
+into the catalog *before* routing.
+
+**Catalog resolution (symbol linking).** A pass, run once per context before the
+router, that turns each opaque column into a *described* column by pulling
+explanations from the other files. The router then searches the **enriched**
+catalog, so the gap is bridged upstream of retrieval — retrieval quality is
+downstream of catalog quality.
+
+```
+{ name: "la", dtype: float, samples: [10.0, 10.5] }                        # raw
+{ name: "la", ..., description: "latitude, decimal degrees",               # resolved
+  link_evidence: "codebook.csv#L12", link_confidence: "high" }
+```
+
+Linking escalates most-authoritative first, stopping at the first strong hit:
+
+| Signal | Example | Precision |
+|---|---|---|
+| Structured dictionary parse | a codebook table `variable | description | units`, row `la` | highest (authoritative map) |
+| Lexical token match in prose | README: "`la` = latitude" | high when the doc uses the token |
+| Value / distributional prior | `la` ∈ [−90,90], paired with `lo` ∈ [−180,180] | high **and recomputable** |
+| Fuzzy / positional | `la`~`lat`; doc lists variables in column order | low — must be verified |
+
+Two properties keep this principled rather than a pile of heuristics:
+
+- **The value prior is the recomputable floor.** With no name signal and no
+  codebook, `la` ∈ [−90,90] paired with a [−180,180] column is strong,
+  *computable* evidence of lat/lon → high assurance, no text dependency. It is the
+  honest generalization of what `detect_spatial_columns` already does.
+- **Text link and value prior cross-check.** Agreement → high confidence.
+  Disagreement (codebook says latitude, values in [−180,180]) → **conflict,
+  surfaced** — a stale codebook is exactly what field-driven routing should
+  expose, resolved by the debate machinery.
+
+**Provenance is a two-hop chain.** A value filled from column `la` *because* the
+codebook says `la` is latitude rests on the **computation** (recomputable, high)
+*and* the **interpretation** (`codebook#L12`, quoted, medium). The field's
+assurance is the **weaker hop**, and provenance must cite *both*. Linchpin 2's
+verifier confirms not just the value-to-column trace but that the **link** is real
+— a wrong link is the failure mode here.
+
 ### Not every field is searched
 
 Scope bound: fields fall into three buckets, and only two need search.
@@ -103,9 +152,11 @@ Scope bound: fields fall into three buckets, and only two need search.
 2. **Ambiguous-structural** → the *schema router* ("which column is the date?").
 3. **Narrative** → *document retrieval* (`abstract`, `license`, `methodology`).
 
-## Data model 🔲
+## Data model 🟡
 
-Four new types; the last is the persisted deliverable.
+Four new types; the last is the persisted deliverable. `FieldSpec` and
+`EvidenceRef` landed in M1 (`src/router/schema.py`,
+`src/context/base_context.py`); `FieldRouting` and `FieldPlan` are M3.
 
 ```
 FieldSpec       { path, description, type, required }          # flattened from the schema
@@ -118,25 +169,40 @@ FieldPlan       { routings: {field_path: FieldRouting}, schema_ref }   # source 
 `kind` on `EvidenceRef` is the assurance carrier: `computed_column` >
 `verified_span` > `quoted_span`.
 
-## The pipeline — five layers 🔲
+## The pipeline — six layers 🟡
 
 Ordered so each is testable before the next and the migration stays incremental.
 
-1. **Schema walker → `FieldSpec[]`.** Flatten the output schema to leaf fields
-   with descriptions, handling nested/optional/union Pydantic models (naive
-   "iterate the fields" fails on nesting). Pure function.
-2. **`Searchable` capability + `search_context` tool.** One capability class
-   (gated by `requires=Searchable`, like `TabularContext`), one
-   `@context_tool`. Because it funnels through the tool boundary, retrievals land
-   in the evidence ledger with `used_by` (new `phase="route"`) for free, and
-   identical queries dedupe through `_RESULT_CACHE`.
-   - `TextContext.search` → semantic retrieval over prose → spans.
-   - `TabularContext.search` → field-to-column matching over the identifier
-     catalog → column pointers (generalizing `detect_*_columns`).
-3. **Router → `FieldPlan`.** For each `FieldSpec`, pick a bucket, run `search`
-   where needed, produce a `FieldRouting`. Coverage falls out: every field has a
-   routing or is flagged `none` → `unverifiable` *before* extraction.
-4. **Compile `FieldPlan` → `Plan(List[Task])`.** The linchpin-1 step:
+1. ✅ **Schema walker → `FieldSpec[]`** (`src/router/schema.py`). Flattens the
+   output schema to leaf fields with descriptions, unwrapping
+   nested/optional/union Pydantic models; containers are leaves. Pure function.
+2. ✅ **`Searchable` capability + `search_context` tool.** `Searchable` +
+   `EvidenceRef` in `src/context/base_context.py`; `TabularContext` and
+   `TextContext` reparented to it and implement `search`; `search_context` tool
+   in `src/tools/search.py`. Funnels through the tool boundary, so retrievals land
+   in the evidence ledger with `used_by` (the router sets `phase="route"` in M3)
+   and dedupe through `_RESULT_CACHE`.
+   - `TextContext.search` → ranks chunks → `quoted_span` refs. (The pre-existing
+     literal grep was renamed `TextContext.grep`.)
+   - `TabularContext.search` → ranks columns over the identifier catalog →
+     `computed_column` refs (generalizing `detect_*_columns`).
+   - **Scorer is a lexical baseline** (`tokenize` / `lexical_score`) — dependency-
+     free and deterministic. It scores ~0 for an opaque name against a semantic
+     query *by design*; the embedding replacement is the open decision below, and
+     catalog resolution (layer 3) closes the gap.
+3. **Catalog resolution (symbol linking).** A pre-routing pass that enriches the
+   raw schema catalog with descriptions harvested from the document surfaces, so
+   opaque columns (`la` → latitude) become routable. Escalates
+   structured-dictionary → lexical → value-prior → fuzzy; cross-checks text links
+   against value priors; caches per `context_key`; short-circuits when a
+   structured data dictionary is present. `N columns × M chunks`, done once, cheap
+   next to extraction. Feeds the enriched catalog to the router. See
+   [The semantic gap](#the-semantic-gap-and-cross-file-symbol-resolution).
+4. **Router → `FieldPlan`.** For each `FieldSpec`, pick a bucket, run `search`
+   over the *enriched* catalog where needed, produce a `FieldRouting`. Coverage
+   falls out: every field has a routing or is flagged `none` → `unverifiable`
+   *before* extraction.
+5. **Compile `FieldPlan` → `Plan(List[Task])`.** The linchpin-1 step:
    - Group routings sharing (resource set, extractor) into one `Task`, **capped by
      a token budget** so grouping does not re-introduce flooding at the group
      level.
@@ -147,7 +213,7 @@ Ordered so each is testable before the next and the migration stays incremental.
    - One terminal **assembly `Task`** depends on all extraction tasks (fan-in),
      replacing the monolithic `metadata_generator` synthesis.
    - `PlanExecutor` / `StepExecutor` then run **unchanged**.
-5. **Reconcile + verify (linchpin 2).** Walk the `FieldPlan`; for each field find
+6. **Reconcile + verify (linchpin 2).** Walk the `FieldPlan`; for each field find
    its result via the `Task.fields` correlation; build provenance a-priori
    (`source_ref` = the routed candidate); then run `attribute_field` as the
    verifier and downgrade/`unverifiable` on mismatch.
@@ -189,6 +255,8 @@ verifier reruns the same search.
 | Cardinality ≠ 1:1 | fields share candidates, or one field needs several sources | Task tagged with a *set* of fields; assembly gathers each field across tasks |
 | Dependency graph reshaped | `validate_task_dependencies` assumes step-to-step data flow | model as fan-out (independent extraction) → fan-in (one assembly) |
 | Topology overkill | forcing every field through multi-player debate re-creates the flood cost | choose topology per task by assurance |
+| **Semantic gap / opaque names** | column `la` for latitude; the field query matches nothing | catalog resolution imports descriptions from doc surfaces *before* routing; value-prior floor when text linking is absent |
+| **Wrong cross-file link** | codebook maps `la`→latitude but it is stale/wrong | cross-check text link against value prior; two-hop provenance cites the link; verifier confirms the link, not just the value |
 | Retrieval precision | wrong span → confident wrong value *with a citation* | assurance grade + verify pass + abstention threshold |
 | Query quality | thin/jargon `Field(description=...)` retrieves badly, silently | detect low-signal fields, fall back to broad survey; allow query expansion |
 | Loss of holistic reasoning | per-field extraction misses cross-field inference the monolithic generator had | final consistency/assembly pass; group coupled fields |
@@ -202,7 +270,7 @@ Build the router as an **alternative planner strategy** that emits the same
 `Plan`/`Task` shape, behind a flag. Run it beside the source-driven planner on the
 sample datasets and **diff field-driven vs source-driven output** before switching
 anything. Because nothing downstream of the compile step changes, the blast radius
-is contained to layers 1–5 and the swap is reversible.
+is contained to layers 1–6 and the swap is reversible.
 
 ## Open decisions ⛔
 
@@ -217,12 +285,55 @@ is contained to layers 1–5 and the swap is reversible.
 
 ## Milestones
 
-- **M1 — Schema walker + `Searchable`/`search_context`** (layers 1–2). Testable in
-  isolation; no planner change yet.
-- **M2 — Router + `FieldPlan` + coverage report** (layer 3). Emits the artifact;
+- **M1 ✅ — Schema walker + `Searchable`/`search_context`** (layers 1–2). Landed:
+  `src/router/schema.py`, `Searchable`/`EvidenceRef`/lexical scorer in
+  `src/context/base_context.py`, per-modality `search`, `src/tools/search.py`.
+  Tests: `tests/test_router_schema.py`, `tests/test_searchable.py`. The literal
+  `TextContext.search` grep was renamed `grep`. No planner change yet.
+- **M2 — Catalog resolution** (layer 3). Enriched catalog with link evidence;
+  measured against opaque-name datasets in isolation.
+- **M3 — Router + `FieldPlan` + coverage report** (layer 4). Emits the artifact;
   still executes via the old planner for comparison.
-- **M3 — Compile + `Task.fields` + assembly task** (layer 4). Field-driven
+- **M4 — Compile + `Task.fields` + assembly task** (layer 5). Field-driven
   execution end to end behind the flag.
-- **M4 — Assurance axis + verify reconciliation** (layer 5, provenance). Closes
+- **M5 — Assurance axis + verify reconciliation** (layer 6, provenance). Closes
   linchpin 2.
-- **M5 — Diff against source-driven on sample datasets; flip the default.**
+- **M6 — Diff against source-driven on sample datasets; flip the default.**
+
+## Test fixture ✅
+
+A purpose-built bundle exercises every hard case above. It lives at
+`data/sample/router_test/` and pairs with the `field_router_test` standard in
+`src/standards.py`. The "answer key" is kept **here, in the docs**, not in the
+bundle, so the router cannot ingest it.
+
+**Bundle:**
+
+- `observations.csv` — 200 rows, opaque columns `oid, la, lo, dt, sp, n, tmp, elv`.
+- `codebook.csv` — data dictionary mapping each opaque column to a label + units.
+- `README.md` — the narrative source (title, abstract, methods, licence, …).
+
+**Expected fills, by routing bucket:**
+
+| Field | Bucket | Source | Expected |
+|---|---|---|---|
+| `title`, `abstract`, `methodology`, `creator`, `funding`, `license` | narrative | README.md | quoted from prose (`license` = CC BY 4.0) |
+| `record_count` | structural | observations.csv | **200** (see conflict below) |
+| `temporal_coverage` | ambiguous-structural | `dt` column / README | 2019-03-11 … 2021-09-30 (README says "March 2019 to September 2021") |
+| `spatial_coverage` | ambiguous-structural | `la`/`lo` via codebook | ~ min_lat 53.22, max_lat 54.79, min_lon −10.20, max_lon −8.61 |
+| `variables` | ambiguous-structural | codebook.csv | the measured columns explained (`sp` → species codes, etc.) |
+| `temperature_units` | ambiguous-structural | codebook vs values | **conflict below** |
+
+**Planted traps:**
+
+1. **Semantic gap.** Columns are opaque (`la`, `lo`, `tmp`). No value survives
+   without the codebook link. Tests catalog resolution (layer 3).
+2. **Lat/lon undisambiguated by value.** Both `la` (53–55) and `lo` (−10–−9) fall
+   in [−90, 90], so the value-prior alone cannot say which is latitude. The
+   codebook must. Tests that linking beats naive range-checking.
+3. **Record-count conflict.** README asserts "1,000 observations"; the CSV has
+   **200**. Tests conflict surfacing (computed count should win over the prose
+   claim, with both cited).
+4. **Stale-units conflict.** `codebook.csv` says `tmp` is in **Kelvin**; values
+   are 4–22, unambiguously **Celsius**. Tests the text-link-vs-value cross-check —
+   the resolver should flag the disagreement, not trust the codebook blindly.

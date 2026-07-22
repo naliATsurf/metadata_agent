@@ -28,7 +28,10 @@ Tools that need a specific access style gate on the subclass
 tabular.
 """
 
+import math
+import re
 from abc import ABC, abstractmethod
+from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, ClassVar, Dict, Iterator, List, Optional, Union
@@ -355,13 +358,137 @@ class ExecutionContext(ABC):
         return f"{self.name} ({self.context_type.value}: {resource_info})"
 
 
-class TabularContext(ExecutionContext):
+# ---------------------------------------------------------------------------
+# Searchable — the capability the field-driven router routes over
+#
+# See docs/development/plan_field_router.md. Search returns *pointers*, not
+# values: a column a computation then runs on (tabular), or a span an extractor
+# then quotes (text). Ranking is BM25 over the candidate documents (columns or
+# chunks) — a strong, deterministic, dependency-free lexical baseline. It is the
+# seam a dense/embedding scorer replaces for the narrative fields (an open
+# decision in the plan); staying lexical keeps the results replayable, which the
+# assurance grade depends on.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class EvidenceRef:
+    """A candidate location that could answer a field's query.
+
+    ``kind`` carries the assurance distinction — ``computed_column`` >
+    ``verified_span`` > ``quoted_span`` — and ``locator`` is a column name
+    (tabular) or a ``(start, end)`` char span (text).
+    """
+
+    resource: str
+    locator: Any
+    kind: str
+    snippet: str
+    score: float
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "resource": self.resource,
+            "locator": self.locator,
+            "kind": self.kind,
+            "snippet": self.snippet,
+            "score": round(self.score, 4),
+        }
+
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+# A small English stop list. It is the noise gate on the query side: a field
+# description is a sentence ("How the data was collected"), and without this a
+# chunk matching only "the"/"for" would surface. Kept deliberately small; the
+# real discrimination comes from BM25's idf.
+_STOPWORDS = frozenset(
+    """a an and are as at be been by for from had has have in into is it its of on
+    or over per that the their then there these this those to under was were what
+    when where which who will with within you your our we they he she""".split()
+)
+
+
+def tokenize(text: str) -> List[str]:
+    """Lowercase alphanumeric tokens."""
+    return _TOKEN_RE.findall((text or "").lower())
+
+
+def content_terms(query: str) -> List[str]:
+    """Query tokens with stop words removed — the terms worth matching on."""
+    return [t for t in tokenize(query) if t not in _STOPWORDS]
+
+
+def bm25_scores(
+    query_terms: List[str],
+    docs: List[List[str]],
+    k1: float = 1.5,
+    b: float = 0.75,
+) -> List[float]:
+    """Okapi BM25 score of each tokenized document against the query.
+
+    Rewards rare, discriminative terms (idf) and term frequency, normalized for
+    document length. Deterministic and dependency-free. A document sharing no
+    query term scores 0 — which is how an opaque column (``la``) against a
+    semantic query (``latitude``) abstains, the semantic gap catalog resolution
+    (layer 3) closes. Returned scores are aligned with ``docs``.
+    """
+    n = len(docs)
+    query_set = set(query_terms)
+    if n == 0 or not query_set:
+        return [0.0] * n
+
+    counters = [Counter(d) for d in docs]
+    lengths = [len(d) for d in docs]
+    avgdl = sum(lengths) / n or 1.0
+
+    df: Dict[str, int] = {}
+    for counter in counters:
+        for term in counter:
+            df[term] = df.get(term, 0) + 1
+
+    scores: List[float] = []
+    for counter, length in zip(counters, lengths):
+        score = 0.0
+        for term in query_set:
+            freq = counter.get(term, 0)
+            if not freq:
+                continue
+            idf = math.log(1 + (n - df[term] + 0.5) / (df[term] + 0.5))
+            score += idf * (freq * (k1 + 1)) / (
+                freq + k1 * (1 - b + b * length / avgdl)
+            )
+        scores.append(score)
+    return scores
+
+
+class Searchable(ExecutionContext):
+    """Capability: locate candidate evidence for a query.
+
+    A context is ``Searchable`` when it can rank its own contents against a
+    field's information need and return :class:`EvidenceRef` pointers. Each
+    modality implements it differently — a table matches the query against its
+    column catalog, a document against its text — but tools gate on the one
+    capability (``requires=Searchable``), so the router routes over any modality
+    without branching. Ranked and fuzzy by design: ``search`` may return
+    nothing, which is the signal that a field has no source here.
+    """
+
+    @abstractmethod
+    def search(self, query: str, resource: str = "", k: int = 5) -> List[EvidenceRef]:
+        """Return up to ``k`` candidate refs for ``query``, best score first."""
+        pass
+
+
+class TabularContext(Searchable):
     """
     Abstract base class for row/column-oriented execution contexts.
 
     Adds DataFrame-based access on top of the universal contract. CSV and
     SQLite contexts implement this; tools that operate on columns (statistics,
-    missing values, temporal/spatial column detection) require it.
+    missing values, temporal/spatial column detection) require it. As a
+    :class:`Searchable`, it also ranks its columns against a query
+    (:meth:`search`).
     """
 
     @abstractmethod
@@ -393,3 +520,45 @@ class TabularContext(ExecutionContext):
 
     def preview(self, resource: str, n: int = 5) -> str:
         return self.read_resource(resource, limit=n).to_string()
+
+    def search(self, query: str, resource: str = "", k: int = 5) -> List[EvidenceRef]:
+        """Rank columns against the query over the identifier catalog.
+
+        Generalises ``detect_spatial_columns`` / ``detect_temporal_columns`` from
+        two hardcoded field types to any query: score each column's name (plus
+        any description and sample values) against the query terms and return the
+        top matches as ``computed_column`` refs — pointers a computation tool then
+        runs on. Opaque names score low here by construction; catalog resolution
+        (layer 3) enriches the catalog before this runs.
+        """
+        query_terms = content_terms(query)
+        targets = [resource] if resource else self.resources
+
+        # Each column is a document: its name plus any description and samples.
+        columns = []  # (resource, FieldInfo, doc_terms)
+        for res in targets:
+            info = self.get_resource_info(res)
+            for f in getattr(info, "fields", []):
+                doc_terms = tokenize(f.name)
+                if f.description:
+                    doc_terms += tokenize(f.description)
+                doc_terms += tokenize(" ".join(str(v) for v in f.sample_values[:5]))
+                columns.append((res, f, doc_terms))
+
+        scores = bm25_scores(query_terms, [doc for _, _, doc in columns])
+        refs: List[EvidenceRef] = []
+        for (res, f, _), score in zip(columns, scores):
+            if score > 0:
+                samples = ", ".join(str(v) for v in f.sample_values[:3])
+                refs.append(
+                    EvidenceRef(
+                        resource=res,
+                        locator=f.name,
+                        kind="computed_column",
+                        snippet=f"{f.name} ({f.dtype})"
+                        + (f" e.g. {samples}" if samples else ""),
+                        score=score,
+                    )
+                )
+        refs.sort(key=lambda r: r.score, reverse=True)
+        return refs[:k]

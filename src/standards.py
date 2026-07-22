@@ -114,6 +114,95 @@ STANDARD_DEFINITIONS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "prompt_hint": "...",
         },
     },
+    # Field-router test standard. Its fields deliberately span the three routing
+    # buckets so the field-driven planner (docs/development/plan_field_router.md)
+    # can be exercised end to end against data/sample/router_test/:
+    #   - narrative fields answerable only from README.md (title, abstract, ...);
+    #   - structural fields computed from observations.csv (record_count, ...);
+    #   - ambiguous-structural fields whose opaque columns (la, lo, tmp) must be
+    #     resolved through codebook.csv before they can be filled.
+    # It also plants two conflicts: record_count (README says 1,000; the CSV has
+    # 200) and temperature_units (codebook says Kelvin; values are clearly Celsius).
+    "field_router_test": {
+        "title": {
+            "type": str,
+            "default": ...,
+            "description": "Title of the dataset",
+            "prompt_hint": "The dataset's title, as stated in its description document",
+        },
+        "abstract": {
+            "type": Optional[str],
+            "default": None,
+            "description": "A prose summary of what the dataset contains and why",
+            "prompt_hint": "A short abstract summarising the dataset's purpose and content",
+        },
+        "methodology": {
+            "type": Optional[str],
+            "default": None,
+            "description": "How the data was collected",
+            "prompt_hint": "The survey or collection method described for the dataset",
+        },
+        "creator": {
+            "type": Optional[str],
+            "default": None,
+            "description": "The person or organisation responsible for the dataset",
+            "prompt_hint": "The dataset's creator or compiling organisation",
+        },
+        "funding": {
+            "type": Optional[str],
+            "default": None,
+            "description": "Funding source and grant reference, if any",
+            "prompt_hint": "The funder and grant number supporting the work",
+        },
+        "license": {
+            "type": Optional[str],
+            "default": None,
+            "description": "The licence under which the data may be reused",
+            "prompt_hint": "The reuse licence, e.g. CC BY 4.0",
+        },
+        "record_count": {
+            "type": Optional[int],
+            "default": None,
+            "description": "The number of observation records in the data",
+            "prompt_hint": "The count of rows in the observations table",
+        },
+        "variables": {
+            "type": Optional[str],
+            "default": None,
+            "description": (
+                "The measured variables and what each means; requires resolving "
+                "opaque column names against the data dictionary"
+            ),
+            "prompt_hint": "The measured variables and their meanings, from the codebook",
+        },
+        "spatial_coverage": {
+            "type": Optional[Dict[str, float]],
+            "default": None,
+            "description": (
+                "Geographic bounding box with keys min_lat, min_lon, max_lat, "
+                "max_lon; requires identifying the latitude and longitude columns"
+            ),
+            "prompt_hint": (
+                "Geographic bounding box in WGS84 with numeric fields: "
+                "min_lat, min_lon, max_lat, max_lon"
+            ),
+        },
+        "temporal_coverage": {
+            "type": Optional[str],
+            "default": None,
+            "description": "The time period the observations span, from and to date",
+            "prompt_hint": "The date range covered by the observations",
+        },
+        "temperature_units": {
+            "type": Optional[str],
+            "default": None,
+            "description": (
+                "The units of the recorded air temperature; the data dictionary's "
+                "stated units should be cross-checked against the actual values"
+            ),
+            "prompt_hint": "The units the air-temperature column is recorded in",
+        },
+    },
     # Dummy standard for testing @standard multi-selection behavior in TUI.
     "dummy_standard": {
         "title": {

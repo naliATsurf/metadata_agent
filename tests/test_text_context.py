@@ -21,7 +21,11 @@ from src.context import (
     classify_context_type,
     create_context,
 )
-from src.context.text_context import TextChunk, fixed_size_chunker
+from src.context.text_context import (
+    TextChunk,
+    fixed_size_chunker,
+    markdown_chunker,
+)
 from src.tools import universal
 from src.tools.base import clear_registry, register_context, tools_for
 from src.tools.tabular import profiling, spatial, temporal
@@ -129,29 +133,54 @@ class TestChunking(TextContextTestBase):
         chunks = ctx.get_chunks("report")
         self.assertGreater(len(chunks), 3)
 
+    def test_chunk_offset_locates_its_own_text_exactly(self):
+        """Span/offset contract: text[start : start+len] == chunk.text (bug (a))."""
+        ctx = TextContext(self.report_path)
+        full = ctx.read_text("report")
+        for c in ctx.get_chunks("report"):
+            span = full[c.start_offset : c.start_offset + len(c.text)]
+            self.assertEqual(span, c.text)
 
-class TestSearch(TextContextTestBase):
-    def test_plain_search(self):
+    def test_markdown_chunker_keeps_heading_with_body(self):
+        text = "# Title\n\nintro\n\n## Section A\n\nbody a\n\n## Section B\n\nbody b\n"
+        offsets = markdown_chunker(text)
+        chunks = [text[s:e].strip() for s, e in zip(offsets, offsets[1:] + [len(text)])]
+        # One chunk per heading; each contains its heading and body together.
+        self.assertTrue(any(c.startswith("## Section A") and "body a" in c for c in chunks))
+        self.assertTrue(any(c.startswith("## Section B") and "body b" in c for c in chunks))
+
+    def test_markdown_is_auto_selected_by_content(self):
+        path = os.path.join(self.dir, "doc.md")
+        with open(path, "w") as f:
+            f.write("# H1\n\nalpha\n\n## H2\n\nbeta\n")
+        chunks = TextContext(path).get_chunks("doc")
+        # Heading-aware: two sections, each starting with its heading.
+        self.assertEqual(len(chunks), 2)
+        self.assertTrue(chunks[1].text.startswith("## H2"))
+
+
+class TestGrep(TextContextTestBase):
+    def test_plain_grep(self):
         ctx = TextContext([self.report_path, self.methods_path])
-        hits = ctx.search("transects")
+        hits = ctx.grep("transects")
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["resource"], "report")
         self.assertIn("transects", hits[0]["context"])
 
-    def test_regex_search(self):
+    def test_regex_grep(self):
         ctx = TextContext(self.report_path)
-        hits = ctx.search(r"\d+ species", regex=True)
+        hits = ctx.grep(r"\d+ species", regex=True)
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["match"], "42 species")
 
-    def test_search_resource_filter_and_case_insensitive(self):
+    def test_grep_resource_filter_and_case_insensitive(self):
         ctx = TextContext([self.report_path, self.methods_path])
-        self.assertEqual(ctx.search("pollard", resource="methods")[0]["resource"], "methods")
-        self.assertEqual(ctx.search("BUTTERFLY"), ctx.search("butterfly"))
+        self.assertEqual(ctx.grep("pollard", resource="methods")[0]["resource"], "methods")
+        self.assertEqual(ctx.grep("BUTTERFLY"), ctx.grep("butterfly"))
 
-    def test_search_max_results(self):
+    def test_grep_max_results(self):
         ctx = TextContext(self.report_path)
-        hits = ctx.search("e", max_results=3)  # common letter
+        hits = ctx.grep("e", max_results=3)  # common letter
         self.assertEqual(len(hits), 3)
 
 

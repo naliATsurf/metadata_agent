@@ -13,6 +13,7 @@ Importing this package registers every tool. Query them with
 
 from src.tools import universal  # noqa: F401  (registers universal tools)
 from src.tools import tabular  # noqa: F401  (registers tabular tools)
+from src.tools import search  # noqa: F401  (registers the search tool)
 
 from src.tools.base import (
     all_tools,
@@ -41,6 +42,7 @@ __all__ = [
     "registered_toolsets",
     "requires_of",
     "resolve_toolsets",
+    "search",
     "tabular",
     "tool_meta",
     "tools_for",

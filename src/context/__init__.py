@@ -38,6 +38,8 @@ Quick Start::
 
 from .base_context import (
     ExecutionContext,
+    Searchable,
+    EvidenceRef,
     TabularContext,
     ContextType,
     ResourceInfo,
@@ -61,6 +63,8 @@ from .registry import (
 __all__ = [
     # Base classes and models
     "ExecutionContext",
+    "Searchable",
+    "EvidenceRef",
     "TabularContext",
     "ContextType",
     "ResourceInfo",
