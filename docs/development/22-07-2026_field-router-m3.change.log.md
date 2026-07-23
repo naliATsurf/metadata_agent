@@ -64,12 +64,16 @@ inheriting the value-only prior's confidence. A retrieved span is quoted-only
 ## Verification
 
 - `pytest` — **137 pass, 1 skip** (was 130 after M2), the 1 warning pre-existing.
-- New tests: `tests/test_route.py` — structural binding, its **standard-agnostic**
-  form (a differently-worded count field still binds, via the tool description),
-  ambiguous-structural routing to a resolved column, narrative routing to a span,
-  an unresolved field flagged in coverage, the two-hop assurance (high with a
-  codebook, medium without), the coverage report, and FieldPlan serialization.
-  Self-contained.
+- New tests: `tests/test_route.py`. Focused unit tests — structural binding, its
+  **standard-agnostic** form (a differently-worded count field still binds via the
+  tool description), ambiguous-structural routing, narrative routing, unresolved
+  detection, two-hop assurance (high with a codebook, medium without), coverage,
+  serialization. Plus `RouterRealisticTest`: a 7-column bundle + codebook +
+  multi-section README where routing must **discriminate among competitors** — it
+  disambiguates latitude from longitude (lon isn't even a candidate for a latitude
+  field), resolves `water_temperature` to `water_temp` over the same-word
+  `station_id`, `individual_count` to `abundance` over date/taxon, and `row_count`
+  to `get_item_count` over a numeric column. Self-contained.
 - Demonstrated on `data/sample/router_test/`: 11/11 fields routed —
   `spatial_coverage` / `temporal_coverage` / `temperature_units` to `la` / `dt` /
   `tmp` at high assurance; `variables` to `get_field_names`; the six prose fields
