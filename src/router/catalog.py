@@ -8,13 +8,23 @@ README line. So this is a **missing-context problem**, and the fix is to import
 the missing context into the catalog *before* routing.
 
 :func:`resolve_catalog` turns each opaque column into a *described* column by
-harvesting explanations from the other resources, escalating most-authoritative
-first and stopping at the first strong hit:
+harvesting explanations from the other resources. It does **not** stop at the
+first hit: it gathers *every* candidate resolution for a column — from every
+dictionary, every prose definition, and the value prior — then chooses among them
+by assurance tier, with the value profile as referee for conflicts:
 
 1. **structured dictionary** — a data-dictionary table keyed by column name;
 2. **lexical prose** — a definition like ``la = latitude`` in a document;
 3. **self-evident value type** — the *only* thing values can identify on their
    own: a coordinate range, a parseable date. Not a general identifier.
+
+Sources that **agree** raise confidence and are recorded in ``corroborated_by``
+(the citations that confirm the resolution — the positive counterpart of a
+conflict); sources that **disagree** are surfaced in ``conflicts`` with the losing
+candidates kept in ``alternatives``; nothing is decided by list order. Semantic
+reconciliation of differing free-text descriptions needs an LLM and is deferred;
+deterministically this adjudicates units, value-refutable claims, and verbatim
+agreement.
 
 **The value profile is a referee, not a guesser.** Values genuinely identify only
 a few kinds (coordinates, dates); for the long tail — pH, biomass, a trait score —
@@ -54,9 +64,14 @@ from src.tools.tabular.detection import (
     detect_temporal_dtype,
 )
 
-# How much of the target's columns a candidate key column must cover for a
-# tabular resource to count as a data dictionary for it.
-_DICTIONARY_COVERAGE = 0.5
+# A source is a data dictionary when one of its columns keys the schema's columns:
+# its values are *mostly* schema names (precision) and *unique* (a key has one row
+# per column). Precision, not recall, lets a partial codebook through on the rows
+# it covers rather than discarding it wholesale; uniqueness rejects a row-scale
+# data table whose cells are repeated observations (a constant or high-cardinality
+# column can't masquerade as a key). Together they need no coverage threshold.
+_DICTIONARY_KEY_PRECISION = 0.5
+_DICTIONARY_KEY_UNIQUENESS = 0.9
 # Rows sampled to compute a value profile. We sample, never scan the whole table:
 # approximate stats are enough for a prior and for the refutation cross-check, and
 # this keeps resolution doc-scale — cost follows the schema and the docs, not the
@@ -82,6 +97,8 @@ class ResolvedColumn:
     link_evidence: Optional[str] = None    # citation for the interpretation
     value_label: Optional[str] = None      # coarse prior: coordinate | temporal | numeric | categorical
     conflicts: List[str] = field(default_factory=list)
+    corroborated_by: List[str] = field(default_factory=list)  # citations of agreeing sources
+    alternatives: List[Dict[str, Any]] = field(default_factory=list)  # candidates that lost
 
     def document(self) -> str:
         """The text the enriched catalog search ranks this column on."""
@@ -100,6 +117,8 @@ class ResolvedColumn:
             "link_evidence": self.link_evidence,
             "value_label": self.value_label,
             "conflicts": self.conflicts,
+            "corroborated_by": self.corroborated_by,
+            "alternatives": self.alternatives,
         }
 
 
@@ -179,18 +198,29 @@ def _as_dictionary(src: TabularContext, target_columns: List[str]) -> Optional[_
 
     for resource in src.resources:
         df = src.read_resource(resource)
-        best_key, best_cover = None, 0.0
+        # The key column is the one whose values best *are* the schema's column
+        # names — ranked by how many it matches, then how pure it is.
+        best_key, best_matches, best_precision, best_uniqueness = None, 0, 0.0, 0.0
         for col in df.columns:
-            values = {str(v).strip().lower() for v in df[col].dropna()}
-            cover = len(target_set & values) / len(target_set)
-            if cover > best_cover:
-                best_key, best_cover = col, cover
+            nonnull = df[col].dropna()
+            values = {str(v).strip().lower() for v in nonnull}
+            matches = len(target_set & values)
+            if matches == 0 or len(nonnull) == 0:
+                continue
+            precision = matches / len(values)          # how much of the column is names
+            uniqueness = len(values) / len(nonnull)    # a key has one row per value
+            if (matches, precision) > (best_matches, best_precision):
+                best_key = col
+                best_matches, best_precision, best_uniqueness = matches, precision, uniqueness
 
-        # A codebook is column-scale: one row per column, a key column whose
-        # values ARE the schema's names. A row-scale *data* table holds
-        # observations, so no column of it covers the schema names — coverage ≈ 0.
-        # This test is what keeps a huge data table from being read as a codebook.
-        if best_key is None or best_cover < _DICTIONARY_COVERAGE:
+        # Accept only a key column that is mostly schema names and (near-)unique.
+        # Precision lets a partial codebook through; uniqueness keeps a row-scale
+        # data table — repeated observations — from being read as a codebook.
+        if (
+            best_key is None
+            or best_precision < _DICTIONARY_KEY_PRECISION
+            or best_uniqueness < _DICTIONARY_KEY_UNIQUENESS
+        ):
             continue
 
         desc_col = _pick_column(df, _DESC_NAME_RE, best_key)
@@ -227,23 +257,26 @@ def _cell(row: pd.Series, col: Optional[str]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
-def _prose_definition(name: str, docs: List[TextContext]) -> Optional[Dict[str, Any]]:
-    """Find a definition like ``la = latitude`` / ``la: latitude`` in the prose."""
-    # token, optionally backticked/quoted, then a separator, then a short phrase.
+def _prose_candidates(name: str, docs: List[TextContext]) -> List[Dict[str, Any]]:
+    """Find glossary-style definitions (``la = latitude``) across all documents.
+
+    Returns one candidate per document that defines the token — so a definition
+    appearing in several docs contributes several candidates, which the decision
+    step then treats as corroboration or conflict.
+    """
     pattern = re.compile(
         rf"[`'\"]?{re.escape(name)}[`'\"]?\s*[:=—-]\s*([A-Za-z][A-Za-z0-9 /()%-]{{2,60}})"
     )
+    found: List[Dict[str, Any]] = []
     for doc in docs:
         for resource in doc.resources:
-            text = doc.read_text(resource)
-            match = pattern.search(text)
+            match = pattern.search(doc.read_text(resource))
             if match:
-                phrase = match.group(1).strip().rstrip(".;,")
-                return {
-                    "description": phrase,
+                found.append({
+                    "description": match.group(1).strip().rstrip(".;,"),
                     "evidence": f"{resource}#{match.start()}",
-                }
-    return None
+                })
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -349,47 +382,119 @@ def resolve_catalog(
     return Catalog(resource=resource, columns=resolved)
 
 
-def _resolve_column(name, dtype, resource, profile, dictionaries, docs) -> ResolvedColumn:
-    label = profile.get("label")
+# Assurance tiers, most authoritative first.
+_TIER_RANK = {"structured_dictionary": 3, "lexical_prose": 2, "value_prior": 1}
 
-    # 1. structured dictionary
+
+@dataclass(frozen=True)
+class _Candidate:
+    """One proposed resolution for a column, from one source."""
+
+    description: Optional[str]
+    units: Optional[str]
+    method: str
+    confidence: str          # the tier's base confidence
+    evidence: str
+
+    def summary(self) -> str:
+        return f"{self.method} '{self.description or self.units or '?'}'"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "description": self.description, "units": self.units,
+            "method": self.method, "confidence": self.confidence,
+            "evidence": self.evidence,
+        }
+
+
+def _norm(text: Optional[str]) -> str:
+    return (text or "").strip().lower()
+
+
+def _resolve_column(name, dtype, resource, profile, dictionaries, docs) -> ResolvedColumn:
+    """Gather every candidate resolution for the column, then decide among them."""
+    label = profile.get("label")
+    candidates: List[_Candidate] = []
+
     for d in dictionaries:
         entry = d.by_name.get(name.lower())
         if entry and (entry["description"] or entry["units"]):
-            return ResolvedColumn(
-                resource=resource, name=name, dtype=dtype,
-                description=entry["description"], units=entry["units"],
-                link_method="structured_dictionary", link_confidence="high",
-                link_evidence=f"{d.resource} row '{entry['key']}'",
-                value_label=label,
-                conflicts=_cross_check(entry["description"], entry["units"], profile),
-            )
+            candidates.append(_Candidate(
+                entry["description"], entry["units"], "structured_dictionary",
+                "high", f"{d.resource} row '{entry['key']}'",
+            ))
 
-    # 2. lexical prose definition
-    prose = _prose_definition(name, docs)
-    if prose:
-        return ResolvedColumn(
-            resource=resource, name=name, dtype=dtype,
-            description=prose["description"], units=None,
-            link_method="lexical_prose", link_confidence="medium",
-            link_evidence=prose["evidence"], value_label=label,
-            conflicts=_cross_check(prose["description"], None, profile),
-        )
+    for pc in _prose_candidates(name, docs):
+        candidates.append(_Candidate(
+            pc["description"], None, "lexical_prose", "medium", pc["evidence"],
+        ))
 
-    # 3. self-evident value type — the only identification the values can support
-    #    on their own (a coordinate range, a parseable date). A referee, not a
-    #    guesser: it never fires for the long tail.
     if label in _SELF_EVIDENT:
         description, confidence = _SELF_EVIDENT[label]
-        return ResolvedColumn(
-            resource=resource, name=name, dtype=dtype,
-            description=description, link_method="value_prior",
-            link_confidence=confidence,
-            link_evidence=f"value profile of '{name}' ({dtype})",
-            value_label=label,
+        candidates.append(_Candidate(
+            description, None, "value_prior", confidence,
+            f"value profile of '{name}' ({dtype})",
+        ))
+
+    return _decide(name, dtype, resource, label, profile, candidates)
+
+
+def _decide(name, dtype, resource, label, profile, candidates) -> ResolvedColumn:
+    """Choose among candidates: top tier wins, the value profile referees conflicts."""
+    if not candidates:
+        # Abstain — nothing describes this column and its values cannot name it.
+        # "Unresolved" is a first-class outcome; a fabricated label is worse.
+        return ResolvedColumn(resource=resource, name=name, dtype=dtype, value_label=label)
+
+    top_rank = max(_TIER_RANK[c.method] for c in candidates)
+    top = [c for c in candidates if _TIER_RANK[c.method] == top_rank]
+
+    def refuted(c: _Candidate) -> List[str]:
+        return _cross_check(c.description, c.units, profile)
+
+    # The value profile is the referee: prefer candidates the values don't refute.
+    consistent = [c for c in top if not refuted(c)]
+    pool = consistent or top
+    chosen = pool[0]                       # source order breaks a remaining tie
+
+    # Corroboration is the positive counterpart of a conflict: any source, any
+    # tier, that makes the *same* claim as the chosen one (verbatim for now;
+    # semantic agreement of differently-worded descriptions needs an LLM). Its
+    # citations are recorded so provenance can show who confirmed the resolution.
+    def agrees(c: _Candidate) -> bool:
+        return (_norm(c.description), _norm(c.units)) == (_norm(chosen.description), _norm(chosen.units))
+
+    corroborators = [c for c in candidates if c is not chosen and agrees(c)]
+    corroborated_by = [c.evidence for c in corroborators]
+
+    conflicts: List[str] = list(refuted(chosen))   # the chosen claim's own value conflicts
+    for c in top:                                  # a same-tier claim the values rejected
+        if c is not chosen:
+            conflicts += [f"{c.summary()}: {msg}" for msg in refuted(c)]
+
+    variants = {(_norm(c.description), _norm(c.units)) for c in pool}
+    contested = len(variants) > 1
+    if contested:
+        conflicts.append(
+            "sources disagree: " + "; ".join(sorted(c.summary() for c in pool))
         )
 
-    # 4. abstain — nothing describes this column and its values cannot name it.
-    #    "Unresolved" is a first-class outcome; a fabricated label is worse. The
-    #    value_label is still carried for metadata and for the cross-check.
-    return ResolvedColumn(resource=resource, name=name, dtype=dtype, value_label=label)
+    if refuted(chosen):
+        confidence = "low"                 # the chosen claim is contradicted by the data
+    elif any(c is not chosen and refuted(c) for c in top):
+        confidence = "medium"              # the values adjudicated a same-tier conflict
+    elif contested:
+        confidence = "medium"              # differing claims, unadjudicated
+    elif corroborators:
+        confidence = "high"                # another source makes the same claim — corroborated
+    else:
+        confidence = chosen.confidence     # a single source, at its tier's base
+
+    alternatives = [c.to_dict() for c in candidates if c is not chosen]
+    return ResolvedColumn(
+        resource=resource, name=name, dtype=dtype,
+        description=chosen.description, units=chosen.units,
+        link_method=chosen.method, link_confidence=confidence,
+        link_evidence=chosen.evidence, value_label=label,
+        conflicts=conflicts, corroborated_by=corroborated_by, alternatives=alternatives,
+    )

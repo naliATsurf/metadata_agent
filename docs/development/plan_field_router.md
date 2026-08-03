@@ -199,15 +199,18 @@ Ordered so each is testable before the next and the migration stays incremental.
 3. ✅ **Catalog resolution (symbol linking)** (`src/router/catalog.py`). A
    pre-routing pass that enriches the raw catalog with descriptions harvested from
    the other resources, so opaque columns (`la` → latitude) become routable.
-   `resolve_catalog(target, sources)` escalates structured-dictionary → lexical
-   prose → self-evident value type, and **abstains** when none apply — the long
-   tail the values cannot name is left unresolved, not mislabelled. The value
-   profile's dependable role is **refutation**: it cross-checks a link's claimed
-   units/meaning against the values (Kelvin/coordinate-range checks) regardless of
-   whether it can identify the column. `Catalog.search` ranks the *enriched*
+   `resolve_catalog(target, sources)` **gathers every candidate** for a column
+   (dictionary tiers → lexical prose → self-evident value type) and decides among
+   them: the highest assurance tier wins, the **value profile referees same-tier
+   conflicts** (two codebooks disagreeing on units are adjudicated by the values,
+   not by list order), agreement raises confidence and disagreement is surfaced in
+   `conflicts`/`alternatives`, and a column nothing describes **abstains** rather
+   than being mislabelled. The value profile's dependable role is **refutation**,
+   never identification of the long tail. `Catalog.search` ranks the *enriched*
    columns, closing the gap `TabularContext.search` cannot. Doc-scale: profiles are
    sampled, never a full scan. Deferred: retrieval-first discovery over unknown
-   sources, grounded LLM extraction from free prose, fuzzy linking, caching. See
+   sources, grounded LLM extraction (incl. semantic reconciliation of differing
+   descriptions), fuzzy linking, caching. See
    [The semantic gap](#the-semantic-gap-and-cross-file-symbol-resolution).
 4. ✅ **Router → `FieldPlan`** (`src/router/route.py`). `route_fields(schema,
    catalog, docs)` walks the schema and routes each field to a bucket —

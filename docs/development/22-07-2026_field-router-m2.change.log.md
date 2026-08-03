@@ -90,10 +90,59 @@ overridden by the dictionary in the realistic path.
 not the row. Value profiles are computed from a **sample** (`_PROFILE_SAMPLE`
 rows), never a full-table scan — approximate stats suffice for a prior and for
 refutation. The only tables read structurally are column-scale *codebooks* (one
-row per column); the key-coverage test (`_DICTIONARY_COVERAGE`) is what stops a
-row-scale *data* table — whose cells are observations, not column names — from
-ever being mistaken for one. Cost follows the schema and the docs, not the row
-count.
+row per column); a source is accepted as a dictionary only when a column is
+*mostly* schema names (precision) and *unique* (`_DICTIONARY_KEY_PRECISION`,
+`_DICTIONARY_KEY_UNIQUENESS`) — which keeps a row-scale *data* table, whose cells
+are repeated observations, from ever being mistaken for one. Cost follows the
+schema and the docs, not the row count.
+
+## Follow-up: edge cases and the partial-codebook cliff
+
+Reviewing the resolver against real messiness (the happy-path test resolved every
+column from a full codebook — too simple) surfaced a sharp edge and some
+documented limits.
+
+- **The coverage cliff, fixed.** Acceptance keyed on *recall* (≥ 50% of the
+  schema's columns) discarded a whole source below the bar — so a codebook
+  documenting 3 of 8 columns contributed *nothing*, even the 3 it defined.
+  Acceptance now keys on the **key column's precision and uniqueness**, not
+  recall, so a partial codebook resolves the rows it covers and the rest fall
+  through the cascade. A decoy data table with a coincidental name match, or a
+  constant column equal to a schema name, is still rejected (low precision or low
+  uniqueness).
+- **Limits captured as tests, not hidden.** `tests/test_catalog.py`'s
+  `CatalogEdgeCaseTest` locks the fix and marks a known gap: a **wrong categorical
+  description** passes because the cross-check is numeric-only. Surfaced, not
+  papered over.
+
+## Follow-up: multi-source resolution (no more first-wins)
+
+The resolver used to stop at the *first* dictionary with an entry — silently
+dropping both corroboration (agreeing sources should raise confidence) and
+conflict (disagreeing sources should be surfaced, not decided by list order). It
+now **gathers every candidate** for a column — from every dictionary, every prose
+definition, and the value prior (`_resolve_column`) — and decides among them
+(`_decide`):
+
+- **Assurance tier wins** — dictionary > prose > value prior.
+- **The value profile referees a same-tier conflict.** Two codebooks that disagree
+  on units — one says `temp` is Kelvin, the other Celsius, Kelvin listed first —
+  are adjudicated by the values: 4–21 refutes Kelvin, so **Celsius wins** and the
+  refutation is recorded. The computed fact breaks the tie between quoted claims.
+- **Corroboration raises confidence; contestation lowers it.** Two documents
+  defining the same token verbatim → `high` (a single prose is `medium`); two
+  sources with differing descriptions → `medium` (contested) with the disagreement
+  in `conflicts`; a claim the values refute → `low`.
+- **Nothing is discarded silently.** The chosen resolution keeps the losing
+  candidates in a new `ResolvedColumn.alternatives`, and `conflicts` now carries
+  source-vs-source disagreements alongside the value cross-checks.
+
+Deterministic scope: this adjudicates **units, value-refutable claims, and
+verbatim agreement**. Telling *agreement from conflict between differently-worded
+free-text descriptions* is semantic and needs an LLM — deferred; that is why two
+codebooks with different prose descriptions are marked contested rather than
+merged. Tests: `CatalogEdgeCaseTest` — conflict surfaced (not first-wins),
+value-profile unit adjudication, prose corroboration, and alternatives retained.
 
 ## Verification
 
