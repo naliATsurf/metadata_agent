@@ -14,9 +14,11 @@ that and we are back to post-hoc matching and the FieldPlan was theatre.
 
 What the compiler does, and only that:
 
-- **Groups** routings that share an extractor — the same (bucket, resource) — into
-  one task, so fields answered from the same place are extracted together instead
-  of one survey per field.
+- **Groups** routings that share an extractor *and an assurance tier* — the same
+  (bucket, resource, tier) — into one task, so fields answered from the same place
+  are extracted together instead of one survey per field. The tier is part of the
+  key so a high-assurance field is never dragged into a debate just because a
+  contested field happens to share its resource.
 - **Caps each group by a token budget.** Grouping risks re-introducing the flood at
   the group level, so a group whose seeded candidates exceed the budget is split
   into several tasks.
@@ -25,6 +27,8 @@ What the compiler does, and only that:
 - **Chooses a topology per task from assurance**: a single extractor for
   high-assurance computed fields, debate for contested/low-assurance ones (the
   debate machinery's best real use — resolving disagreement, not re-surveying).
+  Because grouping already separates the tiers, each task is homogeneous — no
+  high-assurance field pays for a neighbor's contest, so debate stays targeted.
 - **Fans in to one assembly task** that depends on every extraction task and emits
   the final metadata record, replacing the monolithic synthesis step.
 
@@ -84,23 +88,30 @@ def compile_field_plan(
     """
     players = {**_BUCKET_PLAYER, **(bucket_player or {})}
 
-    # Partition the routed fields by (bucket, resource). Unresolved fields have no
-    # extractor, so they are not grouped — they surface as explicit nulls at
+    # Partition the routed fields by (bucket, resource, tier). Unresolved fields have
+    # no extractor, so they are not grouped — they surface as explicit nulls at
     # assembly. Insertion order (schema order) is preserved for determinism.
-    groups: "OrderedDict[Tuple[str, str], List[FieldRouting]]" = OrderedDict()
+    groups: "OrderedDict[Tuple[str, str, str], List[FieldRouting]]" = OrderedDict()
     for routing in field_plan.routings.values():
         if routing.status == "unresolved":
             continue
         groups.setdefault(_group_key(routing), []).append(routing)
 
+    # Flatten to budget-capped chunks, then number them *globally*: two groups can
+    # share a (bucket, resource) but differ in tier, so a per-group index would
+    # collide on the output-artifact name. A single running index keeps them unique.
+    chunks: List[Tuple[str, str, List[FieldRouting]]] = []
+    for (bucket, resource, _tier_key), routings in groups.items():
+        routings = sorted(routings, key=lambda r: r.field_path)
+        for chunk in _split_by_budget(routings, budget):
+            chunks.append((bucket, resource, chunk))
+
     steps: List[Task] = []
     extraction_outputs: List[str] = []
-    for (bucket, resource), routings in groups.items():
-        routings = sorted(routings, key=lambda r: r.field_path)
-        for index, chunk in enumerate(_split_by_budget(routings, budget)):
-            task = _extraction_task(bucket, resource, chunk, players, index)
-            steps.append(task)
-            extraction_outputs.extend(task.outputs)
+    for index, (bucket, resource, chunk) in enumerate(chunks):
+        task = _extraction_task(bucket, resource, chunk, players, index)
+        steps.append(task)
+        extraction_outputs.extend(task.outputs)
 
     steps.append(_assembly_task(field_plan, extraction_outputs, assembly_player))
     return Plan(steps=steps)
@@ -111,15 +122,27 @@ def compile_field_plan(
 # ---------------------------------------------------------------------------
 
 
-def _group_key(routing: FieldRouting) -> Tuple[str, str]:
-    """The extractor a field shares: its bucket and the resource it reads from.
+def _tier(routing: FieldRouting) -> str:
+    """The topology a field warrants: ``single`` if high-assurance, else ``debate``.
+
+    A high-assurance computed field is its own check and needs no debate; a
+    contested or low-assurance field is exactly where debate earns its cost. Making
+    the tier part of the group key keeps the two apart, so 'debate only for
+    contested ones' holds even when they share a resource — no topology overkill.
+    """
+    return "single" if routing.assurance == "high" else "debate"
+
+
+def _group_key(routing: FieldRouting) -> Tuple[str, str, str]:
+    """The extractor *and tier* a field shares: bucket, resource, and topology tier.
 
     Structural fields bind to a whole-resource tool (candidate ``resource`` is
     empty), so they all share one group; column and span fields group by the
-    resource that holds the column or document.
+    resource that holds the column or document. The tier splits a mixed group so a
+    high-assurance field is not pulled into a contested sibling's debate.
     """
     resource = routing.candidates[0].resource if routing.candidates else ""
-    return (routing.bucket, resource)
+    return (routing.bucket, resource, _tier(routing))
 
 
 def _candidate_cost(routing: FieldRouting) -> int:

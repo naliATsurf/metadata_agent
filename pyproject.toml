@@ -32,6 +32,12 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["src", "src.*"]
 
+[tool.pytest.ini_options]
+# Collect only from tests/. Without this, pytest walks the whole tree and can
+# collide on basenames with copies Sphinx drops under the gitignored docs/_build
+# (e.g. a downloadable test_compile.py), aborting collection.
+testpaths = ["tests"]
+
 [tool.ruff]
 line-length = 88
 target-version = "py312"
