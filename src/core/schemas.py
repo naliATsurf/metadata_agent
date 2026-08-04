@@ -49,6 +49,36 @@ class Task(BaseModel):
         description="A list of new artifact names that this step will produce and save to the workspace.",
     )
 
+    # --- Field-driven routing (layer 5). Additive and optional: the source-driven
+    # LLM planner leaves these empty and the executor ignores them, so both planners
+    # emit the same Task shape. The field-driven compiler populates them. ---
+    fields: List[str] = Field(
+        default_factory=list,
+        description=(
+            "The metadata standard field paths this task is responsible for filling "
+            "(field-driven routing). Carries field identity from the FieldPlan into "
+            "execution so a produced value maps back to the field it answers, rather "
+            "than being re-matched by heuristics afterwards."
+        ),
+    )
+    candidates: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "The routed candidate evidence (serialized EvidenceRefs) seeding this "
+            "task's workspace — the curated slice of context its fields need, so the "
+            "player sees only its candidates instead of a whole-context survey."
+        ),
+    )
+    topology: Optional[str] = Field(
+        default=None,
+        description=(
+            "Per-task execution topology hint chosen from the fields' assurance: "
+            "'single' for high-assurance computed fields, 'debate' for contested or "
+            "low-assurance ones. A hint the executor may honor; None defers to the "
+            "run-level topology."
+        ),
+    )
+
 
 class Plan(BaseModel):
     """

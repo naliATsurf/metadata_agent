@@ -227,7 +227,8 @@ Ordered so each is testable before the next and the migration stays incremental.
    `FieldPlan.coverage()`. M3 emits the artifact by calling the search methods;
    firing them through the tool with `phase="route"` attribution comes with
    execution (M4).
-5. **Compile `FieldPlan` → `Plan(List[Task])`.** The linchpin-1 step:
+5. ✅ **Compile `FieldPlan` → `Plan(List[Task])`** (`src/router/compile.py`). The
+   linchpin-1 step:
    - Group routings sharing (resource set, extractor) into one `Task`, **capped by
      a token budget** so grouping does not re-introduce flooding at the group
      level.
@@ -325,8 +326,15 @@ is contained to layers 1–6 and the swap is reversible.
   routing over the enriched catalog and document sources, two-hop assurance, and a
   coverage report with pre-extraction `unresolved` detection. Tests:
   `tests/test_route.py`. Compile-to-`Task` and execution are M4.
-- **M4 — Compile + `Task.fields` + assembly task** (layer 5). Field-driven
-  execution end to end behind the flag.
+- **M4 ✅ — Compile + `Task.fields` + assembly task** (layer 5).
+  `src/router/compile.py`: `compile_field_plan` groups routings by extractor
+  (`bucket`, `resource`), caps each group by a token budget, seeds each task with
+  its candidates, picks `single`/`debate` topology by assurance, and fans in to one
+  `metadata_generator` assembly task. `Task` gained `fields` / `candidates` /
+  `topology` (additive, optional — the source-driven planner and executor are
+  unaffected). Unresolved fields get no extraction task but are named for assembly
+  so the record nulls them. Tests: `tests/test_compile.py`. The verify/reconcile
+  pass (linchpin 2) is M5; wiring the strategy behind an orchestrator flag is M6.
 - **M5 — Assurance axis + verify reconciliation** (layer 6, provenance). Closes
   linchpin 2.
 - **M6 — Diff against source-driven on sample datasets; flip the default.**

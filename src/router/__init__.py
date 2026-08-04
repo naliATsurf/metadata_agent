@@ -8,6 +8,7 @@ contexts.
 """
 
 from src.router.catalog import Catalog, ResolvedColumn, resolve_catalog
+from src.router.compile import compile_field_plan
 from src.router.route import FieldPlan, FieldRouting, route_fields
 from src.router.schema import FieldSpec, walk_schema
 
@@ -17,6 +18,7 @@ __all__ = [
     "FieldRouting",
     "FieldSpec",
     "ResolvedColumn",
+    "compile_field_plan",
     "resolve_catalog",
     "route_fields",
     "walk_schema",
