@@ -19,20 +19,21 @@ meaning but *how* it was resolved and on what evidence:
 ```
 ResolvedColumn{ name, dtype, description, units,
                 link_method, link_confidence, link_evidence,
-                value_label, conflicts }
+                value_label, conflicts, corroborated_by, alternatives }
 ```
 
 `link_evidence` is the citation (`"codebook row 'la'"`, `"README#565"`,
 `"value profile of 'la'"`), so the interpretation is grounded, not asserted —
 the two-hop grounding the plan calls for (the value is computed; the meaning
-rests on a citation).
+rests on a citation). `conflicts`, `corroborated_by`, and `alternatives` carry
+the multi-source picture (see the follow-up below).
 
 ## The escalation — most authoritative first
 
 `sources` are the other resources in the bundle, auto-classified: a tabular
 source whose column *values* cover the target's column *names* is a data
-dictionary; text sources are prose. `_resolve_column` then escalates and stops
-at the first strong hit:
+dictionary; text sources are prose. `_resolve_column` ranks candidates by tier
+(the multi-source follow-up replaced the original first-hit shortcut):
 
 1. **Structured dictionary** (`link_confidence="high"`). `_as_dictionary`
    recognises a codebook by key-column coverage, then reads its label/units/notes
@@ -133,27 +134,40 @@ definition, and the value prior (`_resolve_column`) — and decides among them
   defining the same token verbatim → `high` (a single prose is `medium`); two
   sources with differing descriptions → `medium` (contested) with the disagreement
   in `conflicts`; a claim the values refute → `low`.
+- **Agreement is recorded, not just counted.** Corroboration was a silent
+  confidence bump, with the agreeing source indistinguishable from a loser in
+  `alternatives`. It is now a first-class, citable outcome: `corroborated_by` lists
+  the citations of every source that makes the same claim as the chosen one — the
+  positive counterpart of `conflicts`, so provenance shows *who confirmed* the
+  resolution (`link_evidence` stays the single primary citation). Confidence keys
+  off the same signal, so record and grade agree.
 - **Nothing is discarded silently.** The chosen resolution keeps the losing
-  candidates in a new `ResolvedColumn.alternatives`, and `conflicts` now carries
-  source-vs-source disagreements alongside the value cross-checks.
+  candidates in `ResolvedColumn.alternatives`, `conflicts` carries source-vs-source
+  disagreements alongside the value cross-checks, and `corroborated_by` carries the
+  confirmations.
 
 Deterministic scope: this adjudicates **units, value-refutable claims, and
 verbatim agreement**. Telling *agreement from conflict between differently-worded
 free-text descriptions* is semantic and needs an LLM — deferred; that is why two
 codebooks with different prose descriptions are marked contested rather than
-merged. Tests: `CatalogEdgeCaseTest` — conflict surfaced (not first-wins),
-value-profile unit adjudication, prose corroboration, and alternatives retained.
+merged. Tests: `CatalogEdgeCaseTest` — conflict surfaced (not first-wins) with no
+corroboration, value-profile unit adjudication, prose and codebook corroboration
+recorded with citations, and alternatives retained.
 
 ## Verification
 
-- `pytest` — **130 pass, 1 skip** (was 121 after M1), the 1 warning pre-existing.
+- `pytest` — **151 pass, 1 skip** (was 121 after M1; the count grew with the
+  edge-case, multi-source, and M3 router tests). One unrelated pre-existing
+  failure (`test_connections`'s `SurfConnection`) fails on the clean tree too.
 - New tests: `tests/test_catalog.py` — structured-dictionary resolution, the
   units cross-check conflict, the gap-closing contrast (raw search empty →
   enriched search finds the column), self-evident value types resolving
   (coordinate/temporal) while the **long tail abstains** (numeric/categorical →
   `link_method="none"`), lexical-prose resolution, a non-dictionary source
-  ignored, and an out-of-range coordinate claim flagged. Self-contained (build
-  their own tiny bundles), so they don't depend on the gitignored fixture.
+  ignored, and an out-of-range coordinate claim flagged — plus `CatalogEdgeCaseTest`
+  for the partial-codebook cliff and multi-source conflict/corroboration.
+  Self-contained (build their own tiny bundles), so they don't depend on the
+  gitignored fixture.
 - Demonstrated on `data/sample/router_test/`: all eight columns resolved via the
   codebook, the `tmp` Kelvin conflict surfaced, and `search("latitude")` /
   `search("air temperature")` reaching `la` / `tmp`.
