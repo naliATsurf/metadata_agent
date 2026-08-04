@@ -88,13 +88,14 @@ capability. Its tests moved to `TestGrep`.
 
 ## Test fixture and standard
 
-`data/sample/router_test/` (a bundle: opaque-column CSV, a codebook, a README)
+`data/tests/router_test/` (a bundle: opaque-column CSV, a codebook, a README)
 and the `field_router_test` standard in `src/standards.py` were added earlier this
 session as the bed for exercising all of the above — the semantic gap, cross-file
 resolution, narrative fields, and two planted conflicts. Their expected fills and
 traps live in the [plan doc's Test fixture section](plan_field_router.md#test-fixture),
 deliberately kept out of the bundle so the router cannot ingest its own answer
-key. (`data/sample/` is gitignored, so the bundle is not tracked by default.)
+key. (The bundle lives under `data/tests/`, tracked with the repo so the demos
+here are reproducible from a clean checkout.)
 
 ## Verification
 

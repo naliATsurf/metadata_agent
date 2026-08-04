@@ -61,9 +61,23 @@ confidence; drop the codebook and the same field routes to `la` at **medium**,
 inheriting the value-only prior's confidence. A retrieved span is quoted-only
 (low) until a verifier confirms it — a later milestone.
 
+Because assurance reads the column's `link_confidence` directly, M2's later
+multi-source rework flows through here for free: a **contested** column (two
+sources disagreeing) now routes at `medium` and a **corroborated** one at `high`,
+with no change to the router. The two-hop weaker-hop rule was written against a
+single resolution and already does the right thing with the multi-source verdict.
+One gap this leaves: `FieldRouting` carries the *grade* but not the conflict
+*reason* (`conflicts` / `corroborated_by` stay on the `ResolvedColumn`). The M4
+compiler reads them back from the catalog by locator; surfacing them onto the
+routing itself is deferred to that milestone.
+
 ## Verification
 
-- `pytest` — **137 pass, 1 skip** (was 130 after M2), the 1 warning pre-existing.
+- `pytest` — **137 pass, 1 skip** at M3 landing. (The tree is now at **151 pass,
+  1 skip**: M2's edge-case and multi-source follow-up tests landed *after* this
+  milestone, so the earlier linear "was N after M2" count no longer holds — see
+  the M2 change log for the current total.) The 1 pre-existing unrelated
+  `test_connections` failure is not a regression here.
 - New tests: `tests/test_route.py`. Focused unit tests — structural binding, its
   **standard-agnostic** form (a differently-worded count field still binds via the
   tool description), ambiguous-structural routing, narrative routing, unresolved
@@ -74,7 +88,7 @@ inheriting the value-only prior's confidence. A retrieved span is quoted-only
   field), resolves `water_temperature` to `water_temp` over the same-word
   `station_id`, `individual_count` to `abundance` over date/taxon, and `row_count`
   to `get_item_count` over a numeric column. Self-contained.
-- Demonstrated on `data/sample/router_test/`: 11/11 fields routed —
+- Demonstrated on `data/tests/router_test/`: 11/11 fields routed —
   `spatial_coverage` / `temporal_coverage` / `temperature_units` to `la` / `dt` /
   `tmp` at high assurance; `variables` to `get_field_names`; the six prose fields
   to README spans.

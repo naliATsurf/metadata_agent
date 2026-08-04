@@ -168,7 +168,7 @@ recorded with citations, and alternatives retained.
   for the partial-codebook cliff and multi-source conflict/corroboration.
   Self-contained (build their own tiny bundles), so they don't depend on the
   gitignored fixture.
-- Demonstrated on `data/sample/router_test/`: all eight columns resolved via the
+- Demonstrated on `data/tests/router_test/`: all eight columns resolved via the
   codebook, the `tmp` Kelvin conflict surfaced, and `search("latitude")` /
   `search("air temperature")` reaching `la` / `tmp`.
 

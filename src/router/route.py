@@ -25,7 +25,6 @@ becomes provenance-captured evidence; that wiring is deliberately not here yet.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Type
 

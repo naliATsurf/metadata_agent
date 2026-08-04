@@ -116,7 +116,7 @@ STANDARD_DEFINITIONS: Dict[str, Dict[str, Dict[str, Any]]] = {
     },
     # Field-router test standard. Its fields deliberately span the three routing
     # buckets so the field-driven planner (docs/development/plan_field_router.md)
-    # can be exercised end to end against data/sample/router_test/:
+    # can be exercised end to end against data/tests/router_test/:
     #   - narrative fields answerable only from README.md (title, abstract, ...);
     #   - structural fields computed from observations.csv (record_count, ...);
     #   - ambiguous-structural fields whose opaque columns (la, lo, tmp) must be

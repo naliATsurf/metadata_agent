@@ -334,7 +334,7 @@ is contained to layers 1–6 and the swap is reversible.
 ## Test fixture ✅
 
 A purpose-built bundle exercises every hard case above. It lives at
-`data/sample/router_test/` and pairs with the `field_router_test` standard in
+`data/tests/router_test/` and pairs with the `field_router_test` standard in
 `src/standards.py`. The "answer key" is kept **here, in the docs**, not in the
 bundle, so the router cannot ingest it.
 

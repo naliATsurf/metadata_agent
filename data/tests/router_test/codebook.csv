@@ -1,0 +1,9 @@
+variable,label,units,notes
+oid,Observation identifier,,Unique integer key for each record
+la,Latitude of the survey point,decimal degrees (WGS84),North is positive
+lo,Longitude of the survey point,decimal degrees (WGS84),East is positive; western Ireland values are negative
+dt,Date of observation,ISO 8601 date,Survey visit date
+sp,Species code,,"Four-letter code: MEAL=Meadow Pipit, SKYL=Skylark, WHEA=Wheatear, STON=Stonechat, RAVE=Raven"
+n,Number of individuals counted,count,Peak count during the point-count period
+tmp,Air temperature at the point,Kelvin,Recorded with a handheld thermometer
+elv,Elevation above sea level,metres,Derived from a digital elevation model
