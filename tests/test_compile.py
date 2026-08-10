@@ -119,7 +119,9 @@ class CompilerCase(unittest.TestCase):
 
 class Survey(BaseModel):
     title: str = Field(description="The title of the survey dataset")
+    abstract: Optional[str] = Field(default=None, description="An overview of what the survey records")
     methodology: Optional[str] = Field(default=None, description="How the sampling was carried out")
+    funding: Optional[str] = Field(default=None, description="The funding source and grant for the survey")
     license: Optional[str] = Field(default=None, description="The licence under which the data is released")
     min_latitude: Optional[float] = Field(default=None, description="the southernmost latitude sampled")
     max_longitude: Optional[float] = Field(default=None, description="the easternmost longitude sampled")
@@ -149,27 +151,41 @@ class RealisticCompileTest(CompilerCase):
             ],
             "units": ["", "degrees", "degrees", "Kelvin"],  # planted stale-units trap
         }).to_csv(os.path.join(self.dir, "codebook.csv"), index=False)
-        for name, body in {
-            "README.md": "# Rockpool Survey\n\nThe Rockpool Survey records intertidal species abundance.\n",
-            "METHODS.md": "# Methods\n\nSampling was carried out by timed searches at low tide.\n",
-            "LICENSE.md": "# Licence\n\nReleased under the Open Data Commons Attribution licence.\n",
-        }.items():
-            with open(os.path.join(self.dir, name), "w") as f:
-                f.write(body)
+        # One long README — the *usual* shape. Every narrative field lives in its
+        # own section of a single document, not in a separate file per field, so the
+        # router must localize distinct spans *within* one resource.
+        with open(os.path.join(self.dir, "README.md"), "w") as f:
+            f.write(
+                "# Coastal Rockpool Survey 2021\n\n"
+                "## Overview\n\n"
+                "The Coastal Rockpool Survey records intertidal species abundance "
+                "across stations on the western seaboard, intended for ecological "
+                "trend analysis.\n\n"
+                "## Methods\n\n"
+                "Sampling was carried out by timed searches at each station during "
+                "low tide, with two observers per station recording every taxon.\n\n"
+                "## Funding\n\n"
+                "The survey was funded by the National Marine Research Council under "
+                "grant 12-345.\n\n"
+                "## Licence\n\n"
+                "The dataset is released under the Creative Commons Attribution 4.0 "
+                "licence.\n"
+            )
 
         self.tab = create_context(os.path.join(self.dir, "observations.csv"), name="obs")
         self.cb = create_context(os.path.join(self.dir, "codebook.csv"), name="cb")
         self.readme = create_context(os.path.join(self.dir, "README.md"), name="readme")
-        self.methods = create_context(os.path.join(self.dir, "METHODS.md"), name="methods")
-        self.license = create_context(os.path.join(self.dir, "LICENSE.md"), name="license")
 
     def _fp(self) -> FieldPlan:
-        catalog = resolve_catalog(self.tab, sources=[self.cb, self.readme, self.methods, self.license])
-        return route_fields(Survey, catalog=catalog, docs=[self.readme, self.methods, self.license])
+        catalog = resolve_catalog(self.tab, sources=[self.cb, self.readme])
+        return route_fields(Survey, catalog=catalog, docs=[self.readme])
 
     def _compiled(self):
         fp = self._fp()
         return fp, compile_field_plan(fp)
+
+    def _narrative_fields(self, fp: FieldPlan):
+        return [p for p, r in fp.routings.items() if r.bucket == "narrative"]
 
     def test_plan_is_well_formed(self):
         fp, plan = self._compiled()
@@ -183,14 +199,54 @@ class RealisticCompileTest(CompilerCase):
         )
         self.assertIn("provenance_notes", self.assembly(plan).fields)
 
-    def test_each_narrative_document_becomes_its_own_task(self):
-        """title/methodology/license resolve to three *different* docs → three tasks."""
+    def test_one_long_document_becomes_one_narrative_task(self):
+        """The realistic case: many narrative fields, all in a single README.
+
+        They share (bucket=narrative, resource=README, tier=debate), so the compiler
+        groups them into *one* task targeting that document — not a task per field.
+        """
         fp, plan = self._compiled()
         narrative = [t for t in self.extraction_tasks(plan) if self.bucket_of(fp, t) == "narrative"]
-        targets = [tuple(t.target_resources) for t in narrative]
-        self.assertEqual(len(narrative), len(set(targets)), "docs collapsed into one task")
-        # Each narrative task carries exactly one field here (one field per doc).
-        self.assertTrue(all(len(t.target_resources) == 1 for t in narrative))
+        self.assertEqual(len(narrative), 1)
+        task = narrative[0]
+        self.assertEqual(task.target_resources, ["README"])
+        self.assertEqual(set(task.fields), set(self._narrative_fields(fp)))
+
+    def test_router_localizes_distinct_spans_within_the_one_document(self):
+        """Well-signposted fields resolve to *different, non-overlapping* sections.
+
+        This is the capability that matters for a single long document: the router
+        returns a section span, not the whole file, and a different one per field.
+        ``title`` is deliberately excluded — it is the classic low-signal field (its
+        text rarely contains the word "title"), so it can collide with another
+        section; that is the documented lexical ceiling, not a compiler concern.
+        """
+        fp = self._fp()
+        spans = []
+        for field in ("abstract", "methodology", "funding"):
+            cand = fp.routings[field].candidates[0]
+            self.assertEqual(cand.resource, "README")
+            self.assertEqual(cand.kind, "quoted_span")
+            start, end = cand.locator
+            self.assertTrue(0 <= start < end)
+            spans.append((start, end))
+        # Distinct and pairwise non-overlapping — genuine per-section localization.
+        self.assertEqual(len(set(spans)), len(spans))
+        for earlier, later in zip(sorted(spans), sorted(spans)[1:]):
+            self.assertLessEqual(earlier[1], later[0])  # earlier end <= later start
+
+    def test_tight_budget_splits_the_single_document_group_without_leaving_it(self):
+        """A budget cap fragments one document's narrative task, but every piece
+        still targets that same document and no field is lost."""
+        fp = self._fp()
+        narrative_fields = self._narrative_fields(fp)
+        plan = compile_field_plan(fp, budget=1)
+        self.assert_well_formed(fp, plan, Survey)
+        narrative = [t for t in self.extraction_tasks(plan) if self.bucket_of(fp, t) == "narrative"]
+        self.assertGreater(len(narrative), 1)  # actually split
+        self.assertTrue(all(t.target_resources == ["README"] for t in narrative))
+        carried = [f for t in narrative for f in t.fields]
+        self.assertEqual(sorted(carried), sorted(narrative_fields))
 
     def test_contested_column_does_not_drag_high_assurance_siblings_into_debate(self):
         """water_temp is refuted (Kelvin trap) → its own debate task; lat/lon stay single."""
@@ -222,6 +278,55 @@ class RealisticCompileTest(CompilerCase):
         self.assertEqual(
             compile_field_plan(fp).model_dump(), compile_field_plan(fp).model_dump()
         )
+
+
+class Narrative(BaseModel):
+    overview: Optional[str] = Field(default=None, description="an overview of what the dataset records")
+    methodology: Optional[str] = Field(default=None, description="how the sampling was carried out")
+    license: Optional[str] = Field(default=None, description="the licence under which the data is released")
+
+
+class MultiDocumentTest(CompilerCase):
+    """The other real shape: narrative info split across a few separate files.
+
+    Complements RealisticCompileTest (one long document): here fields land in
+    *different* documents, and the compiler must group by resource — one task per
+    document that actually answers something, not one giant narrative task.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        pd.DataFrame({"x": [1, 2, 3]}).to_csv(os.path.join(self.dir, "obs.csv"), index=False)
+        with open(os.path.join(self.dir, "README.md"), "w") as f:
+            f.write(
+                "# Rockpool Survey\n\n## Overview\n\nThe survey records intertidal "
+                "species abundance.\n\n## Methods\n\nSampling used timed searches at "
+                "low tide.\n"
+            )
+        with open(os.path.join(self.dir, "LICENSE.md"), "w") as f:
+            f.write("# Licence\n\nReleased under the Open Data Commons Attribution licence.\n")
+        self.tab = create_context(os.path.join(self.dir, "obs.csv"), name="obs")
+        self.readme = create_context(os.path.join(self.dir, "README.md"), name="readme")
+        self.license = create_context(os.path.join(self.dir, "LICENSE.md"), name="license")
+
+    def _compiled(self):
+        fp = route_fields(Narrative, catalog=resolve_catalog(self.tab), docs=[self.readme, self.license])
+        return fp, compile_field_plan(fp)
+
+    def test_fields_split_across_documents_yield_per_document_tasks(self):
+        fp, plan = self._compiled()
+        self.assert_well_formed(fp, plan, Narrative)
+        narrative = [t for t in self.extraction_tasks(plan) if self.bucket_of(fp, t) == "narrative"]
+        # license lives in LICENSE.md; overview/methods in README.md → two documents,
+        # so two narrative tasks, each targeting exactly one resource.
+        targets = {tuple(t.target_resources) for t in narrative}
+        self.assertIn(("LICENSE",), targets)
+        self.assertIn(("README",), targets)
+        self.assertTrue(all(len(t.target_resources) == 1 for t in narrative))
+
+    def test_license_routes_to_its_own_file(self):
+        fp, _ = self._compiled()
+        self.assertEqual(fp.routings["license"].candidates[0].resource, "LICENSE")
 
 
 # ---------------------------------------------------------------------------

@@ -112,6 +112,7 @@ data/sample/
 data/output/
 data/schema/
 data/end2end_test/
+data/sample_output/
 logs/
 
 # Apple 
