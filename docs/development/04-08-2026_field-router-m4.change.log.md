@@ -91,7 +91,7 @@ without asking it to change.
 
 ## Verification
 
-- `pytest` — **165 pass, 1 skip** (was 151; +14 M4 tests). The one unrelated
+- `pytest` — **169 pass, 1 skip** (was 151; +18 M4 tests). The one unrelated
   pre-existing `test_connections` (`SurfConnection`) failure is not a regression.
   Also added `[tool.pytest.ini_options] testpaths = ["tests"]` to `pyproject.toml`,
   so collection no longer walks the gitignored `docs/_build/` (a Sphinx build had
@@ -100,11 +100,20 @@ without asking it to change.
   happy path, they drive the compiler with realistic, messy bundles and assert the
   *invariants* via a shared `assert_well_formed` check reused across classes:
   - **`RealisticCompileTest`** — one data table + a codebook with the `water_temp`
-    Kelvin trap, *three separate* narrative documents, a structural field, and an
-    unresolvable one. Asserts the plan is well-formed; each document becomes its own
-    narrative task; **the contested column does not drag its high-assurance siblings
-    into debate** (the tiering fix above); the structural field is context-level and
-    `single`; a narrative task seeds a `quoted_span`, not a column; determinism.
+    Kelvin trap, **one long multi-section README** (the usual shape — every narrative
+    field in its own section of *one* document, not a file per field), a structural
+    field, and an unresolvable one. Asserts the plan is well-formed; the long
+    document collapses to **one** narrative task (grouped by resource); the router
+    **localizes distinct, non-overlapping spans within that single document**
+    (`abstract`/`methodology`/`funding` land on their own sections — `title` is
+    excluded as the documented low-signal case); a tight budget splits that
+    single-document group without any piece leaving the document; **the contested
+    column does not drag its high-assurance siblings into debate** (the tiering fix
+    above); the structural field is context-level and `single`; a narrative task
+    seeds a `quoted_span`, not a column; determinism.
+  - **`MultiDocumentTest`** — the other real shape: narrative fields split across
+    *separate* files (README + LICENSE). Asserts the compiler groups by resource
+    into one task per answering document, and `license` routes to its own file.
   - **`BudgetTest`** — a generous budget keeps a same-tier column group together; a
     1-char budget splits it one-field-per-task and drops nothing; a *derived* budget
     (the cost of the first two fields) forces a real split and the grouped task's
