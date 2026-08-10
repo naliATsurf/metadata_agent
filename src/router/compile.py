@@ -22,17 +22,20 @@ What the compiler does, and only that:
 - **Caps each group by a token budget.** Grouping risks re-introducing the flood at
   the group level, so a group whose seeded candidates exceed the budget is split
   into several tasks.
-- **Seeds each task's workspace** with just that group's candidates (the curated
-  slice), not a whole-context survey — *retrieval is the curation*.
-- **Proposes a set per field; it does not commit.** Each task carries per-field
-  *ranked* candidate sets (`field_bindings`) plus a select-and-extract instruction —
-  not a single hard-bound locator. The executor chooses which candidate actually
-  answers each field. The router proposes, the evidence disposes: an answer the
-  lexical router ranked second (a right span it under-scored) stays reachable, so
-  correctness depends on the router's **recall**, not its precision@1. Assurance
-  travels as **provisional**, to be confirmed by the verify pass. This also carries
-  the field → candidate binding *structurally*, so the verifier never parses the
-  instruction string.
+- **Attaches each task's candidates** as `field_bindings` — for each field, its
+  *ranked* candidate set: the curated slice its fields need, not a whole-context
+  survey (*retrieval is the curation*). This is the single carrier of candidates on a
+  task; there is no separate deduped pool.
+- **Proposes a set per field; it does not commit.** Each task carries the router's
+  ranked candidate set per field, not a single hard-bound locator, and its `task` is
+  a short action name — *what to do* (select the fitting candidate and extract) is a
+  general policy rendered at execution from `field_bindings`, not a stored paragraph.
+  The executor chooses which candidate actually answers each field: the router
+  proposes, the evidence disposes. An answer the lexical router ranked second (a
+  right span it under-scored) stays reachable, so correctness depends on the router's
+  **recall**, not its precision@1. Assurance travels as **provisional**, confirmed by
+  the verify pass, and the field → candidate binding is carried *structurally* so the
+  verifier never parses an instruction string.
 - **Chooses a topology per task from assurance**: a single extractor for
   high-assurance computed fields, debate for contested/low-assurance ones (the
   debate machinery's best real use — resolving disagreement, not re-surveying).
@@ -69,6 +72,17 @@ _BUCKET_PLAYER = {
     "ambiguous_structural": "data_analyst",
     "narrative": "metadata_specialist",
 }
+
+# `task` is a short *action identifier* (like the source-driven planner's
+# 'get_row_count'), not a prose instruction. What to do is carried structurally in
+# `field_bindings` (the ranked candidates per field) and rendered into a player
+# prompt at execution time — not stored as a paragraph on the task.
+_TASK_NAME = {
+    "structural": "compute_structural_fields",
+    "ambiguous_structural": "extract_column_fields",
+    "narrative": "extract_narrative_fields",
+}
+_ASSEMBLY_TASK_NAME = "assemble_metadata_record"
 
 # The fan-in synthesizer. Depends on every extraction task and emits the record.
 _ASSEMBLY_PLAYER = "metadata_generator"
@@ -178,16 +192,6 @@ def _split_by_budget(
 # ---------------------------------------------------------------------------
 
 
-def _dedup_candidates(routings: List[FieldRouting]) -> List[Dict[str, Any]]:
-    """The group's candidates, deduplicated by (resource, locator, kind), in order."""
-    seen: "OrderedDict[Tuple[Any, Any, str], Dict[str, Any]]" = OrderedDict()
-    for routing in routings:
-        for cand in routing.candidates:
-            key = (cand.resource, cand.locator, cand.kind)
-            seen.setdefault(key, cand.to_dict())
-    return list(seen.values())
-
-
 def _topology_for(routings: List[FieldRouting]) -> str:
     """Single extractor when every field is high-assurance; debate otherwise.
 
@@ -203,15 +207,15 @@ def _topology_for(routings: List[FieldRouting]) -> str:
 
 
 def _field_bindings(routings: List[FieldRouting]) -> List[Dict[str, Any]]:
-    """Per-field ranked candidate sets — the structured binding the executor selects from.
+    """Per-field ranked candidate sets — the one structured carrier of candidates.
 
-    Unlike the deduped ``candidates`` seed pool, this keeps each field's *own*
-    ranked candidate list (top-k, best-guess first) with its query and provisional
-    assurance. So the executor chooses which candidate actually answers the field —
-    the router proposes a set, it does not command a pick — an under-ranked but
-    correct candidate stays reachable, and the verifier reads the binding
-    structurally instead of parsing the instruction. ``assurance`` is provisional:
-    the router's grade, to be confirmed by the verify pass.
+    Each entry keeps a field's *own* ranked candidate list (top-k, best-guess first)
+    with its query and provisional assurance. So the executor chooses which candidate
+    actually answers the field — the router proposes a set, it does not command a
+    pick — an under-ranked but correct candidate stays reachable, and the verifier
+    reads the binding structurally instead of parsing an instruction. ``assurance``
+    is provisional: the router's grade, to be confirmed by the verify pass. This is
+    the *only* place candidates live on a task (no separate deduped pool).
     """
     return [
         {
@@ -222,45 +226,6 @@ def _field_bindings(routings: List[FieldRouting]) -> List[Dict[str, Any]]:
         }
         for r in routings
     ]
-
-
-def _instruction(bucket: str, resource: str, routings: List[FieldRouting]) -> str:
-    """A select-and-extract instruction: for each field, choose among its candidates.
-
-    Presents the router's ranked candidates as *options*, not a committed binding —
-    the executor picks the one that truly answers each field (or none). The
-    authoritative machine-readable form is ``field_bindings``; this is its readable
-    counterpart.
-    """
-    def options(r: FieldRouting) -> str:
-        return ", ".join(str(c.locator) for c in r.candidates) or "none"
-
-    if bucket == "structural":
-        binds = "; ".join(f"{r.field_path} via {options(r)}" for r in routings)
-        return (
-            "Compute each structural metadata field with its bound tool and report "
-            f"the value: {binds}."
-        )
-    if bucket == "ambiguous_structural":
-        lines = "\n".join(
-            f"  - {r.field_path}: choose the column that fits from [{options(r)}]"
-            for r in routings
-        )
-        return (
-            f"For each field below, select the column in '{resource}' that actually "
-            "answers it — the candidates are ranked best-guess first, but pick the "
-            "one that truly fits — then compute the value, or report none if no "
-            f"candidate fits:\n{lines}"
-        )
-    lines = "\n".join(
-        f"  - {r.field_path}: choose the span that fits from [{options(r)}]"
-        for r in routings
-    )
-    return (
-        f"For each field below, select the span in '{resource}' that actually "
-        "answers it (candidates ranked best-guess first) and quote the value, or "
-        f"report none if no candidate fits:\n{lines}"
-    )
 
 
 def _artifact_name(bucket: str, resource: str, index: int) -> str:
@@ -281,16 +246,15 @@ def _extraction_task(
     # span fields target the resource that holds them.
     target = [] if bucket == "structural" or not resource else [resource]
     return Task(
-        task=_instruction(bucket, resource, routings),
+        task=_TASK_NAME[bucket],
         player=players.get(bucket, _BUCKET_PLAYER["ambiguous_structural"]),
         rationale=(
             f"Field-driven routing sent {len(fields)} field(s) to the {bucket} "
-            f"extractor for '{resource or 'context'}'; extract them together from "
-            "their seeded candidates."
+            f"extractor for '{resource or 'context'}'. For each, select the candidate "
+            "that answers it from its ranked options and extract, or report none."
         ),
         target_resources=target,
         fields=fields,
-        candidates=_dedup_candidates(routings),
         field_bindings=_field_bindings(routings),
         topology=_topology_for(routings),
         outputs=[_artifact_name(bucket, resource, index)],
@@ -308,11 +272,7 @@ def _assembly_task(
     """
     inputs = {f"findings_{i}": name for i, name in enumerate(extraction_outputs)}
     return Task(
-        task=(
-            "Assemble the final metadata record from the extraction findings. Fill "
-            "each field from the finding responsible for it; use null for any field "
-            "no finding fills."
-        ),
+        task=_ASSEMBLY_TASK_NAME,
         player=assembly_player,
         rationale=(
             "Fan-in synthesis: one record from the per-extractor findings, keeping "

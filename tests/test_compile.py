@@ -101,18 +101,20 @@ class CompilerCase(unittest.TestCase):
         for need in assembly.inputs.values():
             self.assertIn(need, produced)
 
-        # Per extraction task: right player, homogeneous tier, deduped candidates.
+        # Per extraction task: right player, homogeneous tier, short task name.
         for t in extraction:
             bucket = self.bucket_of(fp, t)
             self.assertEqual(t.player, _BUCKET_PLAYER[bucket])
             tiers = {self.tier_of(fp, f) for f in t.fields}
             self.assertEqual(tiers, {t.topology}, "task mixes assurance tiers")
-            keys = [(c["resource"], c["locator"], c["kind"]) for c in t.candidates]
-            self.assertEqual(len(keys), len(set(keys)), "duplicate seeded candidate")
+
+            # `task` is a short action identifier, not a prose instruction.
+            self.assertNotIn(" ", t.task)
+            self.assertLessEqual(len(t.task), 40)
 
             # Structured per-field binding: exactly one binding per field, each with
             # its own ranked candidate set and a provisional assurance — the field →
-            # candidate binding is data, not prose.
+            # candidate binding is data, not prose, and the *only* candidate carrier.
             bound = {b["field"]: b for b in t.field_bindings}
             self.assertEqual(set(bound), set(t.fields))
             for f in t.fields:
@@ -120,8 +122,6 @@ class CompilerCase(unittest.TestCase):
                 self.assertTrue(b["candidates"], f"no candidates bound for {f}")
                 self.assertEqual(b["assurance"], fp.routings[f].assurance)
                 self.assertIn("query", b)
-            # Selection is deferred, not commanded: the instruction offers choices.
-            self.assertRegex(t.task.lower(), r"choose|select|bound tool")
 
 
 # ---------------------------------------------------------------------------
@@ -320,8 +320,9 @@ class RealisticCompileTest(CompilerCase):
     def test_narrative_task_seeds_a_quoted_span_not_a_column(self):
         _, plan = self._compiled()
         lic = next(t for t in plan.steps if "license" in t.fields)
-        self.assertTrue(lic.candidates)
-        self.assertTrue(all(c["kind"] == "quoted_span" for c in lic.candidates))
+        cands = [c for b in lic.field_bindings for c in b["candidates"]]
+        self.assertTrue(cands)
+        self.assertTrue(all(c["kind"] == "quoted_span" for c in cands))
 
     def test_determinism_over_the_realistic_bundle(self):
         fp = self._fp()
@@ -450,7 +451,9 @@ class BudgetTest(CompilerCase):
         multi = [t for t in self.extraction_tasks(plan) if len(t.fields) > 1]
         self.assertTrue(multi, "budget did not produce a grouped task to check")
         for t in multi:
-            payload = sum(len(c["snippet"] or "") for c in t.candidates)
+            payload = sum(
+                len(c["snippet"] or "") for b in t.field_bindings for c in b["candidates"]
+            )
             self.assertLessEqual(payload, budget)
 
     def test_field_larger_than_budget_still_gets_its_own_task(self):

@@ -19,22 +19,24 @@ replace. So `Task` gains three additive, optional attributes
 ([src/core/schemas.py](../../src/core/schemas.py)):
 
 ```
-Task{ …, fields: [str], candidates: [dict], field_bindings: [dict], topology: str|None }
+Task{ …, fields: [str], field_bindings: [dict], topology: str|None }
 ```
 
 - **`fields`** — the schema paths this task is responsible for filling. This is the
   linchpin: a produced value maps back to the field it answers by construction.
-- **`field_bindings`** — the authoritative per-field binding: for each field,
-  `{field, query, assurance, candidates}` where `candidates` is that field's *ranked*
-  candidate set. Carries field → candidate *structurally* (not in prose), and is
-  what makes selection deferrable — see the revision section below.
-- **`candidates`** — the deduped union of the above: a compact overview of the task's
-  context slice. *Retrieval is the curation.*
+- **`field_bindings`** — the authoritative, and *sole*, per-field carrier of
+  candidates: for each field, `{field, query, assurance, candidates}` where
+  `candidates` is that field's *ranked* set. Carries field → candidate *structurally*
+  (not in prose), and is what makes selection deferrable — see the revision below.
 - **`topology`** — a per-task hint (`single` / `debate`) chosen from assurance.
 
-All four default empty/None, and the executor reads none of them yet, so the
-source-driven planner and the current execution path are entirely unaffected —
-both planners still emit one `Task` shape.
+The existing `task` string stays a **short action identifier** (like the
+source-driven planner's `get_row_count`) — `compute_structural_fields`,
+`extract_column_fields`, `extract_narrative_fields`, `assemble_metadata_record` — not
+a prose instruction; *what to do* is carried in `field_bindings` and rendered into a
+player prompt at execution. All three additive fields default empty/None, and the
+executor reads none of them yet, so the source-driven planner and the current
+execution path are entirely unaffected — both planners still emit one `Task` shape.
 
 ## What the compiler does — and only that
 
@@ -100,10 +102,9 @@ followed, and both are structural, not cosmetic:
 **The fix — defer selection to the executor, keep planning deterministic.** The LLM
 that should choose among candidates is already downstream (the player); the bug was
 the compiler *pre-empting* it. So the compiler now emits, per field, the router's
-**ranked candidate set** (`field_bindings`) and a **select-and-extract** instruction
-that presents those candidates as *options*, not a command. The executor selects
-which candidate actually answers each field (or reports none); the router only
-proposes. Consequences:
+**ranked candidate set** (`field_bindings`); the executor selects which candidate
+actually answers each field (or reports none), and the router only proposes.
+Consequences:
 
 - **Recall, not precision@1.** The router no longer has to *rank* the right
   candidate first — only get it into the top-k. A far weaker, far more achievable
@@ -122,6 +123,14 @@ grouped how, for which player, with which candidate options — and defers the o
 judgment BM25 is bad at (semantic selection among candidates) to the LLM already
 present at execution. Grouping still uses the provisional assurance to pick topology,
 so the tiering fix above is unaffected.
+
+**Two cleanups this settled.** (i) `task` is now a **short action identifier**
+(`extract_narrative_fields`, …), not a paragraph — the field is a name, matching the
+source-driven planner's convention; the select-and-extract directive is a general
+execution policy rendered from `field_bindings`, not stored per task. (ii) The flat
+`candidates` field was **removed**: it duplicated `field_bindings` (its deduped
+union) and carried the ambiguous shared-pool score, so `field_bindings` is now the
+task's *single* carrier of candidate evidence.
 
 Still open (M5): the assembly task hands the synthesizer the findings and the field
 list but not an explicit field → finding map; that correlation is recoverable from
