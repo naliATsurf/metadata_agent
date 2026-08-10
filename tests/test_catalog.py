@@ -265,5 +265,137 @@ class CatalogEdgeCaseTest(unittest.TestCase):
         self.assertTrue(all(c.link_method == "structured_dictionary" for c in cat.columns))
 
 
+class FullyExercisedCatalogTest(unittest.TestCase):
+    """One bundle that drives every resolution outcome at once.
+
+    The columns are chosen so that, between them, every `link_method`, every
+    `link_confidence`, every `value_label`, and each of conflicts / corroboration /
+    alternatives is exercised — and one column (`tmp`) fills *all* of them at once:
+
+    | column | method               | conf   | label       | fills                              |
+    |--------|----------------------|--------|-------------|------------------------------------|
+    | tmp    | structured_dictionary| medium | coordinate  | everything (conflict+corrob+alts)  |
+    | la     | structured_dictionary| high   | coordinate  | corroboration → high, alternatives |
+    | frac   | structured_dictionary| low    | numeric     | chosen claim refuted by values     |
+    | note   | lexical_prose        | medium | categorical | prose definition                   |
+    | dt     | value_prior          | high   | temporal    | self-evident value, chosen by prior|
+    | oid    | none                 | none   | numeric     | abstains — nothing describes it     |
+
+    `tmp`: two codebooks agree on Celsius (corroboration) while a third says Kelvin,
+    which the 4.1–21.9 values refute (a same-tier rival ruled out → medium, conflict
+    recorded); all three plus the value prior are kept as alternatives.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        pd.DataFrame(
+            {
+                "oid": list(range(1, 9)),
+                "la": [53.1, 53.4, 53.8, 54.0, 54.2, 54.5, 54.7, 54.8],
+                "tmp": [4.1, 8.3, 12.0, 15.5, 18.2, 21.9, 10.4, 6.7],
+                "note": ["ok", "ok", "flag", "ok", "flag", "ok", "ok", "flag"],
+                "dt": ["2021-03-%02d" % (i + 1) for i in range(8)],
+                "frac": [0, 40, 120, 250, 15, 90, 300, 5],  # a codebook wrongly calls this a %
+            }
+        ).to_csv(os.path.join(self.dir, "observations.csv"), index=False)
+        # cb1 & cb2 agree on tmp (Celsius) → corroboration; cb3 says Kelvin → refuted.
+        # cb1 also (wrongly) labels frac a percentage, refuted by its 0–300 range.
+        pd.DataFrame({
+            "variable": ["tmp", "la", "frac"],
+            "description": ["Water temperature at the station", "Latitude of the survey point", "Fraction measure"],
+            "units": ["Celsius", "decimal degrees", "%"],
+        }).to_csv(os.path.join(self.dir, "cb1.csv"), index=False)
+        pd.DataFrame({
+            "variable": ["tmp", "la"],
+            "description": ["Water temperature at the station", "Latitude of the survey point"],
+            "units": ["Celsius", "decimal degrees"],
+        }).to_csv(os.path.join(self.dir, "cb2.csv"), index=False)
+        pd.DataFrame({
+            "variable": ["tmp"],
+            "description": ["Water temperature at the station"],
+            "units": ["Kelvin"],
+        }).to_csv(os.path.join(self.dir, "cb3.csv"), index=False)
+        with open(os.path.join(self.dir, "README.md"), "w") as f:
+            f.write("# Survey\n\nField glossary: `note` = field remark recorded by the observer.\n")
+
+        self.tab = create_context(os.path.join(self.dir, "observations.csv"), name="obs")
+        self.sources = [
+            create_context(os.path.join(self.dir, n), name=n.split(".")[0])
+            for n in ("cb1.csv", "cb2.csv", "cb3.csv", "README.md")
+        ]
+
+    def tearDown(self):
+        clear_registry()
+
+    def _catalog(self):
+        return resolve_catalog(self.tab, sources=self.sources)
+
+    def test_tmp_column_populates_every_field(self):
+        """The linchpin: a single column with *no* empty ResolvedColumn field."""
+        tmp = self._catalog().get("tmp")
+        # Scalar fields all set (non-empty, non-"none").
+        self.assertEqual(tmp.resource, "observations")
+        self.assertEqual(tmp.name, "tmp")
+        self.assertTrue(tmp.dtype)
+        self.assertEqual(tmp.description, "Water temperature at the station")
+        self.assertEqual(tmp.units, "Celsius")
+        self.assertEqual(tmp.link_method, "structured_dictionary")
+        self.assertEqual(tmp.link_confidence, "medium")   # same-tier Kelvin rival refuted
+        self.assertEqual(tmp.link_evidence, "cb1 row 'tmp'")
+        self.assertTrue(tmp.value_label)
+        # List fields all non-empty — conflict, corroboration, and alternatives together.
+        self.assertTrue(tmp.conflicts)
+        self.assertIn("Kelvin", tmp.conflicts[0])
+        self.assertEqual(tmp.corroborated_by, ["cb2 row 'tmp'"])
+        self.assertEqual(len(tmp.alternatives), 3)        # cb2, cb3, and the value prior
+        # Nothing in the serialized form is None/empty either.
+        d = tmp.to_dict()
+        empty = [k for k, v in d.items() if v in (None, "", [], "none")]
+        self.assertEqual(empty, [], f"unexpected empty ResolvedColumn fields: {empty}")
+
+    def test_every_link_method_is_exercised(self):
+        cat = self._catalog()
+        methods = {c.name: c.link_method for c in cat.columns}
+        self.assertEqual(methods["la"], "structured_dictionary")
+        self.assertEqual(methods["note"], "lexical_prose")
+        self.assertEqual(methods["dt"], "value_prior")
+        self.assertEqual(methods["oid"], "none")
+
+    def test_every_confidence_level_is_exercised(self):
+        cat = self._catalog()
+        conf = {c.name: c.link_confidence for c in cat.columns}
+        self.assertEqual(conf["la"], "high")     # corroborated
+        self.assertEqual(conf["dt"], "high")     # self-evident temporal
+        self.assertEqual(conf["tmp"], "medium")  # tie broken by the values
+        self.assertEqual(conf["note"], "medium") # lone prose
+        self.assertEqual(conf["frac"], "low")    # chosen claim refuted
+        self.assertEqual(conf["oid"], "none")    # abstained
+
+    def test_every_value_label_is_exercised(self):
+        cat = self._catalog()
+        labels = {c.value_label for c in cat.columns}
+        self.assertEqual(labels, {"coordinate", "temporal", "categorical", "numeric"})
+
+    def test_chosen_claim_refuted_gives_low_and_a_conflict(self):
+        frac = self._catalog().get("frac")
+        self.assertEqual(frac.link_confidence, "low")
+        self.assertTrue(frac.conflicts)
+        self.assertIn("percentage", frac.conflicts[0])
+        self.assertEqual(frac.corroborated_by, [])   # nothing agreed with it
+
+    def test_corroboration_lifts_a_clean_agreement_to_high(self):
+        la = self._catalog().get("la")
+        self.assertEqual(la.link_confidence, "high")
+        self.assertEqual(la.corroborated_by, ["cb2 row 'la'"])
+        self.assertEqual(la.conflicts, [])           # no disagreement, no refutation
+
+    def test_abstained_column_leaves_the_link_fields_empty(self):
+        oid = self._catalog().get("oid")
+        self.assertEqual(oid.link_method, "none")
+        self.assertEqual(oid.link_confidence, "none")
+        self.assertIsNone(oid.description)
+        self.assertEqual(oid.value_label, "numeric")  # the coarse prior is still kept
+
+
 if __name__ == "__main__":
     unittest.main()
