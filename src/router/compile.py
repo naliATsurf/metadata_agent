@@ -24,6 +24,15 @@ What the compiler does, and only that:
   into several tasks.
 - **Seeds each task's workspace** with just that group's candidates (the curated
   slice), not a whole-context survey — *retrieval is the curation*.
+- **Proposes a set per field; it does not commit.** Each task carries per-field
+  *ranked* candidate sets (`field_bindings`) plus a select-and-extract instruction —
+  not a single hard-bound locator. The executor chooses which candidate actually
+  answers each field. The router proposes, the evidence disposes: an answer the
+  lexical router ranked second (a right span it under-scored) stays reachable, so
+  correctness depends on the router's **recall**, not its precision@1. Assurance
+  travels as **provisional**, to be confirmed by the verify pass. This also carries
+  the field → candidate binding *structurally*, so the verifier never parses the
+  instruction string.
 - **Chooses a topology per task from assurance**: a single extractor for
   high-assurance computed fields, debate for contested/low-assurance ones (the
   debate machinery's best real use — resolving disagreement, not re-surveying).
@@ -101,7 +110,7 @@ def compile_field_plan(
     # share a (bucket, resource) but differ in tier, so a per-group index would
     # collide on the output-artifact name. A single running index keeps them unique.
     chunks: List[Tuple[str, str, List[FieldRouting]]] = []
-    for (bucket, resource, _tier_key), routings in groups.items():
+    for (bucket, resource, _topology), routings in groups.items():
         routings = sorted(routings, key=lambda r: r.field_path)
         for chunk in _split_by_budget(routings, budget):
             chunks.append((bucket, resource, chunk))
@@ -122,27 +131,17 @@ def compile_field_plan(
 # ---------------------------------------------------------------------------
 
 
-def _tier(routing: FieldRouting) -> str:
-    """The topology a field warrants: ``single`` if high-assurance, else ``debate``.
-
-    A high-assurance computed field is its own check and needs no debate; a
-    contested or low-assurance field is exactly where debate earns its cost. Making
-    the tier part of the group key keeps the two apart, so 'debate only for
-    contested ones' holds even when they share a resource — no topology overkill.
-    """
-    return "single" if routing.assurance == "high" else "debate"
-
-
 def _group_key(routing: FieldRouting) -> Tuple[str, str, str]:
     """The extractor *and tier* a field shares: bucket, resource, and topology tier.
 
     Structural fields bind to a whole-resource tool (candidate ``resource`` is
     empty), so they all share one group; column and span fields group by the
-    resource that holds the column or document. The tier splits a mixed group so a
-    high-assurance field is not pulled into a contested sibling's debate.
+    resource that holds the column or document. The topology tier (from
+    :func:`_topology_for`) splits a mixed group so a high-assurance field is not
+    pulled into a contested sibling's debate.
     """
     resource = routing.candidates[0].resource if routing.candidates else ""
-    return (routing.bucket, resource, _tier(routing))
+    return (routing.bucket, resource, _topology_for([routing]))
 
 
 def _candidate_cost(routing: FieldRouting) -> int:
@@ -195,30 +194,72 @@ def _topology_for(routings: List[FieldRouting]) -> str:
     High-assurance computed fields need no debate — the computation is its own
     check. A contested or low-assurance field is exactly where the debate topology
     earns its cost: resolving disagreement between grounded sources.
+
+    This is the single definition of the tier rule. It is used both to split groups
+    (via :func:`_group_key`, one routing at a time) and to set each task's topology,
+    so grouping and the per-task hint can never disagree.
     """
     return "single" if all(r.assurance == "high" for r in routings) else "debate"
 
 
+def _field_bindings(routings: List[FieldRouting]) -> List[Dict[str, Any]]:
+    """Per-field ranked candidate sets — the structured binding the executor selects from.
+
+    Unlike the deduped ``candidates`` seed pool, this keeps each field's *own*
+    ranked candidate list (top-k, best-guess first) with its query and provisional
+    assurance. So the executor chooses which candidate actually answers the field —
+    the router proposes a set, it does not command a pick — an under-ranked but
+    correct candidate stays reachable, and the verifier reads the binding
+    structurally instead of parsing the instruction. ``assurance`` is provisional:
+    the router's grade, to be confirmed by the verify pass.
+    """
+    return [
+        {
+            "field": r.field_path,
+            "query": r.query,
+            "assurance": r.assurance,   # provisional — confirmed by the verify pass
+            "candidates": [c.to_dict() for c in r.candidates],
+        }
+        for r in routings
+    ]
+
+
 def _instruction(bucket: str, resource: str, routings: List[FieldRouting]) -> str:
-    """A human-readable task instruction naming each field → locator binding."""
-    def locator(r: FieldRouting) -> str:
-        return str(r.candidates[0].locator) if r.candidates else "?"
+    """A select-and-extract instruction: for each field, choose among its candidates.
+
+    Presents the router's ranked candidates as *options*, not a committed binding —
+    the executor picks the one that truly answers each field (or none). The
+    authoritative machine-readable form is ``field_bindings``; this is its readable
+    counterpart.
+    """
+    def options(r: FieldRouting) -> str:
+        return ", ".join(str(c.locator) for c in r.candidates) or "none"
 
     if bucket == "structural":
-        binds = ", ".join(f"{r.field_path} via {locator(r)}" for r in routings)
+        binds = "; ".join(f"{r.field_path} via {options(r)}" for r in routings)
         return (
-            "Compute the structural metadata fields and report each value, using the "
-            f"bound tool for each: {binds}."
+            "Compute each structural metadata field with its bound tool and report "
+            f"the value: {binds}."
         )
     if bucket == "ambiguous_structural":
-        binds = ", ".join(f"{r.field_path} <- column '{locator(r)}'" for r in routings)
-        return (
-            f"Extract these fields from their resolved columns in '{resource}', each "
-            f"from the column named: {binds}."
+        lines = "\n".join(
+            f"  - {r.field_path}: choose the column that fits from [{options(r)}]"
+            for r in routings
         )
-    binds = ", ".join(f"{r.field_path} <- {locator(r)}" for r in routings)
+        return (
+            f"For each field below, select the column in '{resource}' that actually "
+            "answers it — the candidates are ranked best-guess first, but pick the "
+            "one that truly fits — then compute the value, or report none if no "
+            f"candidate fits:\n{lines}"
+        )
+    lines = "\n".join(
+        f"  - {r.field_path}: choose the span that fits from [{options(r)}]"
+        for r in routings
+    )
     return (
-        f"Extract these fields by quoting the supporting span in '{resource}': {binds}."
+        f"For each field below, select the span in '{resource}' that actually "
+        "answers it (candidates ranked best-guess first) and quote the value, or "
+        f"report none if no candidate fits:\n{lines}"
     )
 
 
@@ -250,6 +291,7 @@ def _extraction_task(
         target_resources=target,
         fields=fields,
         candidates=_dedup_candidates(routings),
+        field_bindings=_field_bindings(routings),
         topology=_topology_for(routings),
         outputs=[_artifact_name(bucket, resource, index)],
     )

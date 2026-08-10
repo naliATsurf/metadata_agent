@@ -64,9 +64,23 @@ class Task(BaseModel):
     candidates: List[Dict[str, Any]] = Field(
         default_factory=list,
         description=(
-            "The routed candidate evidence (serialized EvidenceRefs) seeding this "
-            "task's workspace — the curated slice of context its fields need, so the "
-            "player sees only its candidates instead of a whole-context survey."
+            "The deduped union of this task's candidate evidence (serialized "
+            "EvidenceRefs) — a compact overview of the curated context slice its "
+            "fields draw on. The authoritative per-field binding is `field_bindings`."
+        ),
+    )
+    field_bindings: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Per-field routing bindings (field-driven routing). Each entry is "
+            "{field, query, assurance, candidates}, where `candidates` is the "
+            "router's *ranked* list for that one field — a proposed set, not a "
+            "committed pick. The executor selects which candidate actually answers "
+            "the field and extracts from it (or reports none); the router proposes, "
+            "the evidence disposes. `assurance` is provisional — the router's grade, "
+            "confirmed or revised by the verify pass. This is what carries a field's "
+            "candidate set structurally, so a value can be traced to its source "
+            "without parsing the instruction text."
         ),
     )
     topology: Optional[str] = Field(

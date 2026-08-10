@@ -228,12 +228,19 @@ Ordered so each is testable before the next and the migration stays incremental.
    firing them through the tool with `phase="route"` attribution comes with
    execution (M4).
 5. ✅ **Compile `FieldPlan` → `Plan(List[Task])`** (`src/router/compile.py`). The
-   linchpin-1 step:
-   - Group routings sharing (resource set, extractor) into one `Task`, **capped by
-     a token budget** so grouping does not re-introduce flooding at the group
-     level.
-   - Each `Task` carries `fields=[…]` and seeds the players' workspace with that
-     group's `candidates` — no whole-context survey.
+   linchpin-1 step, deterministic and LLM-free:
+   - Group routings sharing `(bucket, resource, assurance tier)` into one `Task`,
+     **capped by a token budget** so grouping does not re-introduce flooding at the
+     group level. The tier is in the key so a high-assurance field is never dragged
+     into a contested sibling's debate.
+   - Each `Task` carries `fields=[…]` and **`field_bindings`** — the router's
+     *ranked* candidate set per field, plus a **select-and-extract** instruction. The
+     compiler **proposes a set, it does not commit to top-1**: the executor chooses
+     which candidate answers each field (linchpin 2 — router proposes, evidence
+     disposes), so correctness needs the router's *recall@k*, not *precision@1*, and
+     an under-ranked-but-correct candidate stays reachable. Assurance travels as
+     *provisional*, confirmed by the verify pass. `candidates` (deduped union) is the
+     compact context slice — no whole-context survey.
    - Topology per task from assurance: single extractor for high-assurance
      computed fields, debate only for contested/low-assurance ones.
    - One terminal **assembly `Task`** depends on all extraction tasks (fan-in),
@@ -327,14 +334,19 @@ is contained to layers 1–6 and the swap is reversible.
   coverage report with pre-extraction `unresolved` detection. Tests:
   `tests/test_route.py`. Compile-to-`Task` and execution are M4.
 - **M4 ✅ — Compile + `Task.fields` + assembly task** (layer 5).
-  `src/router/compile.py`: `compile_field_plan` groups routings by extractor
-  (`bucket`, `resource`), caps each group by a token budget, seeds each task with
-  its candidates, picks `single`/`debate` topology by assurance, and fans in to one
+  `src/router/compile.py`: `compile_field_plan` groups routings by
+  `(bucket, resource, assurance tier)`, caps each group by a token budget, seeds each
+  task, picks `single`/`debate` topology by assurance, and fans in to one
   `metadata_generator` assembly task. `Task` gained `fields` / `candidates` /
-  `topology` (additive, optional — the source-driven planner and executor are
-  unaffected). Unresolved fields get no extraction task but are named for assembly
-  so the record nulls them. Tests: `tests/test_compile.py`. The verify/reconcile
-  pass (linchpin 2) is M5; wiring the strategy behind an orchestrator flag is M6.
+  `field_bindings` / `topology` (additive, optional — the source-driven planner and
+  executor are unaffected). **Propose-not-commit:** each task carries the router's
+  *ranked* candidate set per field (`field_bindings`) and a select-and-extract
+  instruction, so the executor picks the answering candidate (recall@k, not
+  precision@1) and assurance travels as provisional — the compiler does not bake in
+  the lexical top-1. Unresolved fields get no extraction task but are named for
+  assembly so the record nulls them. Tests: `tests/test_compile.py`. The
+  verify/reconcile pass (linchpin 2), and making the assembly's field→finding map
+  structural, are M5; wiring the strategy behind an orchestrator flag is M6.
 - **M5 — Assurance axis + verify reconciliation** (layer 6, provenance). Closes
   linchpin 2.
 - **M6 — Diff against source-driven on sample datasets; flip the default.**

@@ -110,6 +110,19 @@ class CompilerCase(unittest.TestCase):
             keys = [(c["resource"], c["locator"], c["kind"]) for c in t.candidates]
             self.assertEqual(len(keys), len(set(keys)), "duplicate seeded candidate")
 
+            # Structured per-field binding: exactly one binding per field, each with
+            # its own ranked candidate set and a provisional assurance — the field →
+            # candidate binding is data, not prose.
+            bound = {b["field"]: b for b in t.field_bindings}
+            self.assertEqual(set(bound), set(t.fields))
+            for f in t.fields:
+                b = bound[f]
+                self.assertTrue(b["candidates"], f"no candidates bound for {f}")
+                self.assertEqual(b["assurance"], fp.routings[f].assurance)
+                self.assertIn("query", b)
+            # Selection is deferred, not commanded: the instruction offers choices.
+            self.assertRegex(t.task.lower(), r"choose|select|bound tool")
+
 
 # ---------------------------------------------------------------------------
 # A realistic, messy bundle: one data table + codebook (with a Kelvin trap),
@@ -234,6 +247,43 @@ class RealisticCompileTest(CompilerCase):
         self.assertEqual(len(set(spans)), len(spans))
         for earlier, later in zip(sorted(spans), sorted(spans)[1:]):
             self.assertLessEqual(earlier[1], later[0])  # earlier end <= later start
+
+    def test_binding_preserves_an_under_ranked_but_correct_candidate(self):
+        """The point of deferring selection: a right answer the router ranked below
+        #1 is still in the field's binding, so the executor can recover it.
+
+        `title` is the low-signal field whose top lexical hit is wrong (it collides
+        with the Licence section). The compiler must NOT commit to that top pick — it
+        must hand the executor the ranked set, which still contains the real title
+        (the `# Coastal Rockpool Survey 2021` H1). Recall, not precision@1.
+        """
+        _, plan = self._compiled()
+        narrative = next(t for t in plan.steps if "title" in t.fields)
+        title = next(b for b in narrative.field_bindings if b["field"] == "title")
+        # More than one option is offered — selection is genuinely deferred...
+        self.assertGreater(len(title["candidates"]), 1)
+        # ...and the correct title span is among them, even if not ranked first.
+        self.assertTrue(
+            any("Coastal Rockpool Survey" in c["snippet"] for c in title["candidates"]),
+            "the real title span was dropped — router precision@1 baked in",
+        )
+
+    def test_assurance_on_a_binding_is_the_router_grade_and_provisional(self):
+        fp, plan = self._compiled()
+        col = next(t for t in plan.steps if "water_temperature" in t.fields)
+        wt = next(b for b in col.field_bindings if b["field"] == "water_temperature")
+        # Provisional == the router's grade, carried for the verifier to confirm.
+        self.assertEqual(wt["assurance"], fp.routings["water_temperature"].assurance)
+        self.assertEqual(wt["assurance"], "low")
+
+    def test_per_field_scores_are_that_field_s_own_ranking(self):
+        """Bindings are per-field, so a shared column carries each field's own score,
+        not whichever field happened to be seen first (the old pooled-dedup bug)."""
+        _, plan = self._compiled()
+        col = next(t for t in plan.steps if "min_latitude" in t.fields and "max_longitude" in t.fields)
+        for field, want in (("min_latitude", "lat"), ("max_longitude", "lon")):
+            b = next(x for x in col.field_bindings if x["field"] == field)
+            self.assertEqual(b["candidates"][0]["locator"], want)  # this field's own top pick
 
     def test_tight_budget_splits_the_single_document_group_without_leaving_it(self):
         """A budget cap fragments one document's narrative task, but every piece

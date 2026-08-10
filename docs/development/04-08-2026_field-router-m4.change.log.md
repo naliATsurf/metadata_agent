@@ -19,17 +19,20 @@ replace. So `Task` gains three additive, optional attributes
 ([src/core/schemas.py](../../src/core/schemas.py)):
 
 ```
-Task{ …, fields: [str], candidates: [dict], topology: str|None }
+Task{ …, fields: [str], candidates: [dict], field_bindings: [dict], topology: str|None }
 ```
 
 - **`fields`** — the schema paths this task is responsible for filling. This is the
   linchpin: a produced value maps back to the field it answers by construction.
-- **`candidates`** — the routed evidence (serialized `EvidenceRef`s) seeding the
-  task's workspace: the curated slice its fields need, not a whole-context survey.
-  *Retrieval is the curation.*
+- **`field_bindings`** — the authoritative per-field binding: for each field,
+  `{field, query, assurance, candidates}` where `candidates` is that field's *ranked*
+  candidate set. Carries field → candidate *structurally* (not in prose), and is
+  what makes selection deferrable — see the revision section below.
+- **`candidates`** — the deduped union of the above: a compact overview of the task's
+  context slice. *Retrieval is the curation.*
 - **`topology`** — a per-task hint (`single` / `debate`) chosen from assurance.
 
-All three default empty/None, and the executor reads none of them yet, so the
+All four default empty/None, and the executor reads none of them yet, so the
 source-driven planner and the current execution path are entirely unaffected —
 both planners still emit one `Task` shape.
 
@@ -49,6 +52,9 @@ it lays out execution from the routing artifact:
   field larger than the budget still gets its own task, so nothing is dropped.
 - **Seeds each task** with just its group's candidates, deduplicated by
   `(resource, locator, kind)`.
+- **Proposes a set per field; it does not commit** (see the revision below): each
+  task carries per-field *ranked* candidate sets and a select-and-extract
+  instruction, so the executor picks which candidate actually answers each field.
 - **Chooses topology per task from assurance**: `single` for high-assurance fields
   (the computation is its own check), `debate` otherwise — the debate machinery's
   best real use is resolving disagreement between grounded sources, not re-surveying.
@@ -69,6 +75,58 @@ key**: high-assurance fields form their own `single` task, contested ones their 
 `debate` task, even when they come from the same resource. (Output-artifact names
 are now numbered by a single global index, since two groups can share a
 `(bucket, resource)` and differ only in tier.)
+
+## Revision: the compiler proposes a set, it does not commit
+
+**The flaw.** The first cut bound each field to its top-ranked candidate
+(`candidates[0]`) and wrote that single locator into the instruction as a command
+(`title <- (430, 517)`). Reviewing a compiled plan exposed the problem: on the
+one-long-README bundle, `title` was *commanded* to the Licence span — the router's
+lexical top hit — even though the correct title span (`# Coastal Rockpool Survey
+2021`) sat right there in the candidate pool, merely ranked second. Two costs
+followed, and both are structural, not cosmetic:
+
+1. **It made the router the decider, not the proposer** — a direct violation of
+   linchpin 2, *"the router proposes; the evidence disposes."* A deterministic,
+   lexical top-1 pick was baked into the plan with no recourse, so the whole
+   pipeline's correctness rested on the router achieving **precision@1** — which BM25
+   without stemming cannot (`title`, `record_count`→`oid`, …).
+2. **The field → candidate binding lived only in prose.** `fields` was a flat list
+   and `candidates` a flat *deduped* pool; which candidate answered which field
+   existed only inside the instruction sentence. The verify pass (M5) would have had
+   to parse English to trace a value to its source, and a candidate shared by two
+   fields carried a score from whichever field was seen first.
+
+**The fix — defer selection to the executor, keep planning deterministic.** The LLM
+that should choose among candidates is already downstream (the player); the bug was
+the compiler *pre-empting* it. So the compiler now emits, per field, the router's
+**ranked candidate set** (`field_bindings`) and a **select-and-extract** instruction
+that presents those candidates as *options*, not a command. The executor selects
+which candidate actually answers each field (or reports none); the router only
+proposes. Consequences:
+
+- **Recall, not precision@1.** The router no longer has to *rank* the right
+  candidate first — only get it into the top-k. A far weaker, far more achievable
+  bar for a lexical scorer, and exactly what "retrieval is the curation" was meant to
+  mean. The `title` H1 that BM25 under-ranked is now reachable by the executor.
+- **The binding is structural.** `field_bindings` carries `{field, query, assurance,
+  candidates}` per field, so the verifier reads the field → candidate map as data,
+  and each field keeps its *own* candidate ranking and scores (no shared-pool score
+  confusion).
+- **Assurance is provisional.** The grade on a binding is the router's proposal,
+  carried for the verify pass to confirm or revise once the executor has selected —
+  not a settled fact.
+
+The compiler stays fully deterministic and LLM-free: it lays out *which* fields,
+grouped how, for which player, with which candidate options — and defers the one
+judgment BM25 is bad at (semantic selection among candidates) to the LLM already
+present at execution. Grouping still uses the provisional assurance to pick topology,
+so the tiering fix above is unaffected.
+
+Still open (M5): the assembly task hands the synthesizer the findings and the field
+list but not an explicit field → finding map; that correlation is recoverable from
+the plan (each task carries its `fields`) but is not yet handed to the assembler.
+Making it structural is part of the verify/reconcile milestone.
 
 ## Coverage honored at execution time
 
@@ -91,8 +149,9 @@ without asking it to change.
 
 ## Verification
 
-- `pytest` — **169 pass, 1 skip** (was 151; +18 M4 tests). The one unrelated
-  pre-existing `test_connections` (`SurfConnection`) failure is not a regression.
+- `pytest` — **179 pass, 1 skip** (was 151; +28 M4 tests, including the
+  propose-not-commit revision). The one unrelated pre-existing `test_connections`
+  (`SurfConnection`) failure is not a regression.
   Also added `[tool.pytest.ini_options] testpaths = ["tests"]` to `pyproject.toml`,
   so collection no longer walks the gitignored `docs/_build/` (a Sphinx build had
   dropped a downloadable copy of `test_compile.py` there, colliding on basename).
@@ -128,8 +187,14 @@ without asking it to change.
   The invariant check covers linchpin 1 (every routed field on exactly one task, no
   field twice), assembly naming *every* schema field in order, the fan-in bijection,
   **executable dataflow** (every assembly input produced by an earlier step), the
-  bucket→player mapping, homogeneous per-task tier, and candidate dedup. All
-  self-contained (build their own bundles).
+  bucket→player mapping, homogeneous per-task tier, candidate dedup, and — for the
+  revision — that every field has exactly one structured binding with its own ranked
+  candidates and a provisional assurance, and that the instruction defers selection.
+- Tests for the propose-not-commit revision: the `title` binding **preserves the
+  under-ranked-but-correct H1 span** (recall, not precision@1 — the executor can
+  recover what BM25 mis-ranked); a binding's `assurance` is the router's grade,
+  carried as provisional; and per-field scores are that field's *own* ranking, not a
+  shared-pool artifact.
 - Demonstrated on `data/tests/router_test/`: the 11-field standard routes 11/11 and
   compiles to **5 tasks** — the six narrative fields → one `metadata_specialist`
   task (seeded spans, `debate`); the high-assurance column fields
