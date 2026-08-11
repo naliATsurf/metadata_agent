@@ -21,4 +21,4 @@ print("Available models:")
 # This example only prints text generation models; other sequence types may exist.
 for m in models:
     if m['sequence_type'] == 'text':
-        print(f"  - {m['name']}: {m['description']}")
+        print(f"  - {m['name']}: {m['latency_mode']}")
