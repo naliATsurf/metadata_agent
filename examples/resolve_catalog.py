@@ -17,6 +17,10 @@ Usage:
     # any bundle; mark codebook CSVs as dictionaries (sources, not data tables)
     python examples/resolve_catalog.py --bundle data/sample/sharetrait_preprocessed/TRADAT031
     python examples/resolve_catalog.py --bundle mydir --dictionary variables.csv
+
+    # add the retrieve-then-read prose tier (localizes a definition in a long /
+    # multi-file document, then reads a cued meaning) on top of the glossary regex
+    python examples/resolve_catalog.py --prose-reader
 """
 
 from __future__ import annotations
@@ -35,7 +39,13 @@ from rich.console import Console
 from rich.table import Table
 
 from src.context import create_context
-from src.router import Catalog, resolve_bundle, resolve_catalog
+from src.router import (
+    Catalog,
+    DeterministicProseReader,
+    ProseReader,
+    resolve_bundle,
+    resolve_catalog,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_BUNDLE = REPO / "data/sample/sharetrait_preprocessed/TRADAT031"
@@ -63,13 +73,18 @@ def discover(bundle: Path, dictionaries: List[str]) -> Tuple[List[Path], List[Pa
     return tables, dicts, docs
 
 
-def resolve(tables: List[Path], dicts: List[Path], docs: List[Path]) -> Catalog:
+def resolve(
+    tables: List[Path],
+    dicts: List[Path],
+    docs: List[Path],
+    prose_reader: ProseReader | None = None,
+) -> Catalog:
     """Resolve one or many data tables against the codebooks / documents."""
     table_ctx = [create_context(str(p), name=p.stem) for p in tables]
     sources = [create_context(str(p), name=p.stem) for p in (*dicts, *docs)]
     if len(table_ctx) == 1:
-        return resolve_catalog(table_ctx[0], sources=sources)
-    return resolve_bundle(table_ctx, sources=sources)
+        return resolve_catalog(table_ctx[0], sources=sources, prose_reader=prose_reader)
+    return resolve_bundle(table_ctx, sources=sources, prose_reader=prose_reader)
 
 
 # ---------------------------------------------------------------------------
@@ -139,19 +154,24 @@ def main() -> None:
     ap.add_argument("--bundle", type=Path, default=DEFAULT_BUNDLE, help="bundle directory")
     ap.add_argument("--dictionary", action="append", default=["codebook.csv"],
                     help="a codebook CSV to treat as a source, not a data table (repeatable)")
+    ap.add_argument("--prose-reader", action="store_true",
+                    help="enable the retrieve-then-read prose tier (localize + read a "
+                         "cued definition) above the glossary regex")
     args = ap.parse_args()
 
     if not args.bundle.exists() or not any(args.bundle.iterdir()):
         raise SystemExit(f"Bundle {args.bundle} is missing or empty.")
 
     tables, dicts, docs = discover(args.bundle, args.dictionary)
+    reader = DeterministicProseReader() if args.prose_reader else None
     console = Console()
     console.print(f"[bold]bundle:[/] {args.bundle}")
     console.print(f"tables: {[p.name for p in tables]}   "
                   f"dictionaries: {[p.name for p in dicts] or 'none'}   "
-                  f"docs: {[p.name for p in docs] or 'none'}\n")
+                  f"docs: {[p.name for p in docs] or 'none'}   "
+                  f"prose-reader: {'on' if reader else 'off'}\n")
 
-    catalog = resolve(tables, dicts, docs)
+    catalog = resolve(tables, dicts, docs, prose_reader=reader)
     print_overview(console, catalog)
     print_conflicts_and_corroboration(console, catalog)
     print_summary(console, catalog)

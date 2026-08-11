@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 import pandas as pd
 
@@ -58,7 +58,7 @@ from src.context.base_context import (
     content_terms,
     tokenize,
 )
-from src.context.text_context import TextContext
+from src.context.text_context import TextChunk, TextContext
 from src.tools.tabular.detection import (
     detect_coordinate_values,
     detect_temporal_dtype,
@@ -306,6 +306,165 @@ def _prose_candidates(name: str, docs: List[TextContext]) -> List[Dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
+# Prose *reading* (retrieve-then-read) — the fallback above the glossary regex
+# ---------------------------------------------------------------------------
+#
+# The glossary regex (`_prose_candidates`) scans a whole document for one fixed
+# shape (`term <sep> definition`). That fits a short codebook README and nothing
+# else: a long manuscript defines a column narratively, scattered across pages and
+# files, and `search`-ing the whole text for the first match yields an arbitrary,
+# usually wrong, hit. This tier fixes both halves of that:
+#
+#   1. **Retrieve** — BM25-rank *every chunk across every document* by the column
+#      token, so the definition is localized out of a 20-page manuscript (and, with
+#      several files, ranked across them at once). Cost is (k chunks x reader), not
+#      document length — this is what keeps it doc-scale.
+#   2. **Read** — hand the top-k chunks to a pluggable `ProseReader`. The default
+#      deterministic reader extracts only a *cued* definition (forward `mass - fish
+#      mass`, reversed `fish mass (mass)`), splitting trailing units — high
+#      precision, no free-sentence guessing. A narrative document whose prose has no
+#      such cue is the LLM reader's job (the seam below); until one is injected the
+#      reader abstains, which is the honest outcome.
+#
+# It emits `_Candidate(method="prose_read")`, registered at the *same* tier as the
+# glossary regex, so `_decide` treats the two as corroborating/conflicting evidence
+# with no change to its logic. The reader is opt-in (`resolve_catalog(...,
+# prose_reader=...)`); passing none reproduces today's behavior exactly.
+
+
+@dataclass(frozen=True)
+class ReadResult:
+    """What a :class:`ProseReader` extracts from a localized chunk."""
+
+    description: str
+    units: Optional[str] = None
+    confidence: str = "medium"      # a reader may temper this; capped at its tier's base
+
+
+class ProseReader(Protocol):
+    """The seam: read a meaning for ``column`` out of one retrieved ``chunk``.
+
+    Return ``None`` to abstain (no cued definition present). Implementations range
+    from the deterministic cue-extractor below to an LLM that reads narrative prose;
+    both plug in identically because retrieval and :func:`_decide` are external.
+    """
+
+    def read(self, *, column: str, dtype: str, chunk: str) -> Optional[ReadResult]:
+        ...
+
+
+_SENTENCE_SPLIT = re.compile(r"[.;\n]+")
+_TRAILING_UNITS = re.compile(r"\s*\(([^)]{1,24})\)\s*$")
+
+
+def _split_trailing_units(text: str) -> Tuple[str, Optional[str]]:
+    """Peel a trailing parenthetical: ``fish mass (g)`` -> (``fish mass``, ``g``)."""
+    m = _TRAILING_UNITS.search(text)
+    if m:
+        return text[: m.start()].strip(), m.group(1).strip()
+    return text.strip(), None
+
+
+def _forward_definition(name: str, sentence: str) -> Optional[str]:
+    """``mass - fish mass``/``mass: fish mass`` *within a localized sentence*."""
+    m = re.search(
+        rf"(?<![A-Za-z0-9_])[`'\"]?{re.escape(name)}[`'\"]?(?:\s*[:=]\s*|\s+[–—-]\s+)"
+        rf"([A-Za-z][A-Za-z0-9 /()%-]{{2,80}})",
+        sentence,
+        re.IGNORECASE,
+    )
+    return m.group(1).strip().rstrip(".;,") if m else None
+
+
+def _reversed_definition(name: str, sentence: str) -> Optional[str]:
+    """``fish mass (mass)`` / ``fish mass `mass``` — the phrase *before* the token."""
+    m = re.search(
+        rf"([A-Za-z][A-Za-z0-9 /()%-]{{2,80}}?)\s*[\(\[`'\"]{re.escape(name)}[\)\]`'\"]",
+        sentence,
+        re.IGNORECASE,
+    )
+    return m.group(1).strip() if m else None
+
+
+class DeterministicProseReader:
+    """The LLM-free floor: return a meaning only when a definitional *cue* is present.
+
+    Scoped to a chunk the retriever already localized, it looks in each sentence that
+    mentions the token for a forward or reversed definition and splits off trailing
+    units. It deliberately does **not** treat an arbitrary mentioning sentence as a
+    definition — that keeps precision high and abstention honest; narrative prose with
+    no cue is left to an LLM reader.
+    """
+
+    def read(self, *, column: str, dtype: str, chunk: str) -> Optional[ReadResult]:
+        token = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(column)}(?![A-Za-z0-9_])", re.I)
+        for sentence in _SENTENCE_SPLIT.split(chunk):
+            if not token.search(sentence):
+                continue
+            for extract in (_forward_definition, _reversed_definition):
+                phrase = extract(column, sentence)
+                if phrase:
+                    desc, units = _split_trailing_units(phrase)
+                    if len(desc) >= 3:
+                        return ReadResult(desc, units, "medium")
+        return None
+
+
+class LLMProseReader:
+    """Seam for an LLM-backed reader — the ceiling for genuine narrative prose.
+
+    Not wired here: inject a client and implement :meth:`read` to ask the model
+    "what does column ``column`` mean?" over the retrieved ``chunk``, returning a
+    :class:`ReadResult` (or ``None`` to abstain). Retrieval and :func:`_decide` are
+    unchanged, so this drops in wherever the deterministic reader does.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    def read(self, *, column: str, dtype: str, chunk: str) -> Optional[ReadResult]:
+        raise NotImplementedError("inject an LLM client and implement read()")
+
+
+# Chunks retrieved per column before reading — enough to survive a mis-ranked top
+# hit, small enough to stay doc-scale (cost is k reads per unresolved column).
+_PROSE_READ_K = 3
+
+
+def _prose_read_candidates(
+    name: str, dtype: str, docs: List[TextContext], reader: ProseReader, *, k: int = _PROSE_READ_K
+) -> List[Dict[str, Any]]:
+    """Retrieve the chunks that mention ``name``, then read a meaning from each.
+
+    BM25-ranks every chunk across every document by the column token (localization),
+    then hands the top-``k`` to ``reader``. Each accepted read carries the winning
+    chunk's own offset as its citation, so provenance points at the exact span.
+    """
+    query = content_terms(name)
+    if not query:                      # opaque/stopword-only names (``la``) can't retrieve
+        return []
+    scored: List[Tuple[float, TextChunk]] = []
+    for doc in docs:
+        for resource in doc.resources:
+            chunks = list(doc.iter_chunks(resource))
+            scores = bm25_scores(query, [tokenize(c.text) for c in chunks])
+            scored.extend((s, c) for c, s in zip(chunks, scores) if s > 0)
+    scored.sort(key=lambda sc: sc[0], reverse=True)
+
+    found: List[Dict[str, Any]] = []
+    for _, chunk in scored[:k]:
+        result = reader.read(column=name, dtype=dtype, chunk=chunk.text)
+        if result:
+            found.append({
+                "description": result.description,
+                "units": result.units,
+                "confidence": result.confidence,
+                "evidence": f"{chunk.resource}#{chunk.start_offset}",
+            })
+    return found
+
+
+# ---------------------------------------------------------------------------
 # Value priors (the recomputable floor) and cross-check
 # ---------------------------------------------------------------------------
 
@@ -392,6 +551,7 @@ def resolve_catalog(
     target: TabularContext,
     resource: str = "",
     sources: Optional[List[ExecutionContext]] = None,
+    prose_reader: Optional[ProseReader] = None,
 ) -> Catalog:
     """Enrich ``target``'s columns with meanings harvested from ``sources``.
 
@@ -420,7 +580,7 @@ def resolve_catalog(
     for f in info.fields:
         profile = _value_profile(frame[f.name]) if f.name in frame.columns else {"numeric": False}
         resolved.append(
-            _resolve_column(f.name, f.dtype, resource, profile, dictionaries, docs)
+            _resolve_column(f.name, f.dtype, resource, profile, dictionaries, docs, prose_reader)
         )
     return Catalog(resource=resource, columns=resolved)
 
@@ -428,6 +588,7 @@ def resolve_catalog(
 def resolve_bundle(
     targets: List[TabularContext],
     sources: Optional[List[ExecutionContext]] = None,
+    prose_reader: Optional[ProseReader] = None,
 ) -> Catalog:
     """Resolve several data tables into one catalog spanning all their columns.
 
@@ -448,13 +609,20 @@ def resolve_bundle(
     sources = sources or []
     columns: List[ResolvedColumn] = []
     for target in targets:
-        columns.extend(resolve_catalog(target, sources=sources).columns)
+        columns.extend(resolve_catalog(target, sources=sources, prose_reader=prose_reader).columns)
     resource = targets[0].resources[0] if targets else ""
     return Catalog(resource=resource, columns=columns)
 
 
-# Assurance tiers, most authoritative first.
-_TIER_RANK = {"structured_dictionary": 3, "lexical_prose": 2, "value_prior": 1}
+# Assurance tiers, most authoritative first. Both prose methods — the glossary
+# regex and the retrieve-then-read reader — share tier 2, so when both fire _decide
+# treats them as same-tier corroboration or conflict with no special-casing.
+_TIER_RANK = {
+    "structured_dictionary": 3,
+    "lexical_prose": 2,
+    "prose_read": 2,
+    "value_prior": 1,
+}
 
 
 @dataclass(frozen=True)
@@ -482,7 +650,7 @@ def _norm(text: Optional[str]) -> str:
     return (text or "").strip().lower()
 
 
-def _resolve_column(name, dtype, resource, profile, dictionaries, docs) -> ResolvedColumn:
+def _resolve_column(name, dtype, resource, profile, dictionaries, docs, reader=None) -> ResolvedColumn:
     """Gather every candidate resolution for the column, then decide among them."""
     label = profile.get("label")
     candidates: List[_Candidate] = []
@@ -499,6 +667,15 @@ def _resolve_column(name, dtype, resource, profile, dictionaries, docs) -> Resol
         candidates.append(_Candidate(
             pc["description"], None, "lexical_prose", "medium", pc["evidence"],
         ))
+
+    # The retrieve-then-read tier (opt-in). Appended *after* the glossary regex so,
+    # on a same-tier tie, the cheap high-precision glossary line wins source-order;
+    # a differing read surfaces as a tier-2 conflict rather than silently overriding.
+    if reader is not None:
+        for rc in _prose_read_candidates(name, dtype, docs, reader):
+            candidates.append(_Candidate(
+                rc["description"], rc["units"], "prose_read", rc["confidence"], rc["evidence"],
+            ))
 
     if label in _SELF_EVIDENT:
         description, confidence = _SELF_EVIDENT[label]

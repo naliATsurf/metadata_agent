@@ -10,7 +10,12 @@ import pandas as pd
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.context import create_context
-from src.router import resolve_bundle, resolve_catalog
+from src.router import (
+    DeterministicProseReader,
+    LLMProseReader,
+    resolve_bundle,
+    resolve_catalog,
+)
 from src.tools.base import clear_registry
 
 
@@ -465,6 +470,120 @@ class MultiTableBundleTest(unittest.TestCase):
         scopes = {tuple(t.target_resources) for t in col_tasks}
         self.assertIn(("dataset",), scopes)
         self.assertIn(("measure",), scopes)
+
+
+class ProseReaderTierTest(unittest.TestCase):
+    """The retrieve-then-read tier: localize a chunk, then read a *cued* definition.
+
+    It is opt-in (``prose_reader=``) and registered at the same tier as the glossary
+    regex, so :func:`_decide` treats the two prose methods as corroboration or
+    conflict with no special-casing. These tests exercise: the deterministic reader's
+    extraction, retrieval localizing the right chunk across long/many documents, the
+    opt-in gate, and same-tier corroboration/conflict through the decision step.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        # mass/epoc are generic float names: without a described source they abstain
+        # (numeric long tail), so any resolution here comes from the prose reader.
+        pd.DataFrame({"mass": [12.1, 15.3, 9.8], "epoc": [1.0, 2.0, 3.0]}).to_csv(
+            os.path.join(self.dir, "fish.csv"), index=False
+        )
+        self.tab = create_context(os.path.join(self.dir, "fish.csv"), name="fish")
+        self.reader = DeterministicProseReader()
+
+    def tearDown(self):
+        clear_registry()
+
+    def _doc(self, name, text):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as f:
+            f.write(text)
+        return create_context(path, name=name.split(".")[0])
+
+    # --- the deterministic reader in isolation ---------------------------
+
+    def test_deterministic_reader_extracts_forward_reversed_and_abstains(self):
+        r = DeterministicProseReader()
+        fwd = r.read(column="mass", dtype="float", chunk="pH – acclimation pH; Mass – fish mass (g)")
+        self.assertEqual((fwd.description, fwd.units), ("fish mass", "g"))  # forward + unit split
+        rev = r.read(column="mass", dtype="float", chunk="Body mass (mass) recorded in grams.")
+        self.assertEqual(rev.description, "Body mass")                      # reversed, phrase before token
+        # A sentence that merely mentions the token, with no definitional cue, abstains.
+        self.assertIsNone(r.read(column="mass", dtype="float", chunk="Mass matters for fish."))
+
+    def test_llm_reader_is_a_documented_seam(self):
+        reader = LLMProseReader(client=object())
+        self.assertTrue(hasattr(reader, "read"))
+        with self.assertRaises(NotImplementedError):
+            reader.read(column="mass", dtype="float", chunk="anything")
+
+    # --- the tier in the resolution pipeline -----------------------------
+
+    def test_reader_resolves_a_reversed_definition_the_regex_misses(self):
+        # The token is defined in parens *after* the phrase ("body mass (mass)"), a
+        # shape the whole-doc glossary regex cannot match — only a reader can.
+        doc = self._doc(
+            "manuscript.md",
+            "# Methods\n\n"
+            "Fish were held at 15C for two weeks prior to trials. "
+            "Body mass (mass) was recorded to the nearest 0.1 g before each swim test. "
+            "We then measured excess post-exercise oxygen consumption (EPOC).\n",
+        )
+        # Opt-in gate: with no reader the reversed definition is invisible → abstains.
+        without = resolve_catalog(self.tab, sources=[doc]).get("mass")
+        self.assertEqual(without.link_method, "none")
+        # With the reader it is localized and read.
+        with_reader = resolve_catalog(
+            self.tab, sources=[doc], prose_reader=self.reader
+        ).get("mass")
+        self.assertEqual(with_reader.link_method, "prose_read")
+        self.assertIn("mass", with_reader.description.lower())
+        self.assertEqual(with_reader.link_confidence, "medium")
+        self.assertIn("manuscript", with_reader.link_evidence)   # cites the chunk's offset
+
+    def test_retrieval_localizes_the_defining_document_among_many(self):
+        # A long decoy that mentions the token constantly but never defines it, and a
+        # short appendix that defines it in a reversed (regex-invisible) shape. Only a
+        # reader can resolve it, and retrieval must rank the appendix chunk to the top.
+        decoy = self._doc("intro.md", "# Introduction\n\n" + ("Mass matters for fish physiology. " * 40))
+        appendix = self._doc(
+            "appendix.md",
+            "# Appendix\n\nWet body mass (mass) was measured at the start of each trial.\n",
+        )
+        col = resolve_catalog(
+            self.tab, sources=[decoy, appendix], prose_reader=self.reader
+        ).get("mass")
+        self.assertEqual(col.link_method, "prose_read")
+        self.assertEqual(col.description, "Wet body mass")
+        self.assertIn("appendix", col.link_evidence)   # the definer, not the decoy
+
+    def test_reader_abstains_when_no_document_defines_the_column(self):
+        doc = self._doc("unrelated.md", "# Notes\n\nThe experiment ran for six weeks in spring.\n")
+        col = resolve_catalog(self.tab, sources=[doc], prose_reader=self.reader).get("mass")
+        self.assertEqual(col.link_method, "none")   # nothing to retrieve/read → honest abstention
+
+    def test_glossary_and_reader_corroborate_at_the_same_tier(self):
+        # One doc whose line both the regex and the reader read identically ("wet body
+        # mass"): same tier, same claim → corroboration lifts confidence to high.
+        doc = self._doc("readme.md", "# Vars\n\nmass – wet body mass; epoc – oxygen debt\n")
+        col = resolve_catalog(self.tab, sources=[doc], prose_reader=self.reader).get("mass")
+        self.assertEqual(col.link_method, "lexical_prose")   # regex added first, wins source-order
+        self.assertEqual(col.description, "wet body mass")
+        self.assertEqual(col.link_confidence, "high")        # corroborated by the reader
+        self.assertEqual(len(col.corroborated_by), 1)
+        self.assertEqual(col.conflicts, [])
+
+    def test_glossary_and_reader_conflict_is_surfaced(self):
+        # Two tier-2 prose claims that disagree: the glossary wins source-order but the
+        # reader's differing read is recorded as a conflict and kept as an alternative.
+        g = self._doc("glossary.md", "# G\n\nmass – wet body mass\n")
+        m = self._doc("manuscript.md", "# M\n\nFish total length (mass) was measured in cm.\n")
+        col = resolve_catalog(self.tab, sources=[g, m], prose_reader=self.reader).get("mass")
+        self.assertEqual(col.description, "wet body mass")
+        self.assertEqual(col.link_confidence, "medium")      # contested, unadjudicated
+        self.assertTrue(col.conflicts)
+        self.assertTrue(any(a["method"] == "prose_read" for a in col.alternatives))
 
 
 if __name__ == "__main__":

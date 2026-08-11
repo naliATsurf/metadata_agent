@@ -41,7 +41,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from src.context import create_context
 from src.core.schemas import Plan
-from src.router import Catalog, FieldPlan, compile_field_plan, resolve_bundle, route_fields
+from src.router import (
+    Catalog,
+    DeterministicProseReader,
+    FieldPlan,
+    ProseReader,
+    compile_field_plan,
+    resolve_bundle,
+    route_fields,
+)
 from src.standards import get_schema_for_standard
 
 REPO = Path(__file__).resolve().parents[1]
@@ -67,7 +75,8 @@ def discover(bundle: Path, dictionaries: List[str]) -> Tuple[List[Path], List[Pa
 
 
 def build_plan(
-    tables: List[Path], dicts: List[Path], docs: List[Path], standard: str
+    tables: List[Path], dicts: List[Path], docs: List[Path], standard: str,
+    prose_reader: ProseReader | None = None,
 ) -> Tuple[Catalog, FieldPlan, Plan]:
     """The core: resolve the whole bundle → route → compile."""
     schema = get_schema_for_standard(standard)
@@ -81,7 +90,7 @@ def build_plan(
     # offered to every table's resolution.
     sources = dict_ctx + doc_ctx
 
-    catalog = resolve_bundle(table_ctx, sources=sources)           # layer 3 (all tables)
+    catalog = resolve_bundle(table_ctx, sources=sources, prose_reader=prose_reader)  # layer 3
     field_plan = route_fields(schema, catalog=catalog, docs=doc_ctx)  # layer 4
     plan = compile_field_plan(field_plan)                          # layer 5
     return catalog, field_plan, plan
@@ -136,6 +145,9 @@ def main() -> None:
     ap.add_argument("--standard", default=DEFAULT_STANDARD, help="metadata standard name")
     ap.add_argument("--dictionary", action="append", default=[],
                     help="a codebook CSV to treat as a source, not a data table (repeatable)")
+    ap.add_argument("--prose-reader", action="store_true",
+                    help="enable the retrieve-then-read prose tier (localize + read a "
+                         "cued definition) above the glossary regex")
     args = ap.parse_args()
 
     if not args.bundle.exists() or not any(args.bundle.iterdir()):
@@ -145,12 +157,14 @@ def main() -> None:
         )
 
     tables, dicts, docs = discover(args.bundle, args.dictionary)
+    reader = DeterministicProseReader() if args.prose_reader else None
     print(f"bundle:   {args.bundle}")
     print(f"standard: {args.standard}")
     print(f"tables:   {[p.name for p in tables]}")
-    print(f"sources:  dictionaries={[p.name for p in dicts] or 'none'}  docs={[p.name for p in docs] or 'none'}")
+    print(f"sources:  dictionaries={[p.name for p in dicts] or 'none'}  docs={[p.name for p in docs] or 'none'}"
+          f"  prose-reader={'on' if reader else 'off'}")
 
-    catalog, field_plan, plan = build_plan(tables, dicts, docs, args.standard)
+    catalog, field_plan, plan = build_plan(tables, dicts, docs, args.standard, prose_reader=reader)
     print_catalog(catalog)
     print_routing(field_plan)
     print_plan(plan)
