@@ -230,6 +230,225 @@ STANDARD_DEFINITIONS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "prompt_hint": "...",
         },
     },
+    # ShareTrait "basic" standard. One field per *ShareTrait attribute_name*
+    # (grouped by the property it belongs to), with each field's description taken
+    # from that attribute's row in the full attribute-definition table. `creator`
+    # and `anatomy` are omitted (no attribute of their own). Where an attribute name
+    # occurs in more than one table, the definition is taken from the sense matching
+    # its property group: `trait_type` / `trait_unit` from the measurement/trait
+    # value context (table8/9), not the trait-catalogue category. Field types are
+    # mapped from the dictionary's `type` column (DECIMAL → float, INT → int,
+    # VARCHAR/TEXT → str). Its `requirement` column drives optionality: mandatory
+    # attributes are required (non-Optional type, no default); optional ones are
+    # Optional and default to None.
+    "sharetrait_basic": {
+        # identifier
+        "doi_dataset": {
+            "type": str,
+            "default": ...,
+            "description": "dataset DOI, provided in URL",
+            "prompt_hint": "The dataset DOI (ShareTrait: doi_dataset)",
+        },
+        # description
+        "title_dataset": {
+            "type": str,
+            "default": ...,
+            "description": "title of the dataset. It is usually obtained from the title attribute of the original data source.",
+            "prompt_hint": "The dataset title and summary (ShareTrait: title_dataset)",
+        },
+        # taxonomy
+        "species_reported": {
+            "type": str,
+            "default": ...,
+            "description": "species name given based on the study",
+            "prompt_hint": "Reported species (ShareTrait taxonomy group)",
+        },
+        "genus_name": {
+            "type": Optional[str],
+            "default": None,
+            "description": "genus level of the scientific taxonomic name",
+            "prompt_hint": "Genus (ShareTrait taxonomy group)",
+        },
+        "family_name": {
+            "type": Optional[str],
+            "default": None,
+            "description": "family level of the scientific taxonomic name",
+            "prompt_hint": "Family (ShareTrait taxonomy group)",
+        },
+        "order_name": {
+            "type": Optional[str],
+            "default": None,
+            "description": "order level of the scientific taxonomic name",
+            "prompt_hint": "Order (ShareTrait taxonomy group)",
+        },
+        "class_name": {
+            "type": Optional[str],
+            "default": None,
+            "description": "class level of the scientific taxonomic name",
+            "prompt_hint": "Class (ShareTrait taxonomy group)",
+        },
+        "phylum_name": {
+            "type": Optional[str],
+            "default": None,
+            "description": "phylum of the scientific taxonomic name",
+            "prompt_hint": "Phylum (ShareTrait taxonomy group)",
+        },
+        # trait
+        "trait_name": {
+            "type": str,
+            "default": ...,
+            "description": "defined trait for the trait entity",
+            "prompt_hint": "Trait name (ShareTrait trait group)",
+        },
+        "trait_type": {
+            "type": str,
+            "default": ...,
+            "description": "generic measure check type for trait name to make reference to sharetrait dataset trait name. For now the possible types are {development, fecundity, metabolic_rate}",
+            "prompt_hint": "Trait type (ShareTrait trait group)",
+        },
+        "trait_value": {
+            "type": float,
+            "default": ...,
+            "description": "measured value of the sharetrait trait",
+            "prompt_hint": "Trait value (ShareTrait trait group)",
+        },
+        "trait_unit": {
+            "type": str,
+            "default": ...,
+            "description": "unit of measurement used for the trait",
+            "prompt_hint": "Trait unit (ShareTrait trait group)",
+        },
+        # measurement
+        "sample_size": {
+            "type": Optional[str],
+            "default": None,
+            "description": "number of individuals tested for trait estimate",
+            "prompt_hint": "Sample size (ShareTrait measurement group)",
+        },
+        "trait_error_estimate": {
+            "type": Optional[str],
+            "default": None,
+            "description": "error associated with trait estimate",
+            "prompt_hint": "Error estimate (ShareTrait measurement group)",
+        },
+        "trait_error_type": {
+            "type": Optional[str],
+            "default": None,
+            "description": "type of metric used to estimate error of the trait",
+            "prompt_hint": "Error type (ShareTrait measurement group)",
+        },
+        "trait_converted": {
+            "type": Optional[str],
+            "default": None,
+            "description": "trait measurement value that is converted for standardisation and data integration purposes",
+            "prompt_hint": "Converted value (ShareTrait measurement group)",
+        },
+        "measure_date": {
+            "type": str,
+            "default": ...,
+            "description": "standard date when the measurement is being calculated.",
+            "prompt_hint": "Measurement date (ShareTrait measurement group)",
+        },
+        # condition
+        "temperature": {
+            "type": Optional[float],
+            "default": None,
+            "description": "temperature value of the condition",
+            "prompt_hint": "Temperature condition (ShareTrait condition group)",
+        },
+        "photoperiod": {
+            "type": Optional[str],
+            "default": None,
+            "description": "photoperiod schedule of daylight and night hours",
+            "prompt_hint": "Photoperiod condition (ShareTrait condition group)",
+        },
+        "humidity": {
+            "type": Optional[float],
+            "default": None,
+            "description": "humidity level measured during the condition",
+            "prompt_hint": "Humidity condition (ShareTrait condition group)",
+        },
+        "oxygen": {
+            "type": Optional[float],
+            "default": None,
+            "description": "oxygen level measured during the condition",
+            "prompt_hint": "Oxygen condition (ShareTrait condition group)",
+        },
+        "carbon_dioxide": {
+            "type": Optional[float],
+            "default": None,
+            "description": "carbon dioxide level measured during the condition",
+            "prompt_hint": "Carbon dioxide condition (ShareTrait condition group)",
+        },
+        "salinity": {
+            "type": Optional[float],
+            "default": None,
+            "description": "salinity level",
+            "prompt_hint": "Salinity condition (ShareTrait condition group)",
+        },
+        "pH": {
+            "type": Optional[float],
+            "default": None,
+            "description": "pH value of the condition",
+            "prompt_hint": "pH condition (ShareTrait condition group)",
+        },
+        "food_type": {
+            "type": Optional[str],
+            "default": None,
+            "description": "food type or description of the food used during the testing",
+            "prompt_hint": "Food type condition (ShareTrait condition group)",
+        },
+        "duration": {
+            "type": Optional[int],
+            "default": None,
+            "description": "duration period in days of the condition",
+            "prompt_hint": "Duration condition (ShareTrait condition group)",
+        },
+        "duration_generation": {
+            "type": Optional[str],
+            "default": None,
+            "description": "number of generations during condition",
+            "prompt_hint": "Generation duration condition (ShareTrait condition group)",
+        },
+        # life_stage
+        "life_stage_general": {
+            "type": Optional[str],
+            "default": None,
+            "description": "life stage used during the experiment as defined by the researcher in the paper",
+            "prompt_hint": "General life stage (ShareTrait life_stage group)",
+        },
+        "life_stage_specific": {
+            "type": Optional[str],
+            "default": None,
+            "description": "specific life stage used during the experiment as defined by the researcher in the paper",
+            "prompt_hint": "Specific life stage (ShareTrait life_stage group)",
+        },
+        "lifestage_specific_initial": {
+            "type": Optional[str],
+            "default": None,
+            "description": "specific initial life stage used at the start of the trial as defined by the researcher in the paper.",
+            "prompt_hint": "Initial specific life stage (ShareTrait life_stage group)",
+        },
+        "lifestage_specific_final": {
+            "type": Optional[str],
+            "default": None,
+            "description": "specific life stage used at the end of the trial as defined by the researcher in the paper",
+            "prompt_hint": "Final specific life stage (ShareTrait life_stage group)",
+        },
+        "representative_stage": {
+            "type": str,
+            "default": ...,
+            "description": "the current life stage if identified when an individual is being observed. Specify if it is a egg, larvae, adult stage when individual is collected",
+            "prompt_hint": "Representative life stage (ShareTrait life_stage group)",
+        },
+        # unit_of_observation
+        "population_label": {
+            "type": str,
+            "default": ...,
+            "description": "defines if population reference provides measurements that are derived from a collection rather than individuals",
+            "prompt_hint": "Unit of observation: individual vs population (values ind_measure / pop_measure)",
+        },
+    },
 }
 
 
