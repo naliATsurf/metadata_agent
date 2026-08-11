@@ -208,7 +208,9 @@ def _assurance(bucket: str, top: EvidenceRef, catalog: Optional[Catalog]) -> str
     span is quoted-only (low) until a verifier confirms it (a later milestone).
     """
     if bucket == "ambiguous_structural" and catalog is not None:
-        column = catalog.get(top.locator)
+        # Disambiguate by resource: a multi-table catalog can hold the same column
+        # name in two tables, and the routed candidate names the one that won.
+        column = catalog.find(top.locator, top.resource)
         return column.link_confidence if column else "low"
     if bucket == "narrative":
         return "low"

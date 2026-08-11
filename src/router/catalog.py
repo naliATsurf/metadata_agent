@@ -132,6 +132,22 @@ class Catalog:
     def get(self, name: str) -> Optional[ResolvedColumn]:
         return next((c for c in self.columns if c.name == name), None)
 
+    def find(self, name: str, resource: Optional[str] = None) -> Optional[ResolvedColumn]:
+        """Look a column up by name, optionally disambiguated by resource.
+
+        With a multi-table catalog the same column name can occur in two tables, so
+        matching on name alone (:meth:`get`) is ambiguous. Callers that hold the
+        resource (a routed candidate does) should pass it.
+        """
+        return next(
+            (
+                c
+                for c in self.columns
+                if c.name == name and (resource is None or c.resource == resource)
+            ),
+            None,
+        )
+
     @property
     def conflicts(self) -> List[str]:
         return [f"{c.name}: {msg}" for c in self.columns for msg in c.conflicts]
@@ -258,14 +274,24 @@ def _cell(row: pd.Series, col: Optional[str]) -> Optional[str]:
 
 
 def _prose_candidates(name: str, docs: List[TextContext]) -> List[Dict[str, Any]]:
-    """Find glossary-style definitions (``la = latitude``) across all documents.
+    """Find glossary-style definitions (``la = latitude``, ``pH – acclimation pH``).
 
     Returns one candidate per document that defines the token — so a definition
     appearing in several docs contributes several candidates, which the decision
     step then treats as corroboration or conflict.
+
+    The separator is either ``:`` / ``=`` (whitespace optional) or a dash — hyphen,
+    en-dash, or em-dash — that must be **surrounded by whitespace**. Real glossaries
+    use the en-dash (``pH – acclimation pH``); requiring spaces around a dash keeps a
+    hyphen *inside* a compound word from matching (``tank-level`` is not a definition
+    of ``tank``). Matching is **case-insensitive** (a ``mass`` column finds
+    ``Mass – fish mass (g)``); a lookbehind keeps the token from matching inside a
+    longer word (``id`` does not match ``individual``).
     """
     pattern = re.compile(
-        rf"[`'\"]?{re.escape(name)}[`'\"]?\s*[:=—-]\s*([A-Za-z][A-Za-z0-9 /()%-]{{2,60}})"
+        rf"(?<![A-Za-z0-9_])[`'\"]?{re.escape(name)}[`'\"]?(?:\s*[:=]\s*|\s+[–—-]\s+)"
+        rf"([A-Za-z][A-Za-z0-9 /()%-]{{2,60}})",
+        re.IGNORECASE,
     )
     found: List[Dict[str, Any]] = []
     for doc in docs:
@@ -284,6 +310,19 @@ def _prose_candidates(name: str, docs: List[TextContext]) -> List[Dict[str, Any]
 # ---------------------------------------------------------------------------
 
 
+# A float in [-90, 90] is *not* self-evidently a coordinate — fish mass, pH, and
+# most small measures fit the range too. So the coordinate prior requires the column
+# *name* to corroborate (a latitude/longitude token, or a bare la/lo/x/y), turning a
+# guess into a name-plus-value agreement. Without a name signal the column stays
+# "numeric" and abstains, rather than being mislabelled a coordinate.
+_COORDINATE_NAME = re.compile(r"lat|lon|coord|northing|easting", re.I)
+
+
+def _looks_like_coordinate_name(name: Any) -> bool:
+    n = str(name if name is not None else "").strip().lower()
+    return bool(_COORDINATE_NAME.search(n)) or n in {"la", "lo", "x", "y"}
+
+
 def _value_profile(series: pd.Series) -> Dict[str, Any]:
     """A light, recomputable profile of a column's values."""
     profile: Dict[str, Any] = {"numeric": False, "min": None, "max": None, "label": None}
@@ -296,12 +335,16 @@ def _value_profile(series: pd.Series) -> Dict[str, Any]:
             profile["numeric"] = True
             profile["min"] = float(sample.min())
             profile["max"] = float(sample.max())
-        # Coordinates are continuous floats — restrict the prior to float columns so
-        # integer counts/ids (which also fall in [-90, 90]) are not mislabelled.
-        # Even so, a single column cannot tell latitude from longitude, nor a
-        # coordinate from any other small float; hence "medium" confidence and a
-        # description that says so. The dictionary link, when present, overrides it.
-        coord = pd.api.types.is_float_dtype(series) and detect_coordinate_values(series)
+        # Coordinate requires float values in range *and* a corroborating name
+        # (see _looks_like_coordinate_name): integers and generically-named floats
+        # (mass, pH) are not coordinates even when they fall in [-90, 90]. Even then a
+        # single column cannot tell latitude from longitude, hence "medium" and a
+        # description that says so; a dictionary link, when present, overrides it.
+        coord = (
+            pd.api.types.is_float_dtype(series)
+            and detect_coordinate_values(series)
+            and _looks_like_coordinate_name(series.name)
+        )
         profile["label"] = "coordinate" if coord else "numeric"
         return profile
     nunique = series.dropna().nunique()
@@ -380,6 +423,34 @@ def resolve_catalog(
             _resolve_column(f.name, f.dtype, resource, profile, dictionaries, docs)
         )
     return Catalog(resource=resource, columns=resolved)
+
+
+def resolve_bundle(
+    targets: List[TabularContext],
+    sources: Optional[List[ExecutionContext]] = None,
+) -> Catalog:
+    """Resolve several data tables into one catalog spanning all their columns.
+
+    A real repository is many tables — the fields of one schema are answered by
+    columns in *different* tables (a dataset table, a measurement table, a taxonomy
+    table). This resolves each target independently (its columns described from
+    ``sources`` — codebooks and documents — and cross-checked against its own
+    values), then concatenates the resolved columns into a single catalog. Because
+    every :class:`ResolvedColumn` keeps its ``resource``, the router ranks a field
+    against every table's columns at once and the compiler groups extraction by
+    table — no other layer changes.
+
+    The auxiliary ``sources`` (dictionaries, prose) are offered to *every* target, so
+    a shared codebook resolves the columns it covers wherever they live. A column
+    name may legitimately occur in two tables; each is resolved on its own values, so
+    lookups that need to disambiguate use :meth:`Catalog.find` with the resource.
+    """
+    sources = sources or []
+    columns: List[ResolvedColumn] = []
+    for target in targets:
+        columns.extend(resolve_catalog(target, sources=sources).columns)
+    resource = targets[0].resources[0] if targets else ""
+    return Catalog(resource=resource, columns=columns)
 
 
 # Assurance tiers, most authoritative first.

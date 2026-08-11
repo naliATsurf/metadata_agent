@@ -172,13 +172,37 @@ recorded with citations, and alternatives retained.
   codebook, the `tmp` Kelvin conflict surfaced, and `search("latitude")` /
   `search("air temperature")` reaching `la` / `tmp`.
 
+## Follow-up: hardening against a real dataset (en-dash prose, coordinate gate)
+
+Running catalog resolution on a real repository (a 6-table fish-physiology dataset
+with a prose `Readme.txt`, no codebook) exposed two defects the synthetic fixtures
+did not, both now fixed:
+
+- **Prose linking missed the real glossary and matched compound words.** The
+  glossary used an **en-dash** (`pH – acclimation pH`) that the separator class
+  `[:=—-]` (em-dash + hyphen) did not include, so real definitions failed — while the
+  bare hyphen matched *inside* words (`tank-level` → a bogus `tank` definition). The
+  pattern now accepts `:`/`=` **or** a dash (hyphen/en/em) that must be
+  **whitespace-surrounded**, and matches **case-insensitively** with a word-boundary
+  lookbehind (so a `mass` column finds `Mass – fish mass (g)`, but `id` never matches
+  inside `individual`). Resolution on the dataset went from 21/45 (mostly wrong) to
+  43/45, all correctly cited to the Readme.
+- **The coordinate value-prior mislabelled ordinary floats.** A float in [-90, 90]
+  is not self-evidently a coordinate — fish mass, pH, and most small measures fit the
+  range too — so the prior labelled 14 columns "geographic coordinate". The
+  coordinate prior now requires the column **name** to corroborate (a
+  latitude/longitude token, or a bare `la`/`lo`/`x`/`y`), turning a guess into a
+  name-plus-value agreement. This also resolves the `tmp` → coordinate residual noted
+  below: `tmp` no longer reads as a coordinate. Legitimate `la`/`lo`/`lat`/`lon`
+  columns are unaffected.
+
 ## Scope and limits
 
 - **The value profile identifies a narrow set by design.** Only coordinate and
   temporal resolve from values; everything else abstains. This is a choice, not a
-  gap: values genuinely cannot name pH from nitrogen. The residual `tmp` →
-  coordinate under the value-only floor is the irreducible limit of a float range,
-  contained by the escalation order (dictionary wins).
+  gap: values genuinely cannot name pH from nitrogen. Coordinate now additionally
+  requires a corroborating column name (see the follow-up above), so a bare float
+  range no longer resolves as a coordinate on its own.
 - **Discovery still assumes you name the sources.** `resolve_catalog` takes an
   explicit `sources` list and parses a codebook or matches rigid prose patterns.
   The real-world case — you *don't* know which file documents the columns, and the
@@ -192,5 +216,14 @@ recorded with citations, and alternatives retained.
   explicit `sources` list rather than assuming a single multimodal context (that
   unification is separate work). This composes forward: a future multimodal
   context can pass its own other resources as `sources`.
+- **Multiple data tables (follow-up).** `resolve_catalog` resolves *one* target
+  table. A real repository is many tables, and a schema's fields are answered by
+  columns in different ones. `resolve_bundle(targets, sources)` resolves each table
+  and concatenates the resolved columns into a single catalog — every
+  `ResolvedColumn` keeps its `resource`, so the router ranks a field against all
+  tables' columns at once and the compiler groups extraction per table, with no
+  change to routing or compilation. A column name can occur in two tables, so
+  resource-aware lookup (`Catalog.find(name, resource)`) replaces name-only `get`
+  where a routed candidate's assurance is read. Tests: `MultiTableBundleTest`.
 - **Not yet wired into the planner.** The router that walks `FieldSpec`s and
   routes each over `Catalog.search` (with `phase="route"`) is M3.

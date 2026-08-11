@@ -10,7 +10,7 @@ import pandas as pd
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.context import create_context
-from src.router import resolve_catalog
+from src.router import resolve_bundle, resolve_catalog
 from src.tools.base import clear_registry
 
 
@@ -274,7 +274,7 @@ class FullyExercisedCatalogTest(unittest.TestCase):
 
     | column | method               | conf   | label       | fills                              |
     |--------|----------------------|--------|-------------|------------------------------------|
-    | tmp    | structured_dictionary| medium | coordinate  | everything (conflict+corrob+alts)  |
+    | tmp    | structured_dictionary| medium | numeric     | everything (conflict+corrob+alts)  |
     | la     | structured_dictionary| high   | coordinate  | corroboration → high, alternatives |
     | frac   | structured_dictionary| low    | numeric     | chosen claim refuted by values     |
     | note   | lexical_prose        | medium | categorical | prose definition                   |
@@ -347,7 +347,7 @@ class FullyExercisedCatalogTest(unittest.TestCase):
         self.assertTrue(tmp.conflicts)
         self.assertIn("Kelvin", tmp.conflicts[0])
         self.assertEqual(tmp.corroborated_by, ["cb2 row 'tmp'"])
-        self.assertEqual(len(tmp.alternatives), 3)        # cb2, cb3, and the value prior
+        self.assertEqual(len(tmp.alternatives), 2)        # cb2 and cb3 (tmp is not a coordinate)
         # Nothing in the serialized form is None/empty either.
         d = tmp.to_dict()
         empty = [k for k, v in d.items() if v in (None, "", [], "none")]
@@ -395,6 +395,76 @@ class FullyExercisedCatalogTest(unittest.TestCase):
         self.assertEqual(oid.link_confidence, "none")
         self.assertIsNone(oid.description)
         self.assertEqual(oid.value_label, "numeric")  # the coarse prior is still kept
+
+
+class MultiTableBundleTest(unittest.TestCase):
+    """A real repo is many tables; resolve_bundle spans all their columns at once."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        # Two data tables. Both have opaque column names; a shared codebook that
+        # documents columns across *both* resolves them wherever they live.
+        pd.DataFrame({"a": ["10.x/y"], "b": ["A survey dataset"]}).to_csv(
+            os.path.join(self.dir, "dataset.csv"), index=False
+        )
+        pd.DataFrame({"a": [96.0], "t": [10.0]}).to_csv(
+            os.path.join(self.dir, "measure.csv"), index=False
+        )
+        pd.DataFrame({
+            "variable": ["a", "b", "t"],
+            "description": ["Dataset DOI", "Dataset title", "Water temperature"],
+        }).to_csv(os.path.join(self.dir, "codebook.csv"), index=False)
+
+        self.dataset = create_context(os.path.join(self.dir, "dataset.csv"), name="dataset")
+        self.measure = create_context(os.path.join(self.dir, "measure.csv"), name="measure")
+        self.codebook = create_context(os.path.join(self.dir, "codebook.csv"), name="codebook")
+
+    def tearDown(self):
+        clear_registry()
+
+    def test_bundle_catalog_spans_every_table(self):
+        cat = resolve_bundle([self.dataset, self.measure], sources=[self.codebook])
+        by_resource = {}
+        for c in cat.columns:
+            by_resource.setdefault(c.resource, set()).add(c.name)
+        self.assertEqual(by_resource["dataset"], {"a", "b"})
+        self.assertEqual(by_resource["measure"], {"a", "t"})
+
+    def test_same_name_in_two_tables_is_disambiguated_by_resource(self):
+        # Column 'a' exists in *both* tables, so it appears twice in the catalog.
+        cat = resolve_bundle([self.dataset, self.measure], sources=[self.codebook])
+        a_cols = [c for c in cat.columns if c.name == "a"]
+        self.assertEqual(len(a_cols), 2)  # both kept, not collapsed to one
+        # find(resource) returns the right table's column; get() (name-only) can't —
+        # it just returns the first, which is why routing must use find().
+        self.assertEqual(cat.find("a", "dataset").resource, "dataset")
+        self.assertEqual(cat.find("a", "measure").resource, "measure")
+        self.assertIsNot(cat.find("a", "dataset"), cat.find("a", "measure"))
+        self.assertEqual(cat.get("a").resource, "dataset")  # ambiguous: first only
+
+    def test_routes_fields_to_columns_across_tables(self):
+        from typing import Optional
+
+        from pydantic import BaseModel, Field
+
+        from src.router import compile_field_plan, route_fields
+
+        class Meta(BaseModel):
+            doi: Optional[str] = Field(default=None, description="the dataset DOI")
+            water_temperature: Optional[float] = Field(default=None, description="the water temperature")
+
+        cat = resolve_bundle([self.dataset, self.measure], sources=[self.codebook])
+        fp = route_fields(Meta, catalog=cat, docs=[])
+        doi = fp.routings["doi"].candidates[0]
+        temp = fp.routings["water_temperature"].candidates[0]
+        self.assertEqual((doi.resource, doi.locator), ("dataset", "a"))
+        self.assertEqual((temp.resource, temp.locator), ("measure", "t"))
+        # The compiler groups the two fields into separate per-table tasks.
+        plan = compile_field_plan(fp)
+        col_tasks = [t for t in plan.steps if t.fields and t.player == "data_analyst"]
+        scopes = {tuple(t.target_resources) for t in col_tasks}
+        self.assertIn(("dataset",), scopes)
+        self.assertIn(("measure",), scopes)
 
 
 if __name__ == "__main__":
