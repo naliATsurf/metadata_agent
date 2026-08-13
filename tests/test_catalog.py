@@ -1,9 +1,11 @@
 """Tests for catalog resolution — symbol linking, priors, cross-check (M2, layer 3)."""
 
+import json
 import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -31,6 +33,19 @@ class _CountingReader(ProseReader):
     def read_many(self, *, columns, chunk):
         self.calls.append(([name for name, _ in columns], chunk))
         return self._inner.read_many(columns=columns, chunk=chunk)
+
+
+class _StubLLM:
+    """A stub for LLMProseReader's ``invoke`` — returns a fixed mapping as JSON and
+    counts calls. Simulates a model that read the passage, with no network."""
+
+    def __init__(self, mapping):
+        self.mapping = mapping
+        self.calls = 0
+
+    def __call__(self, prompt):
+        self.calls += 1
+        return json.dumps(self.mapping)
 
 
 class CatalogResolutionTest(unittest.TestCase):
@@ -173,6 +188,34 @@ class CatalogResolutionTest(unittest.TestCase):
         self.assertEqual(col.link_method, "structured_dictionary")
         self.assertEqual(col.description, "Nitrate treatment")
         self.assertEqual(col.name, "Nitrate ")
+
+    def test_missing_delimiter_does_not_absorb_the_next_entry(self):
+        """A glossary with a missing ';' merges two entries; the captured value must
+        stop at the absorbed term, not swallow it (real Readme: 'Mass – fish mass (g)
+        Duration - recovery duration (min)')."""
+        pd.DataFrame({"Mass": [1.0, 2.0], "Duration": [3.0, 4.0]}).to_csv(
+            os.path.join(self.dir, "epoc.csv"), index=False
+        )
+        with open(os.path.join(self.dir, "readme.txt"), "w") as f:
+            f.write("Mass – fish mass (g) Duration - recovery duration (min); EPOC – oxygen debt\n")
+        tab = create_context(os.path.join(self.dir, "epoc.csv"), name="epoc")
+        doc = create_context(os.path.join(self.dir, "readme.txt"), name="readme")
+        cat = resolve_catalog(tab, sources=[doc])
+        self.assertEqual(cat.get("Mass").description, "fish mass (g)")   # not the merged run
+        # The absorbed entry still resolves on its own term.
+        self.assertIn("recovery duration", cat.get("Duration").description)
+
+    def test_internal_hyphen_in_a_value_is_preserved(self):
+        """A hyphen *inside* a word is not a spaced dash, so the value is left intact."""
+        pd.DataFrame({"epoc": [1.0, 2.0]}).to_csv(os.path.join(self.dir, "e.csv"), index=False)
+        with open(os.path.join(self.dir, "r.txt"), "w") as f:
+            f.write("epoc – excess post-exercise oxygen consumption (mg O2 kg-1 h-1)\n")
+        tab = create_context(os.path.join(self.dir, "e.csv"), name="e")
+        doc = create_context(os.path.join(self.dir, "r.txt"), name="r")
+        self.assertEqual(
+            resolve_catalog(tab, sources=[doc]).get("epoc").description,
+            "excess post-exercise oxygen consumption (mg O2 kg-1 h-1)",
+        )
 
     # --- cross-check without a dictionary claim --------------------------
 
@@ -557,11 +600,44 @@ class ProseReaderTierTest(unittest.TestCase):
         # A sentence that merely mentions the token, with no definitional cue, abstains.
         self.assertIsNone(r.read(column="mass", dtype="float", chunk="Mass matters for fish."))
 
-    def test_llm_reader_is_a_documented_seam(self):
-        reader = LLMProseReader(client=object())
-        self.assertTrue(hasattr(reader, "read"))
-        with self.assertRaises(NotImplementedError):
-            reader.read(column="mass", dtype="float", chunk="anything")
+    # --- the LLM reader in isolation (stub invoke, no network) -----------
+
+    def test_llm_reader_parses_defined_columns_and_abstains_on_the_rest(self):
+        reader = LLMProseReader(lambda p: '{"mass": {"description": "fish mass", "units": "g"}}')
+        out = reader.read_many(columns=[("mass", "float"), ("epoc", "float")], chunk="…")
+        self.assertEqual((out["mass"].description, out["mass"].units), ("fish mass", "g"))
+        self.assertNotIn("epoc", out)                       # omitted by the model → abstains
+
+    def test_llm_reader_survives_malformed_output(self):
+        reader = LLMProseReader(lambda p: "Sorry, I can't help with that.")
+        self.assertEqual(reader.read_many(columns=[("mass", "float")], chunk="x"), {})
+
+    def test_llm_reader_maps_trimmed_names_back_to_the_true_header(self):
+        # The model is asked about the trimmed 'Nitrate'; the result is keyed by the
+        # real header 'Nitrate ' (trailing space) so the locator still addresses it.
+        reader = LLMProseReader(lambda p: '{"Nitrate": {"description": "nitrate treatment", "units": "mg/L"}}')
+        out = reader.read_many(columns=[("Nitrate ", "float")], chunk="x")
+        self.assertIn("Nitrate ", out)
+        self.assertEqual(out["Nitrate "].units, "mg/L")
+
+    def test_llm_reader_ignores_columns_it_was_not_asked_about(self):
+        reader = LLMProseReader(
+            lambda p: '{"mass": {"description": "m"}, "ghost": {"description": "x"}}'
+        )
+        out = reader.read_many(columns=[("mass", "float")], chunk="x")
+        self.assertEqual(set(out), {"mass"})                # hallucinated 'ghost' dropped
+
+    def test_from_chat_model_adapts_a_chat_model(self):
+        class _Msg:
+            def __init__(self, content): self.content = content
+
+        class _Model:
+            def invoke(self, prompt):
+                return _Msg('{"mass": {"description": "fish mass", "units": "g"}}')
+
+        reader = LLMProseReader.from_chat_model(_Model())
+        out = reader.read_many(columns=[("mass", "float")], chunk="x")
+        self.assertEqual(out["mass"].description, "fish mass")
 
     # --- the tier in the resolution pipeline -----------------------------
 
@@ -588,17 +664,19 @@ class ProseReaderTierTest(unittest.TestCase):
         self.assertIn("manuscript", with_reader.link_evidence)   # cites the chunk's offset
 
     def test_retrieval_localizes_the_defining_document_among_many(self):
-        # A long decoy that mentions the token constantly but never defines it, and a
-        # short appendix that defines it in a reversed (regex-invisible) shape. Only a
-        # reader can resolve it, and retrieval must rank the appendix chunk to the top.
+        # Long-doc (retrieval) path: forced by a low whole-doc threshold. A long decoy
+        # that mentions the token constantly but never defines it, and a short appendix
+        # that defines it in a reversed (regex-invisible) shape — retrieval must rank the
+        # appendix chunk to the top so only a reader can resolve it, cited to the definer.
         decoy = self._doc("intro.md", "# Introduction\n\n" + ("Mass matters for fish physiology. " * 40))
         appendix = self._doc(
             "appendix.md",
             "# Appendix\n\nWet body mass (mass) was measured at the start of each trial.\n",
         )
-        col = resolve_catalog(
-            self.tab, sources=[decoy, appendix], prose_reader=self.reader
-        ).get("mass")
+        with patch("src.router.catalog._WHOLE_DOC_MAX_CHARS", 50):   # force the localize path
+            col = resolve_catalog(
+                self.tab, sources=[decoy, appendix], prose_reader=self.reader
+            ).get("mass")
         self.assertEqual(col.link_method, "prose_read")
         self.assertEqual(col.description, "Wet body mass")
         self.assertIn("appendix", col.link_evidence)   # the definer, not the decoy
@@ -634,19 +712,63 @@ class ProseReaderTierTest(unittest.TestCase):
         self.assertEqual(cat.get("mass").link_method, "lexical_prose")
         self.assertEqual(cat.get("epoc").link_method, "prose_read")
 
+    # --- LLM reader over narrative prose, whole-doc (short doc) path -------
+
+    def test_llm_reader_resolves_narrative_the_deterministic_path_cannot(self):
+        # Plain prose ("Mass is the fish mass in grams") — no cued shape, so the
+        # deterministic tiers abstain and only an LLM reader recovers it.
+        doc = self._doc(
+            "hard.txt",
+            "In this tab, Mass is the fish mass in grams. epoc is the oxygen debt.\n",
+        )
+        self.assertEqual(resolve_catalog(self.tab, sources=[doc]).get("mass").link_method, "none")
+        stub = _StubLLM({
+            "mass": {"description": "fish mass", "units": "g"},
+            "epoc": {"description": "oxygen debt", "units": None},
+        })
+        cat = resolve_catalog(self.tab, sources=[doc], prose_reader=LLMProseReader(stub))
+        self.assertEqual(cat.get("mass").link_method, "prose_read")
+        self.assertEqual((cat.get("mass").description, cat.get("mass").units), ("fish mass", "g"))
+        self.assertEqual(cat.get("epoc").description, "oxygen debt")
+        self.assertEqual(stub.calls, 1)                      # whole doc, all residual columns, one call
+
+    def test_whole_doc_mode_reads_a_column_whose_name_never_appears(self):
+        # Retrieval by token would miss this — the passage never says 'epoc'. Whole-doc
+        # mode hands the reader the full text + all residual columns, so it still resolves.
+        doc = self._doc("hard.txt", "Excess post-exercise oxygen consumption was recorded per fish.\n")
+        self.assertNotIn("epoc", doc.read_text("hard").lower())
+        stub = _StubLLM({"epoc": {"description": "excess post-exercise oxygen consumption",
+                                  "units": "mg O2 kg-1 h-1"}})
+        cat = resolve_catalog(self.tab, sources=[doc], prose_reader=LLMProseReader(stub))
+        self.assertEqual(cat.get("epoc").link_method, "prose_read")
+        self.assertEqual(cat.get("epoc").units, "mg O2 kg-1 h-1")
+
+    def test_value_profile_still_referees_an_llm_read(self):
+        # The LLM claims a column is latitude; its values (100–200) refute it, so the
+        # read is accepted but flagged and demoted — grounding survives the reader swap.
+        pd.DataFrame({"depth": [100.0, 150.0, 200.0]}).to_csv(
+            os.path.join(self.dir, "d.csv"), index=False
+        )
+        tab = create_context(os.path.join(self.dir, "d.csv"), name="d")
+        doc = self._doc("hard.txt", "depth is described somewhere in this document.\n")
+        stub = _StubLLM({"depth": {"description": "latitude", "units": "degrees"}})
+        col = resolve_catalog(tab, sources=[doc], prose_reader=LLMProseReader(stub)).get("depth")
+        self.assertEqual(col.link_method, "prose_read")
+        self.assertEqual(col.link_confidence, "low")         # values refute the claim
+        self.assertTrue(any("latitude" in m for m in col.conflicts))
+
     # --- batched, cached call shape (cost control for an expensive reader) ---
 
-    def test_reader_is_called_once_per_chunk_not_per_column(self):
-        # Both columns are defined in a reversed shape (regex-invisible) in ONE chunk, so
-        # both are residual and both retrieve that chunk — the chunk-major reader sees it
-        # once, covering both columns in a single call.
+    def test_reader_reads_all_residual_columns_in_one_call(self):
+        # Two columns defined in a reversed shape (regex-invisible); both residual. In the
+        # whole-doc (short) path the reader is handed the doc once, covering both columns.
         doc = self._doc(
             "m.md",
             "# M\n\nWet body mass (mass) was recorded. Oxygen debt (epoc) was logged.\n",
         )
         spy = _CountingReader()
         cat = resolve_catalog(self.tab, sources=[doc], prose_reader=spy)
-        self.assertEqual(len(spy.calls), 1)                  # one chunk → one call
+        self.assertEqual(len(spy.calls), 1)                  # one document → one call
         self.assertEqual(set(spy.calls[0][0]), {"mass", "epoc"})   # both columns batched
         self.assertEqual(cat.get("mass").link_method, "prose_read")
         self.assertEqual(cat.get("epoc").link_method, "prose_read")
@@ -666,10 +788,10 @@ class ProseReaderTierTest(unittest.TestCase):
         self.assertEqual(len(spy.calls), 1)                  # inner not called again
         self.assertEqual(second["mass"].description, "wet body mass")
 
-    def test_bundle_hoist_reads_shared_chunk_once_across_tables(self):
+    def test_bundle_hoist_reads_the_doc_once_across_tables(self):
         # Two tables each have a residual 'mass' (reversed def, regex-invisible). The
-        # bundle-level hoist unions them into ONE batched pass over the shared doc, so
-        # the chunk is read once for the whole bundle — even without a cache.
+        # bundle-level hoist unions them into ONE pass over the shared doc, so the doc is
+        # read once for the whole bundle — even without a cache.
         pd.DataFrame({"mass": [1.0, 2.0]}).to_csv(os.path.join(self.dir, "t1.csv"), index=False)
         pd.DataFrame({"mass": [3.0, 4.0]}).to_csv(os.path.join(self.dir, "t2.csv"), index=False)
         t1 = create_context(os.path.join(self.dir, "t1.csv"), name="t1")

@@ -44,9 +44,10 @@ are read in whole. A million-row data table is sampled, never indexed.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -285,6 +286,26 @@ def _cell(row: pd.Series, col: Optional[str]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+_ABSORBED_DEF = re.compile(r"\s[–—-]\s")
+
+
+def _trim_absorbed_definition(text: str) -> str:
+    """Undo a missing delimiter that merged the *next* glossary entry into this value.
+
+    Entries are ``term <spaced-dash> def``; a captured value that itself contains a
+    **space-surrounded** dash has swallowed a following ``term – def`` past a typo'd or
+    absent ``;`` (e.g. ``fish mass (g) Duration - recovery duration (min)`` → the real
+    value is ``fish mass (g)``). Truncate at that inner separator and drop the absorbed
+    term (the word right before it). Hyphens *inside* words (``post-exercise``,
+    ``kg-1``) are not space-surrounded, so legitimate values are left intact.
+    """
+    m = _ABSORBED_DEF.search(text)
+    if not m:
+        return text
+    head = text[: m.start()]                       # "... fish mass (g) Duration"
+    return re.sub(r"\s+\S+\s*$", "", head).strip() or text
+
+
 def _prose_candidates(name: str, docs: List[TextContext]) -> List[Dict[str, Any]]:
     """Find glossary-style definitions (``la = latitude``, ``pH – acclimation pH``).
 
@@ -311,7 +332,7 @@ def _prose_candidates(name: str, docs: List[TextContext]) -> List[Dict[str, Any]
             match = pattern.search(doc.read_text(resource))
             if match:
                 found.append({
-                    "description": match.group(1).strip().rstrip(".;,"),
+                    "description": _trim_absorbed_definition(match.group(1).strip()).rstrip(".;,"),
                     "evidence": f"{resource}#{match.start()}",
                 })
     return found
@@ -465,7 +486,7 @@ def _forward_definition(name: str, sentence: str) -> Optional[str]:
         sentence,
         re.IGNORECASE,
     )
-    return m.group(1).strip().rstrip(".;,") if m else None
+    return _trim_absorbed_definition(m.group(1).strip()).rstrip(".;,") if m else None
 
 
 def _reversed_definition(name: str, sentence: str) -> Optional[str]:
@@ -504,25 +525,86 @@ class DeterministicProseReader(ProseReader):
         return None
 
 
-class LLMProseReader(ProseReader):
-    """Seam for an LLM-backed reader — the ceiling for genuine narrative prose.
+# The extraction contract handed to the model: define only what the passage states,
+# omit the rest (abstention is first-class), return strict JSON we can parse.
+_LLM_READER_INSTRUCTION = (
+    "You extract a data dictionary from documentation. You are given a PASSAGE and a "
+    "list of COLUMN names from a dataset's tables. For every column the passage "
+    "*explicitly* describes, return its meaning and unit; omit any column the passage "
+    "does not describe — never guess.\n"
+    'Return ONE JSON object mapping column name to {{"description": <concise noun '
+    'phrase>, "units": <unit string or null>}}. No prose, no code fence.\n\n'
+    "COLUMNS: {columns}\n\nPASSAGE:\n\"\"\"\n{passage}\n\"\"\"\n"
+)
 
-    Not wired here. Override :meth:`read_many` (**not** ``read``): the resolver calls
-    the batched entrypoint, and the whole point of an LLM backend is to answer *all*
-    the columns that retrieved a chunk in **one** call — "given this passage, define
-    the ones it defines" — so cost is one round-trip per chunk, not per column. Wrap
-    the instance in :class:`CachedProseReader` and keep it alive across the bundle so
-    each distinct chunk is read once. Ask for structured output and abstention is
-    first-class (omit the column). Retrieval and :func:`_decide` are unchanged.
+
+def _extract_json_object(text: Any) -> Optional[dict]:
+    """Best-effort parse of a single JSON object from an LLM response (tolerates a
+    surrounding code fence or stray prose)."""
+    if not isinstance(text, str):
+        return None
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        obj = json.loads(text[start : end + 1])
+    except (ValueError, TypeError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+class LLMProseReader(ProseReader):
+    """LLM-backed reader — the ceiling for genuine *narrative* prose.
+
+    Where the deterministic reader needs a cued ``term – def`` shape, this reads plain
+    sentences ("Mass is the fish mass in grams") by asking a model. It overrides the
+    **batched** entrypoint so every column handed to a passage is defined in one call —
+    one round-trip per passage, not per column.
+
+    ``invoke`` is the only dependency: a callable ``prompt -> model text``. That keeps
+    this free of any specific SDK and trivially testable with a stub; adapt a chat model
+    with :meth:`from_chat_model`. Abstention is first-class (a column the model omits is
+    simply absent), a malformed/failed call abstains rather than crashing, and the value
+    profile still referees each claim downstream in :func:`_decide` — a read the data
+    refutes is flagged, not trusted. Wrap in :class:`CachedProseReader` to read a passage
+    once across a bundle.
     """
 
-    def __init__(self, client: Any) -> None:
-        self._client = client
+    def __init__(self, invoke: Callable[[str], str]) -> None:
+        self._invoke = invoke
+
+    @classmethod
+    def from_chat_model(cls, model: Any) -> "LLMProseReader":
+        """Adapt a chat model exposing ``.invoke(prompt) -> message.content`` (a
+        LangChain chat model, as the players use) into a reader."""
+        return cls(lambda prompt: model.invoke(prompt).content)
 
     def read_many(
         self, *, columns: List[Tuple[str, str]], chunk: str
     ) -> Dict[str, ReadResult]:
-        raise NotImplementedError("inject an LLM client and implement read_many()")
+        if not columns:
+            return {}
+        # Present trimmed names to the model; map its answers back to the true headers.
+        by_norm = {_match_key(name): name for name, _ in columns}
+        prompt = _LLM_READER_INSTRUCTION.format(columns=json.dumps(sorted(by_norm)), passage=chunk)
+        try:
+            data = _extract_json_object(self._invoke(prompt))
+        except Exception:
+            return {}                       # a failed/garbled call abstains, never crashes
+        if not data:
+            return {}
+        out: Dict[str, ReadResult] = {}
+        for key, val in data.items():
+            name = by_norm.get(_match_key(str(key)))
+            if name is None or not isinstance(val, dict):
+                continue
+            desc = val.get("description")
+            if not isinstance(desc, str) or not desc.strip():
+                continue                    # no description → treated as abstention
+            units = val.get("units")
+            units = units.strip() if isinstance(units, str) and units.strip() else None
+            out[name] = ReadResult(desc.strip(), units, "medium")
+        return out
 
 
 # Chunks retrieved per column before reading — enough to survive a mis-ranked top
@@ -724,6 +806,65 @@ def _resolve_table_deterministic(
     return _TableResolution(resource, columns, profiles, dtypes, docs)
 
 
+# A README/codebook is small enough to hand to a reader whole; past this, a document is
+# a manuscript and must be *localized* before reading (see _read_residuals). Chosen well
+# above a long README so the common natural-language case skips retrieval.
+_WHOLE_DOC_MAX_CHARS = 20_000
+
+
+def _docs_total_chars(docs: List[TextContext]) -> int:
+    return sum(len(doc.read_text(r)) for doc in docs for r in doc.resources)
+
+
+def _whole_doc_reads(
+    residual: List[Tuple[str, str]], docs: List[TextContext], reader: ProseReader
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Short-doc path: **skip retrieval**, hand each whole document plus *all* residual
+    columns to the reader in one call.
+
+    Retrieval by column token fails on narrative that never uses the literal name
+    ("oxygen debt" for ``EPOC``, "the fish's mass" for ``mass``). When the docs are small
+    this is unnecessary and harmful: give the reader the whole text and the full column
+    list at once, so a column is read even if its name never appears verbatim — one call
+    per document, all columns at once.
+    """
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for doc in docs:
+        for resource in doc.resources:
+            results = reader.read_many(columns=residual, chunk=doc.read_text(resource))
+            for name, result in results.items():
+                out.setdefault(name, []).append({
+                    "description": result.description,
+                    "units": result.units,
+                    "confidence": result.confidence,
+                    "evidence": f"{resource}#0",
+                })
+    return out
+
+
+def _localized_reads(
+    residual: List[Tuple[str, str]], docs: List[TextContext], reader: ProseReader
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Long-doc path: **localize** each column's definition, then read only those spans.
+
+    A manuscript cannot be handed to the reader whole (cost, and the definition is a
+    needle in many pages), so the definition must be found first. Today this is token
+    BM25 retrieval (:func:`_batch_prose_reads`) — chunk-major and cheap, but it misses a
+    definition phrased without the column's literal name.
+
+    Deferred (sketch): a stronger localizer for a manuscript —
+      * embedding retrieval with the query expanded by dtype and the value profile, so a
+        column whose name never appears verbatim is still placed;
+      * a heading-aware pass (the markdown chunker already carries section headings) to
+        prefer a "Variables"/"Methods" section;
+      * optionally a cheap first LLM pass over section headings to route columns to
+        sections before the (expensive) read.
+    Until then the token retriever is the honest, limited stand-in.
+    """
+    # TODO(long-doc): embedding/heading localization + query expansion; see docstring.
+    return _batch_prose_reads(residual, docs, reader)
+
+
 def _read_residuals(
     tables: List[_TableResolution], docs: List[TextContext], reader: ProseReader
 ) -> None:
@@ -733,10 +874,12 @@ def _read_residuals(
     Residual gating keeps an expensive reader off columns a codebook or glossary already
     resolved. The bundle-level hoist unions every table's residual columns (deduped by
     name — a prose read depends on the name and the docs, not the table) into a single
-    :func:`_batch_prose_reads` pass, so a definition chunk is read once for the bundle.
-    A residual column is re-decided with an *empty* dictionary/doc set (it had no
-    deterministic candidate, by definition) plus its reads, its value profile still
-    refereeing the claim.
+    pass, so a document is read once for the whole bundle. The read path is chosen by
+    document size: small docs are read **whole** (:func:`_whole_doc_reads`, no retrieval,
+    so a column whose name never appears verbatim is still read); a manuscript is
+    **localized** first (:func:`_localized_reads`). Each residual column is re-decided
+    with an *empty* dictionary/doc set (it had no deterministic candidate, by definition)
+    plus its reads, its value profile still refereeing the claim.
     """
     residual: List[Tuple[str, str]] = []
     seen: set = set()
@@ -747,7 +890,11 @@ def _read_residuals(
                 residual.append((col.name, t.dtypes[col.name]))
     if not residual:
         return
-    reads = _batch_prose_reads(residual, docs, reader)
+    reads = (
+        _whole_doc_reads(residual, docs, reader)
+        if _docs_total_chars(docs) <= _WHOLE_DOC_MAX_CHARS
+        else _localized_reads(residual, docs, reader)
+    )
     if not reads:
         return
     for t in tables:
