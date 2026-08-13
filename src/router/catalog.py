@@ -43,9 +43,10 @@ are read in whole. A million-row data table is sampled, never indexed.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Protocol, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -330,6 +331,17 @@ def _prose_candidates(name: str, docs: List[TextContext]) -> List[Dict[str, Any]
 # glossary regex, so `_decide` treats the two as corroborating/conflicting evidence
 # with no change to its logic. The reader is opt-in (`resolve_catalog(...,
 # prose_reader=...)`); passing none reproduces today's behavior exactly.
+#
+# **Call shape (batched + cached).** A naive per-(column, chunk) loop is the worst
+# pattern for an expensive backend: an LLM reader would pay one round-trip per column
+# per chunk. But definitions cluster — a manuscript's Methods section defines many
+# columns in the same few paragraphs — so the retriever is **chunk-major**: it maps
+# each distinct retrieved chunk to the columns that reached it and calls the reader
+# **once per chunk** over all of them (`ProseReader.read_many`). Cost then scales with
+# *distinct retrieved chunks*, not column count. `CachedProseReader` memoizes by
+# (column, chunk) — negatives included — so repeats and overlapping bundles are free.
+# The deterministic reader is cheap enough that this is invisible; the shape exists so
+# an LLM reader is affordable the day it is wired.
 
 
 @dataclass(frozen=True)
@@ -341,16 +353,78 @@ class ReadResult:
     confidence: str = "medium"      # a reader may temper this; capped at its tier's base
 
 
-class ProseReader(Protocol):
-    """The seam: read a meaning for ``column`` out of one retrieved ``chunk``.
+class ProseReader:
+    """The seam: read a meaning for a column out of one retrieved ``chunk``.
 
-    Return ``None`` to abstain (no cued definition present). Implementations range
-    from the deterministic cue-extractor below to an LLM that reads narrative prose;
-    both plug in identically because retrieval and :func:`_decide` are external.
+    Two entrypoints. :meth:`read` handles one column; :meth:`read_many` handles all
+    columns that retrieved a given chunk in a single shot — the batched path the
+    resolver actually calls. Implement whichever fits the backend: a cheap
+    per-column reader (the deterministic floor) implements ``read`` and inherits the
+    default ``read_many`` that loops it; a batched backend (an LLM answering many
+    columns per chunk) overrides ``read_many``. Return ``None`` / omit a column to
+    abstain. Retrieval, caching, and :func:`_decide` are all external, so any reader
+    plugs in identically.
     """
 
     def read(self, *, column: str, dtype: str, chunk: str) -> Optional[ReadResult]:
-        ...
+        raise NotImplementedError
+
+    def read_many(
+        self, *, columns: List[Tuple[str, str]], chunk: str
+    ) -> Dict[str, ReadResult]:
+        """Read every ``(column, dtype)`` against one chunk; keyed by column name.
+
+        Default: loop :meth:`read`. A batched backend overrides this to answer all
+        columns for the chunk in one call. Columns that abstain are simply absent.
+        """
+        out: Dict[str, ReadResult] = {}
+        for name, dtype in columns:
+            result = self.read(column=name, dtype=dtype, chunk=chunk)
+            if result is not None:
+                out[name] = result
+        return out
+
+
+class CachedProseReader(ProseReader):
+    """Memoize a reader by (column, dtype, chunk) so a span is read at most once.
+
+    Wraps any :class:`ProseReader`. The cache key hashes the chunk text, so the same
+    passage retrieved by several columns, re-seen across tables of a bundle (the same
+    instance is threaded through every ``resolve_catalog``), or hit on a re-run costs
+    nothing. **Negatives are cached too** — an abstention is a result worth not
+    recomputing, which matters most for an LLM backend. Keep one instance alive across
+    the bundle to share its cache.
+    """
+
+    def __init__(self, inner: ProseReader) -> None:
+        self._inner = inner
+        self._cache: Dict[Tuple[str, str, str], Optional[ReadResult]] = {}
+
+    def read(self, *, column: str, dtype: str, chunk: str) -> Optional[ReadResult]:
+        return self.read_many(columns=[(column, dtype)], chunk=chunk).get(column)
+
+    def read_many(
+        self, *, columns: List[Tuple[str, str]], chunk: str
+    ) -> Dict[str, ReadResult]:
+        digest = hashlib.sha1(chunk.encode("utf-8")).hexdigest()
+        out: Dict[str, ReadResult] = {}
+        misses: List[Tuple[str, str]] = []
+        for name, dtype in columns:
+            key = (name, dtype, digest)
+            if key in self._cache:
+                cached = self._cache[key]
+                if cached is not None:
+                    out[name] = cached
+            else:
+                misses.append((name, dtype))
+        if misses:
+            fresh = self._inner.read_many(columns=misses, chunk=chunk)
+            for name, dtype in misses:
+                result = fresh.get(name)
+                self._cache[(name, dtype, digest)] = result   # cache the abstention too
+                if result is not None:
+                    out[name] = result
+        return out
 
 
 _SENTENCE_SPLIT = re.compile(r"[.;\n]+")
@@ -386,14 +460,15 @@ def _reversed_definition(name: str, sentence: str) -> Optional[str]:
     return m.group(1).strip() if m else None
 
 
-class DeterministicProseReader:
+class DeterministicProseReader(ProseReader):
     """The LLM-free floor: return a meaning only when a definitional *cue* is present.
 
     Scoped to a chunk the retriever already localized, it looks in each sentence that
     mentions the token for a forward or reversed definition and splits off trailing
     units. It deliberately does **not** treat an arbitrary mentioning sentence as a
     definition — that keeps precision high and abstention honest; narrative prose with
-    no cue is left to an LLM reader.
+    no cue is left to an LLM reader. Per-column and cheap, so it uses the inherited
+    :meth:`read_many` (a loop) unchanged.
     """
 
     def read(self, *, column: str, dtype: str, chunk: str) -> Optional[ReadResult]:
@@ -410,20 +485,25 @@ class DeterministicProseReader:
         return None
 
 
-class LLMProseReader:
+class LLMProseReader(ProseReader):
     """Seam for an LLM-backed reader — the ceiling for genuine narrative prose.
 
-    Not wired here: inject a client and implement :meth:`read` to ask the model
-    "what does column ``column`` mean?" over the retrieved ``chunk``, returning a
-    :class:`ReadResult` (or ``None`` to abstain). Retrieval and :func:`_decide` are
-    unchanged, so this drops in wherever the deterministic reader does.
+    Not wired here. Override :meth:`read_many` (**not** ``read``): the resolver calls
+    the batched entrypoint, and the whole point of an LLM backend is to answer *all*
+    the columns that retrieved a chunk in **one** call — "given this passage, define
+    the ones it defines" — so cost is one round-trip per chunk, not per column. Wrap
+    the instance in :class:`CachedProseReader` and keep it alive across the bundle so
+    each distinct chunk is read once. Ask for structured output and abstention is
+    first-class (omit the column). Retrieval and :func:`_decide` are unchanged.
     """
 
     def __init__(self, client: Any) -> None:
         self._client = client
 
-    def read(self, *, column: str, dtype: str, chunk: str) -> Optional[ReadResult]:
-        raise NotImplementedError("inject an LLM client and implement read()")
+    def read_many(
+        self, *, columns: List[Tuple[str, str]], chunk: str
+    ) -> Dict[str, ReadResult]:
+        raise NotImplementedError("inject an LLM client and implement read_many()")
 
 
 # Chunks retrieved per column before reading — enough to survive a mis-ranked top
@@ -431,37 +511,69 @@ class LLMProseReader:
 _PROSE_READ_K = 3
 
 
-def _prose_read_candidates(
-    name: str, dtype: str, docs: List[TextContext], reader: ProseReader, *, k: int = _PROSE_READ_K
-) -> List[Dict[str, Any]]:
-    """Retrieve the chunks that mention ``name``, then read a meaning from each.
+def _batch_prose_reads(
+    fields: List[Tuple[str, str]],
+    docs: List[TextContext],
+    reader: ProseReader,
+    *,
+    k: int = _PROSE_READ_K,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Retrieve each column's top-``k`` chunks, then read them **chunk-major**.
 
-    BM25-ranks every chunk across every document by the column token (localization),
-    then hands the top-``k`` to ``reader``. Each accepted read carries the winning
-    chunk's own offset as its citation, so provenance points at the exact span.
+    Retrieval is per column (BM25 over every chunk of every document by the column
+    token), but reading is grouped: each distinct retrieved chunk is read **once**,
+    over all columns that reached it (:meth:`ProseReader.read_many`), so an expensive
+    backend pays one call per chunk rather than per (column, chunk). Returns, per
+    column, the ranked candidate reads (description/units/confidence + the chunk's own
+    offset as citation) — the exact shape :func:`_resolve_column` folds in as
+    ``prose_read`` candidates, so ordering and content match the per-column path.
     """
-    query = content_terms(name)
-    if not query:                      # opaque/stopword-only names (``la``) can't retrieve
-        return []
-    scored: List[Tuple[float, TextChunk]] = []
-    for doc in docs:
-        for resource in doc.resources:
-            chunks = list(doc.iter_chunks(resource))
-            scores = bm25_scores(query, [tokenize(c.text) for c in chunks])
-            scored.extend((s, c) for c, s in zip(chunks, scores) if s > 0)
-    scored.sort(key=lambda sc: sc[0], reverse=True)
+    # Chunk once per document and reuse the tokenization across every column's query.
+    chunks: List[TextChunk] = [c for doc in docs for res in doc.resources for c in doc.iter_chunks(res)]
+    if not chunks:
+        return {}
+    tokenized = [tokenize(c.text) for c in chunks]
 
-    found: List[Dict[str, Any]] = []
-    for _, chunk in scored[:k]:
-        result = reader.read(column=name, dtype=dtype, chunk=chunk.text)
-        if result:
-            found.append({
-                "description": result.description,
-                "units": result.units,
-                "confidence": result.confidence,
-                "evidence": f"{chunk.resource}#{chunk.start_offset}",
-            })
-    return found
+    # Per column: its top-k chunk indices (ranked). Per chunk: the columns that reached
+    # it — the batch each read_many call covers.
+    ranked_for: Dict[str, List[int]] = {}
+    cols_by_chunk: Dict[int, List[Tuple[str, str]]] = {}
+    for name, dtype in fields:
+        query = content_terms(name)
+        if not query:                  # opaque/stopword-only names (``la``) can't retrieve
+            continue
+        scores = bm25_scores(query, tokenized)
+        top = sorted((i for i, s in enumerate(scores) if s > 0), key=lambda i: scores[i], reverse=True)[:k]
+        if not top:
+            continue
+        ranked_for[name] = top
+        for i in top:
+            bucket = cols_by_chunk.setdefault(i, [])
+            if (name, dtype) not in bucket:
+                bucket.append((name, dtype))
+
+    # One batched read per distinct retrieved chunk.
+    reads_by_chunk: Dict[int, Dict[str, ReadResult]] = {
+        i: reader.read_many(columns=cols, chunk=chunks[i].text) for i, cols in cols_by_chunk.items()
+    }
+
+    # Assemble each column's candidates in retrieval-rank order.
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for name, indices in ranked_for.items():
+        found: List[Dict[str, Any]] = []
+        for i in indices:
+            result = reads_by_chunk.get(i, {}).get(name)
+            if result:
+                chunk = chunks[i]
+                found.append({
+                    "description": result.description,
+                    "units": result.units,
+                    "confidence": result.confidence,
+                    "evidence": f"{chunk.resource}#{chunk.start_offset}",
+                })
+        if found:
+            out[name] = found
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -576,11 +688,22 @@ def resolve_catalog(
     ]
     docs = [src for src in sources if isinstance(src, TextContext)]
 
+    # Retrieve-then-read is computed once for the whole table, chunk-major, so a
+    # reader sees each retrieved chunk a single time across all columns (see
+    # _batch_prose_reads); empty when no reader was supplied.
+    reads = (
+        _batch_prose_reads([(f.name, f.dtype) for f in info.fields], docs, prose_reader)
+        if prose_reader is not None
+        else {}
+    )
+
     resolved: List[ResolvedColumn] = []
     for f in info.fields:
         profile = _value_profile(frame[f.name]) if f.name in frame.columns else {"numeric": False}
         resolved.append(
-            _resolve_column(f.name, f.dtype, resource, profile, dictionaries, docs, prose_reader)
+            _resolve_column(
+                f.name, f.dtype, resource, profile, dictionaries, docs, reads.get(f.name, ())
+            )
         )
     return Catalog(resource=resource, columns=resolved)
 
@@ -650,8 +773,13 @@ def _norm(text: Optional[str]) -> str:
     return (text or "").strip().lower()
 
 
-def _resolve_column(name, dtype, resource, profile, dictionaries, docs, reader=None) -> ResolvedColumn:
-    """Gather every candidate resolution for the column, then decide among them."""
+def _resolve_column(name, dtype, resource, profile, dictionaries, docs, prose_reads=()) -> ResolvedColumn:
+    """Gather every candidate resolution for the column, then decide among them.
+
+    ``prose_reads`` are this column's retrieve-then-read candidates, precomputed in
+    one batched pass (:func:`_batch_prose_reads`) so an expensive reader is called
+    per chunk, not per column; empty when no reader was supplied.
+    """
     label = profile.get("label")
     candidates: List[_Candidate] = []
 
@@ -671,11 +799,10 @@ def _resolve_column(name, dtype, resource, profile, dictionaries, docs, reader=N
     # The retrieve-then-read tier (opt-in). Appended *after* the glossary regex so,
     # on a same-tier tie, the cheap high-precision glossary line wins source-order;
     # a differing read surfaces as a tier-2 conflict rather than silently overriding.
-    if reader is not None:
-        for rc in _prose_read_candidates(name, dtype, docs, reader):
-            candidates.append(_Candidate(
-                rc["description"], rc["units"], "prose_read", rc["confidence"], rc["evidence"],
-            ))
+    for rc in prose_reads:
+        candidates.append(_Candidate(
+            rc["description"], rc["units"], "prose_read", rc["confidence"], rc["evidence"],
+        ))
 
     if label in _SELF_EVIDENT:
         description, confidence = _SELF_EVIDENT[label]

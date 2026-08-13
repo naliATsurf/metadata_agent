@@ -8,6 +8,7 @@ contexts.
 """
 
 from src.router.catalog import (
+    CachedProseReader,
     Catalog,
     DeterministicProseReader,
     LLMProseReader,
@@ -22,6 +23,7 @@ from src.router.route import FieldPlan, FieldRouting, route_fields
 from src.router.schema import FieldSpec, walk_schema
 
 __all__ = [
+    "CachedProseReader",
     "Catalog",
     "DeterministicProseReader",
     "FieldPlan",

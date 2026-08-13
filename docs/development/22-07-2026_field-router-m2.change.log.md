@@ -196,6 +196,66 @@ did not, both now fixed:
   below: `tmp` no longer reads as a coordinate. Legitimate `la`/`lo`/`lat`/`lon`
   columns are unaffected.
 
+## Follow-up: retrieve-then-read prose tier (above the glossary regex)
+
+The prose rung was a single whole-document regex looking for one fixed shape
+(`term <sep> definition`). That fits a short codebook README and little else: a
+**long manuscript** defines a column narratively, scattered across pages and files,
+and `search`-ing the whole text for the *first* match yields an arbitrary — usually
+wrong — hit (`mass` appears dozens of times before it is ever defined). Multiple or
+long description files make both failure modes worse: precision collapses (first
+match is rarely the definition) and recall collapses (narrative prose has no
+glossary shape). More regex epicycles do not fix this; **retrieval + a reader** do.
+
+A new **retrieve-then-read** tier slots in above the glossary regex, opt-in via
+`resolve_catalog(..., prose_reader=...)` / `resolve_bundle(..., prose_reader=...)`:
+
+1. **Retrieve** — `_batch_prose_reads` BM25-ranks *every chunk across every
+   document* by the column token, localizing the definition out of a 20-page
+   manuscript (and ranking across several files at once). It stays doc-scale.
+2. **Read** — the retrieved chunks are handed to a pluggable `ProseReader`. Two
+   implementations against that one seam: `DeterministicProseReader`, the LLM-free
+   floor, extracts only a *cued* definition — forward (`mass – fish mass`), reversed
+   (`fish mass (mass)`) — and splits trailing units, abstaining when no cue is
+   present (no free-sentence guessing); `LLMProseReader` is the documented seam for
+   the ceiling that reads genuine narrative prose. The winning chunk's offset is the
+   citation.
+
+It emits `_Candidate(method="prose_read")` registered at the **same tier as the
+glossary regex** (`_TIER_RANK["prose_read"] = 2`), so `_decide` needs no change: when
+both prose methods fire they are treated as same-tier corroboration or conflict by
+the existing machinery. Appended *after* the regex, so on a same-tier tie the cheap
+high-precision glossary line wins source-order and a differing read surfaces as an
+honest tier-2 conflict. The reader defaults to `None` everywhere, so existing
+behavior and tests are unchanged.
+
+**Call shape — batched and cached, so an expensive reader stays affordable.** A
+naive per-(column, chunk) loop is the worst pattern for an LLM: one round-trip per
+column per chunk. But definitions cluster — a manuscript's Methods section defines
+many columns in the same few paragraphs — so reading is **chunk-major**:
+`_batch_prose_reads` maps each distinct retrieved chunk to the columns that reached
+it and calls `ProseReader.read_many` **once per chunk** over all of them. Cost then
+scales with *distinct retrieved chunks*, not column count. The seam carries both
+entrypoints: a cheap per-column backend implements `read` and inherits the default
+`read_many` (a loop); a batched backend (the LLM) overrides `read_many` to answer
+every column for a chunk in one call. `CachedProseReader` wraps any reader and
+memoizes by (column, chunk) — **negatives included** — and, because the same
+instance is threaded through every table of a `resolve_bundle`, a chunk shared
+across tables or re-seen on a re-run is read once. The which-columns policy stays
+simple: the reader runs on every column (so it can corroborate a regex hit), and the
+batching/caching is what makes "every column" cheap rather than gating columns out.
+
+On the real 6-table dataset, enabling the deterministic reader is not a no-op: it
+**corroborates** the Readme glossary lines the regex already reads, lifting 25 of 43
+columns to `high` confidence (same claim, same tier → corroboration); the 18 where
+the two extract differently stay `medium`, and the 2 genuinely-undefined columns
+still abstain. Tests: `ProseReaderTierTest` — the reader's forward/reversed/abstain
+extraction, the opt-in gate (a reversed definition invisible without a reader),
+retrieval localizing the defining document among decoys, same-tier
+corroboration/conflict through `_decide`, and the call shape (one `read_many` per
+chunk covering both columns; `CachedProseReader` reading each chunk once including
+negatives and sharing its cache across a bundle's tables).
+
 ## Scope and limits
 
 - **The value profile identifies a narrow set by design.** Only coordinate and
@@ -204,14 +264,19 @@ did not, both now fixed:
   requires a corroborating column name (see the follow-up above), so a bare float
   range no longer resolves as a coordinate on its own.
 - **Discovery still assumes you name the sources.** `resolve_catalog` takes an
-  explicit `sources` list and parses a codebook or matches rigid prose patterns.
-  The real-world case — you *don't* know which file documents the columns, and the
-  descriptions are free natural language — needs **retrieval-first discovery**
-  (turn each column into a query, rank spans across the whole doc corpus, extract
-  with a grounded, cross-checked LLM). That is the next generalization, deferred;
-  the deterministic rungs here are its high-precision short-circuits.
-- **Deferred rungs.** Fuzzy/positional linking (`la`~`lat`), grounded LLM
-  extraction from free prose, and per-`context_key` caching are not implemented.
+  explicit `sources` list. The real-world case — you *don't* know which file
+  documents the columns, and the descriptions are free natural language — needs
+  **retrieval-first discovery** (turn each column into a query, rank spans across the
+  whole doc corpus, extract with a grounded, cross-checked reader). The
+  retrieve-then-read tier (follow-up above) is the first half of that generalization
+  — retrieval localizes the span and a pluggable reader interprets it — but the
+  deterministic reader still only extracts a *cued* definition; a grounded LLM reader
+  over the retrieved chunk is the deferred ceiling. The other deterministic rungs
+  remain its high-precision short-circuits.
+- **Deferred rungs.** Fuzzy/positional linking (`la`~`lat`) and per-`context_key`
+  caching are not implemented. Grounded LLM extraction from free prose now has a
+  seam (`LLMProseReader`, see the retrieve-then-read follow-up) but no wired
+  implementation.
 - **Bundle representation.** `resolve_catalog` takes the auxiliary resources as an
   explicit `sources` list rather than assuming a single multimodal context (that
   unification is separate work). This composes forward: a future multimodal

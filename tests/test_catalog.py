@@ -11,12 +11,26 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from src.context import create_context
 from src.router import (
+    CachedProseReader,
     DeterministicProseReader,
     LLMProseReader,
+    ProseReader,
     resolve_bundle,
     resolve_catalog,
 )
 from src.tools.base import clear_registry
+
+
+class _CountingReader(ProseReader):
+    """A deterministic reader that records every batched call, to prove call shape."""
+
+    def __init__(self):
+        self._inner = DeterministicProseReader()
+        self.calls = []  # one (column_names, chunk_text) per read_many invocation
+
+    def read_many(self, *, columns, chunk):
+        self.calls.append(([name for name, _ in columns], chunk))
+        return self._inner.read_many(columns=columns, chunk=chunk)
 
 
 class CatalogResolutionTest(unittest.TestCase):
@@ -584,6 +598,51 @@ class ProseReaderTierTest(unittest.TestCase):
         self.assertEqual(col.link_confidence, "medium")      # contested, unadjudicated
         self.assertTrue(col.conflicts)
         self.assertTrue(any(a["method"] == "prose_read" for a in col.alternatives))
+
+    # --- batched, cached call shape (cost control for an expensive reader) ---
+
+    def test_reader_is_called_once_per_chunk_not_per_column(self):
+        # One chunk defines *both* columns; both retrieve it, so a chunk-major reader
+        # sees that chunk a single time, covering both columns in one call — the shape
+        # that makes an LLM backend cost one round-trip per chunk, not per column.
+        doc = self._doc("glossary.md", "# Vars\n\nmass – wet body mass; epoc – oxygen debt\n")
+        spy = _CountingReader()
+        cat = resolve_catalog(self.tab, sources=[doc], prose_reader=spy)
+        self.assertEqual(len(spy.calls), 1)                  # one chunk → one call
+        self.assertEqual(set(spy.calls[0][0]), {"mass", "epoc"})   # both columns batched
+        self.assertEqual(cat.get("mass").description, "wet body mass")
+        self.assertEqual(cat.get("epoc").description, "oxygen debt")
+
+    def test_cached_reader_reads_each_chunk_once_including_negatives(self):
+        spy = _CountingReader()
+        cached = CachedProseReader(spy)
+        chunk = "mass – wet body mass"
+        # 'mass' resolves; 'foo' abstains — the cache must remember *both*.
+        first = cached.read_many(columns=[("mass", "float"), ("foo", "float")], chunk=chunk)
+        self.assertEqual(first["mass"].description, "wet body mass")
+        self.assertNotIn("foo", first)
+        self.assertEqual(len(spy.calls), 1)
+        # An identical second call is served entirely from cache — including the
+        # negative for 'foo', so no fresh inner read happens.
+        second = cached.read_many(columns=[("mass", "float"), ("foo", "float")], chunk=chunk)
+        self.assertEqual(len(spy.calls), 1)                  # inner not called again
+        self.assertEqual(second["mass"].description, "wet body mass")
+
+    def test_cache_is_shared_across_tables_of_a_bundle(self):
+        # The same reader instance is threaded through every table's resolution, so a
+        # chunk shared by two tables' columns is read once for the whole bundle.
+        pd.DataFrame({"mass": [1.0, 2.0]}).to_csv(os.path.join(self.dir, "t1.csv"), index=False)
+        pd.DataFrame({"mass": [3.0, 4.0]}).to_csv(os.path.join(self.dir, "t2.csv"), index=False)
+        t1 = create_context(os.path.join(self.dir, "t1.csv"), name="t1")
+        t2 = create_context(os.path.join(self.dir, "t2.csv"), name="t2")
+        doc = self._doc("m.md", "# M\n\nWet body mass (mass) was measured in grams.\n")
+        spy = _CountingReader()
+        cached = CachedProseReader(spy)
+        cat = resolve_bundle([t1, t2], sources=[doc], prose_reader=cached)
+        # Both tables' 'mass' resolve, but the shared chunk is read from source once.
+        self.assertEqual(len(spy.calls), 1)
+        self.assertEqual(cat.find("mass", "t1").description, "Wet body mass")
+        self.assertEqual(cat.find("mass", "t2").description, "Wet body mass")
 
 
 if __name__ == "__main__":
