@@ -237,32 +237,39 @@ high-precision glossary line wins source-order and a differing read surfaces as 
 honest tier-2 conflict. The reader defaults to `None` everywhere, so existing
 behavior and tests are unchanged.
 
-**Call shape — batched and cached, so an expensive reader stays affordable.** A
-naive per-(column, chunk) loop is the worst pattern for an LLM: one round-trip per
-column per chunk. But definitions cluster — a manuscript's Methods section defines
-many columns in the same few paragraphs — so reading is **chunk-major**:
-`_batch_prose_reads` maps each distinct retrieved chunk to the columns that reached
-it and calls `ProseReader.read_many` **once per chunk** over all of them. Cost then
-scales with *distinct retrieved chunks*, not column count. The seam carries both
-entrypoints: a cheap per-column backend implements `read` and inherits the default
-`read_many` (a loop); a batched backend (the LLM) overrides `read_many` to answer
-every column for a chunk in one call. `CachedProseReader` wraps any reader and
-memoizes by (column, chunk) — **negatives included** — and, because the same
-instance is threaded through every table of a `resolve_bundle`, a chunk shared
-across tables or re-seen on a re-run is read once. The which-columns policy stays
-simple: the reader runs on every column (so it can corroborate a regex hit), and the
-batching/caching is what makes "every column" cheap rather than gating columns out.
+**Cost control — residual gating, bundle hoist, batched + cached.** Three
+compounding bounds keep an expensive (LLM) reader affordable:
 
-On the real 6-table dataset, enabling the deterministic reader is not a no-op: it
-**corroborates** the Readme glossary lines the regex already reads, lifting 25 of 43
-columns to `high` confidence (same claim, same tier → corroboration); the 18 where
-the two extract differently stay `medium`, and the 2 genuinely-undefined columns
-still abstain. Tests: `ProseReaderTierTest` — the reader's forward/reversed/abstain
-extraction, the opt-in gate (a reversed definition invisible without a reader),
-retrieval localizing the defining document among decoys, same-tier
-corroboration/conflict through `_decide`, and the call shape (one `read_many` per
-chunk covering both columns; `CachedProseReader` reading each chunk once including
-negatives and sharing its cache across a bundle's tables).
+- **Residual gating.** The reader runs only on columns the deterministic tiers left
+  *unresolved* (`link_method == "none"`). It fills genuine gaps and does **not**
+  re-read a codebook/glossary line the regex already caught — reading the same prose
+  line two ways is not independent corroboration, so inflating confidence on that
+  basis was dropped. Cost scales with the genuinely-opaque tail, not the schema.
+- **Bundle hoist.** `resolve_bundle` resolves every table deterministically first,
+  then unions all tables' residual columns into a **single** `_read_residuals` /
+  `_batch_prose_reads` pass over the shared docs — a definition chunk is read once for
+  the whole bundle, not once per table.
+- **Chunk-major batching + caching.** Within that pass, definitions cluster (a Methods
+  section defines many columns in the same paragraphs), so the retriever maps each
+  distinct chunk to the columns that reached it and calls `ProseReader.read_many`
+  **once per chunk** over all of them — cost scales with *distinct retrieved chunks*,
+  not column count. The seam carries both entrypoints: a cheap per-column backend
+  implements `read` and inherits the default looping `read_many`; a batched backend
+  (the LLM) overrides `read_many` to answer every column for a chunk in one call.
+  `CachedProseReader` memoizes by (column, chunk) — **negatives included** — so
+  re-runs are free.
+
+Measured on the real 6-table dataset (45 columns, a single-chunk `Readme.txt`): the
+deterministic tiers resolve 43/45 via the glossary, leaving **2** residual columns
+(genuinely undefined in the Readme). An LLM reader would therefore be invoked **once**
+— the hoist unions the 2 residuals across their tables into one call over the one
+chunk (un-hoisted, per-table, it would be 2). Not the 45-per-column cost the naive
+shape implies. Tests: `ProseReaderTierTest` — the reader's forward/reversed/abstain
+extraction; **residual gating** (a regex-resolved column is never handed to the
+reader; the reader runs only on the unresolved column); retrieval localizing the
+defining document among decoys; the **bundle hoist** (a chunk shared by two tables'
+residual columns read once, uncached); and `CachedProseReader` reading each chunk
+once including negatives.
 
 ## Scope and limits
 

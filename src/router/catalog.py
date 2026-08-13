@@ -84,6 +84,17 @@ _UNIT_NAME_RE = re.compile(r"unit", re.I)
 _NOTE_NAME_RE = re.compile(r"note|comment|remark", re.I)
 
 
+def _match_key(name: Any) -> str:
+    """A column name normalized for *matching* — surrounding whitespace stripped.
+
+    Real CSV headers carry stray spaces (``'Nitrate '``); matching on the raw name
+    would miss its codebook row or glossary definition. Only *matching* uses this —
+    :attr:`ResolvedColumn.name` keeps the true header so the executor's locator still
+    addresses the actual DataFrame column.
+    """
+    return str(name).strip()
+
+
 @dataclass(frozen=True)
 class ResolvedColumn:
     """One column after symbol linking: what it means, and on what evidence."""
@@ -209,7 +220,7 @@ def _as_dictionary(src: TabularContext, target_columns: List[str]) -> Optional[_
     of the target's column names (the *key* column). The best-matching description,
     units, and notes columns supply the payload.
     """
-    target_set = {c.lower() for c in target_columns}
+    target_set = {_match_key(c).lower() for c in target_columns}
     if not target_set:
         return None
 
@@ -290,7 +301,7 @@ def _prose_candidates(name: str, docs: List[TextContext]) -> List[Dict[str, Any]
     longer word (``id`` does not match ``individual``).
     """
     pattern = re.compile(
-        rf"(?<![A-Za-z0-9_])[`'\"]?{re.escape(name)}[`'\"]?(?:\s*[:=]\s*|\s+[–—-]\s+)"
+        rf"(?<![A-Za-z0-9_])[`'\"]?{re.escape(_match_key(name))}[`'\"]?(?:\s*[:=]\s*|\s+[–—-]\s+)"
         rf"([A-Za-z][A-Za-z0-9 /()%-]{{2,60}})",
         re.IGNORECASE,
     )
@@ -328,20 +339,27 @@ def _prose_candidates(name: str, docs: List[TextContext]) -> List[Dict[str, Any]
 #      reader abstains, which is the honest outcome.
 #
 # It emits `_Candidate(method="prose_read")`, registered at the *same* tier as the
-# glossary regex, so `_decide` treats the two as corroborating/conflicting evidence
-# with no change to its logic. The reader is opt-in (`resolve_catalog(...,
-# prose_reader=...)`); passing none reproduces today's behavior exactly.
+# glossary regex. The reader is opt-in (`resolve_catalog(..., prose_reader=...)`);
+# passing none skips it entirely.
 #
-# **Call shape (batched + cached).** A naive per-(column, chunk) loop is the worst
-# pattern for an expensive backend: an LLM reader would pay one round-trip per column
-# per chunk. But definitions cluster — a manuscript's Methods section defines many
-# columns in the same few paragraphs — so the retriever is **chunk-major**: it maps
-# each distinct retrieved chunk to the columns that reached it and calls the reader
-# **once per chunk** over all of them (`ProseReader.read_many`). Cost then scales with
-# *distinct retrieved chunks*, not column count. `CachedProseReader` memoizes by
-# (column, chunk) — negatives included — so repeats and overlapping bundles are free.
-# The deterministic reader is cheap enough that this is invisible; the shape exists so
-# an LLM reader is affordable the day it is wired.
+# **Residual gating + bundle hoist.** The reader runs only on columns the deterministic
+# tiers left *unresolved* (`link_method == "none"`) — it fills genuine gaps rather than
+# re-reading a codebook/glossary line the regex already caught (reading the same prose
+# line two ways is not independent corroboration). Across a multi-table bundle, every
+# table's residual columns are unioned into a **single** `_batch_prose_reads` pass over
+# the shared docs (`_read_residuals`), so a definition chunk is read once for the whole
+# bundle, not once per table. Together these bound an expensive reader's cost to the
+# genuinely-opaque tail, read in one hoisted pass.
+#
+# **Call shape (batched + cached).** Within that pass a naive per-(column, chunk) loop
+# is still the worst pattern for an LLM: one round-trip per column per chunk. But
+# definitions cluster — a manuscript's Methods section defines many columns in the same
+# paragraphs — so the retriever is **chunk-major**: it maps each distinct retrieved
+# chunk to the columns that reached it and calls the reader **once per chunk** over all
+# of them (`ProseReader.read_many`). Cost scales with *distinct retrieved chunks*, not
+# column count. `CachedProseReader` memoizes by (column, chunk) — negatives included —
+# so re-runs are free. The deterministic reader is cheap enough that this is invisible;
+# the shape exists so an LLM reader is affordable the day it is wired.
 
 
 @dataclass(frozen=True)
@@ -472,6 +490,7 @@ class DeterministicProseReader(ProseReader):
     """
 
     def read(self, *, column: str, dtype: str, chunk: str) -> Optional[ReadResult]:
+        column = _match_key(column)   # match on the trimmed name; a stray space would defeat it
         token = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(column)}(?![A-Za-z0-9_])", re.I)
         for sentence in _SENTENCE_SPLIT.split(chunk):
             if not token.search(sentence):
@@ -659,6 +678,87 @@ def _cross_check(description: Optional[str], units: Optional[str], profile: Dict
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class _TableResolution:
+    """One table resolved by the deterministic tiers, plus what re-deciding needs.
+
+    ``profiles``/``dtypes`` are kept per column so a *residual* (unresolved) column can
+    be re-decided after a reader reads it — the value profile still referees the read,
+    and the read carries the column's dtype.
+    """
+
+    resource: str
+    columns: List[ResolvedColumn]
+    profiles: Dict[str, Dict[str, Any]]
+    dtypes: Dict[str, str]
+    docs: List[TextContext]
+
+
+def _resolve_table_deterministic(
+    target: TabularContext, resource: str, sources: List[ExecutionContext]
+) -> _TableResolution:
+    """Resolve one table with the deterministic tiers only (dictionary, prose regex,
+    value prior) — no reader. The reader pass is applied afterwards, and only to the
+    columns this leaves unresolved (:func:`_read_residuals`)."""
+    resource = resource or target.resources[0]
+    info = target.get_resource_info(resource)
+    frame = target.read_resource(resource, limit=_PROFILE_SAMPLE)
+
+    dictionaries = [
+        d
+        for src in sources
+        if isinstance(src, TabularContext)
+        for d in [_as_dictionary(src, info.field_names)]
+        if d is not None
+    ]
+    docs = [src for src in sources if isinstance(src, TextContext)]
+
+    columns: List[ResolvedColumn] = []
+    profiles: Dict[str, Dict[str, Any]] = {}
+    dtypes: Dict[str, str] = {}
+    for f in info.fields:
+        profile = _value_profile(frame[f.name]) if f.name in frame.columns else {"numeric": False}
+        profiles[f.name] = profile
+        dtypes[f.name] = f.dtype
+        columns.append(_resolve_column(f.name, f.dtype, resource, profile, dictionaries, docs, ()))
+    return _TableResolution(resource, columns, profiles, dtypes, docs)
+
+
+def _read_residuals(
+    tables: List[_TableResolution], docs: List[TextContext], reader: ProseReader
+) -> None:
+    """Run ``reader`` **only on the columns the deterministic tiers left unresolved**,
+    once for the whole bundle, and fold the reads back into ``tables`` in place.
+
+    Residual gating keeps an expensive reader off columns a codebook or glossary already
+    resolved. The bundle-level hoist unions every table's residual columns (deduped by
+    name — a prose read depends on the name and the docs, not the table) into a single
+    :func:`_batch_prose_reads` pass, so a definition chunk is read once for the bundle.
+    A residual column is re-decided with an *empty* dictionary/doc set (it had no
+    deterministic candidate, by definition) plus its reads, its value profile still
+    refereeing the claim.
+    """
+    residual: List[Tuple[str, str]] = []
+    seen: set = set()
+    for t in tables:
+        for col in t.columns:
+            if col.link_method == "none" and col.name not in seen:
+                seen.add(col.name)
+                residual.append((col.name, t.dtypes[col.name]))
+    if not residual:
+        return
+    reads = _batch_prose_reads(residual, docs, reader)
+    if not reads:
+        return
+    for t in tables:
+        for i, col in enumerate(t.columns):
+            if col.link_method == "none" and col.name in reads:
+                t.columns[i] = _resolve_column(
+                    col.name, t.dtypes[col.name], t.resource,
+                    t.profiles[col.name], [], [], reads[col.name],
+                )
+
+
 def resolve_catalog(
     target: TabularContext,
     resource: str = "",
@@ -672,40 +772,13 @@ def resolve_catalog(
     target's columns is parsed as a dictionary; text sources are searched for
     prose definitions. Value priors, computed from the target's own values, are
     the floor when neither yields a link, and the basis for cross-checking any
-    link that does.
+    link that does. An optional ``prose_reader`` reads the still-unresolved columns
+    (residual gating; see :func:`_read_residuals`).
     """
-    resource = resource or target.resources[0]
-    info = target.get_resource_info(resource)
-    frame = target.read_resource(resource, limit=_PROFILE_SAMPLE)
-    sources = sources or []
-
-    dictionaries = [
-        d
-        for src in sources
-        if isinstance(src, TabularContext)
-        for d in [_as_dictionary(src, info.field_names)]
-        if d is not None
-    ]
-    docs = [src for src in sources if isinstance(src, TextContext)]
-
-    # Retrieve-then-read is computed once for the whole table, chunk-major, so a
-    # reader sees each retrieved chunk a single time across all columns (see
-    # _batch_prose_reads); empty when no reader was supplied.
-    reads = (
-        _batch_prose_reads([(f.name, f.dtype) for f in info.fields], docs, prose_reader)
-        if prose_reader is not None
-        else {}
-    )
-
-    resolved: List[ResolvedColumn] = []
-    for f in info.fields:
-        profile = _value_profile(frame[f.name]) if f.name in frame.columns else {"numeric": False}
-        resolved.append(
-            _resolve_column(
-                f.name, f.dtype, resource, profile, dictionaries, docs, reads.get(f.name, ())
-            )
-        )
-    return Catalog(resource=resource, columns=resolved)
+    tr = _resolve_table_deterministic(target, resource, sources or [])
+    if prose_reader is not None:
+        _read_residuals([tr], tr.docs, prose_reader)
+    return Catalog(resource=tr.resource, columns=tr.columns)
 
 
 def resolve_bundle(
@@ -717,12 +790,12 @@ def resolve_bundle(
 
     A real repository is many tables — the fields of one schema are answered by
     columns in *different* tables (a dataset table, a measurement table, a taxonomy
-    table). This resolves each target independently (its columns described from
-    ``sources`` — codebooks and documents — and cross-checked against its own
-    values), then concatenates the resolved columns into a single catalog. Because
-    every :class:`ResolvedColumn` keeps its ``resource``, the router ranks a field
-    against every table's columns at once and the compiler groups extraction by
-    table — no other layer changes.
+    table). This resolves each target's columns deterministically (described from
+    ``sources`` — codebooks and documents — and cross-checked against its own values),
+    then, if a ``prose_reader`` is given, reads **all tables' residual columns in one
+    hoisted pass** before concatenating into a single catalog. Because every
+    :class:`ResolvedColumn` keeps its ``resource``, the router ranks a field against
+    every table's columns at once and the compiler groups extraction by table.
 
     The auxiliary ``sources`` (dictionaries, prose) are offered to *every* target, so
     a shared codebook resolves the columns it covers wherever they live. A column
@@ -730,9 +803,11 @@ def resolve_bundle(
     lookups that need to disambiguate use :meth:`Catalog.find` with the resource.
     """
     sources = sources or []
-    columns: List[ResolvedColumn] = []
-    for target in targets:
-        columns.extend(resolve_catalog(target, sources=sources, prose_reader=prose_reader).columns)
+    tables = [_resolve_table_deterministic(t, "", sources) for t in targets]
+    if prose_reader is not None and tables:
+        docs = [src for src in sources if isinstance(src, TextContext)]
+        _read_residuals(tables, docs, prose_reader)   # one hoisted, residual-only pass
+    columns = [c for tr in tables for c in tr.columns]
     resource = targets[0].resources[0] if targets else ""
     return Catalog(resource=resource, columns=columns)
 
@@ -784,7 +859,7 @@ def _resolve_column(name, dtype, resource, profile, dictionaries, docs, prose_re
     candidates: List[_Candidate] = []
 
     for d in dictionaries:
-        entry = d.by_name.get(name.lower())
+        entry = d.by_name.get(_match_key(name).lower())
         if entry and (entry["description"] or entry["units"]):
             candidates.append(_Candidate(
                 entry["description"], entry["units"], "structured_dictionary",
@@ -796,9 +871,11 @@ def _resolve_column(name, dtype, resource, profile, dictionaries, docs, prose_re
             pc["description"], None, "lexical_prose", "medium", pc["evidence"],
         ))
 
-    # The retrieve-then-read tier (opt-in). Appended *after* the glossary regex so,
-    # on a same-tier tie, the cheap high-precision glossary line wins source-order;
-    # a differing read surfaces as a tier-2 conflict rather than silently overriding.
+    # The retrieve-then-read tier. Precomputed and passed in (empty unless a reader
+    # ran); under residual gating these arrive only for columns with no deterministic
+    # candidate, so they typically stand alone at tier 2. Kept generic — if a glossary
+    # candidate is also present, source order (regex first) breaks a same-tier tie and a
+    # differing read surfaces as a tier-2 conflict rather than silently overriding.
     for rc in prose_reads:
         candidates.append(_Candidate(
             rc["description"], rc["units"], "prose_read", rc["confidence"], rc["evidence"],

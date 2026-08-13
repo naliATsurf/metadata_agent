@@ -143,6 +143,37 @@ class CatalogResolutionTest(unittest.TestCase):
         self.assertEqual(qq.link_method, "lexical_prose")
         self.assertIn("quality quotient", qq.description)
 
+    # --- name hygiene: stray whitespace in a header ----------------------
+
+    def test_trailing_space_in_header_still_resolves_via_prose(self):
+        """A real header like 'Nitrate ' (trailing space) must match the glossary
+        definition of 'nitrate' — matching strips the name, the locator keeps it."""
+        pd.DataFrame({"Nitrate ": [1.0, 2.0, 3.0]}).to_csv(
+            os.path.join(self.dir, "epoc.csv"), index=False
+        )
+        with open(os.path.join(self.dir, "readme.txt"), "w") as f:
+            f.write("nitrate – nominal nitrate treatment concentration (mg/L); tank – replicate tank ID\n")
+        tab = create_context(os.path.join(self.dir, "epoc.csv"), name="epoc")
+        doc = create_context(os.path.join(self.dir, "readme.txt"), name="readme")
+        col = resolve_catalog(tab, sources=[doc]).get("Nitrate ")
+        self.assertEqual(col.link_method, "lexical_prose")
+        self.assertIn("nitrate treatment", col.description)
+        self.assertEqual(col.name, "Nitrate ")   # true header preserved for the locator
+
+    def test_trailing_space_in_header_still_resolves_via_dictionary(self):
+        pd.DataFrame({"Nitrate ": [1.0, 2.0, 3.0], "sp": ["a", "b", "c"]}).to_csv(
+            os.path.join(self.dir, "d.csv"), index=False
+        )
+        pd.DataFrame({"variable": ["nitrate", "sp"], "label": ["Nitrate treatment", "Species"]}).to_csv(
+            os.path.join(self.dir, "cb.csv"), index=False
+        )
+        tab = create_context(os.path.join(self.dir, "d.csv"), name="d")
+        cb = create_context(os.path.join(self.dir, "cb.csv"), name="cb")
+        col = resolve_catalog(tab, sources=[cb]).get("Nitrate ")
+        self.assertEqual(col.link_method, "structured_dictionary")
+        self.assertEqual(col.description, "Nitrate treatment")
+        self.assertEqual(col.name, "Nitrate ")
+
     # --- cross-check without a dictionary claim --------------------------
 
     def test_out_of_range_latitude_claim_conflicts(self):
@@ -577,41 +608,48 @@ class ProseReaderTierTest(unittest.TestCase):
         col = resolve_catalog(self.tab, sources=[doc], prose_reader=self.reader).get("mass")
         self.assertEqual(col.link_method, "none")   # nothing to retrieve/read → honest abstention
 
-    def test_glossary_and_reader_corroborate_at_the_same_tier(self):
-        # One doc whose line both the regex and the reader read identically ("wet body
-        # mass"): same tier, same claim → corroboration lifts confidence to high.
-        doc = self._doc("readme.md", "# Vars\n\nmass – wet body mass; epoc – oxygen debt\n")
-        col = resolve_catalog(self.tab, sources=[doc], prose_reader=self.reader).get("mass")
-        self.assertEqual(col.link_method, "lexical_prose")   # regex added first, wins source-order
-        self.assertEqual(col.description, "wet body mass")
-        self.assertEqual(col.link_confidence, "high")        # corroborated by the reader
-        self.assertEqual(len(col.corroborated_by), 1)
-        self.assertEqual(col.conflicts, [])
+    # --- residual gating: the reader only fills genuine gaps ---------------
 
-    def test_glossary_and_reader_conflict_is_surfaced(self):
-        # Two tier-2 prose claims that disagree: the glossary wins source-order but the
-        # reader's differing read is recorded as a conflict and kept as an alternative.
-        g = self._doc("glossary.md", "# G\n\nmass – wet body mass\n")
-        m = self._doc("manuscript.md", "# M\n\nFish total length (mass) was measured in cm.\n")
-        col = resolve_catalog(self.tab, sources=[g, m], prose_reader=self.reader).get("mass")
-        self.assertEqual(col.description, "wet body mass")
-        self.assertEqual(col.link_confidence, "medium")      # contested, unadjudicated
-        self.assertTrue(col.conflicts)
-        self.assertTrue(any(a["method"] == "prose_read" for a in col.alternatives))
+    def test_reader_is_skipped_for_columns_the_deterministic_tiers_resolved(self):
+        # Residual gating: the glossary regex resolves both columns, so the reader is
+        # never invoked — no re-reading the same prose line as false corroboration.
+        doc = self._doc("readme.md", "# Vars\n\nmass – wet body mass; epoc – oxygen debt\n")
+        spy = _CountingReader()
+        cat = resolve_catalog(self.tab, sources=[doc], prose_reader=spy)
+        self.assertEqual(spy.calls, [])                       # nothing residual → reader idle
+        self.assertEqual(cat.get("mass").link_method, "lexical_prose")
+        self.assertEqual(cat.get("mass").link_confidence, "medium")  # not inflated by re-reading
+
+    def test_reader_runs_only_on_the_unresolved_column(self):
+        # 'mass' is defined in the glossary (resolved deterministically); 'epoc' only in
+        # a reversed shape the regex misses. The reader is asked about 'epoc' alone.
+        doc = self._doc(
+            "readme.md",
+            "# Vars\n\nmass – wet body mass\n\nOxygen debt (epoc) was logged each trial.\n",
+        )
+        spy = _CountingReader()
+        cat = resolve_catalog(self.tab, sources=[doc], prose_reader=spy)
+        read_columns = {name for call in spy.calls for name in call[0]}
+        self.assertEqual(read_columns, {"epoc"})             # 'mass' never handed to the reader
+        self.assertEqual(cat.get("mass").link_method, "lexical_prose")
+        self.assertEqual(cat.get("epoc").link_method, "prose_read")
 
     # --- batched, cached call shape (cost control for an expensive reader) ---
 
     def test_reader_is_called_once_per_chunk_not_per_column(self):
-        # One chunk defines *both* columns; both retrieve it, so a chunk-major reader
-        # sees that chunk a single time, covering both columns in one call — the shape
-        # that makes an LLM backend cost one round-trip per chunk, not per column.
-        doc = self._doc("glossary.md", "# Vars\n\nmass – wet body mass; epoc – oxygen debt\n")
+        # Both columns are defined in a reversed shape (regex-invisible) in ONE chunk, so
+        # both are residual and both retrieve that chunk — the chunk-major reader sees it
+        # once, covering both columns in a single call.
+        doc = self._doc(
+            "m.md",
+            "# M\n\nWet body mass (mass) was recorded. Oxygen debt (epoc) was logged.\n",
+        )
         spy = _CountingReader()
         cat = resolve_catalog(self.tab, sources=[doc], prose_reader=spy)
         self.assertEqual(len(spy.calls), 1)                  # one chunk → one call
         self.assertEqual(set(spy.calls[0][0]), {"mass", "epoc"})   # both columns batched
-        self.assertEqual(cat.get("mass").description, "wet body mass")
-        self.assertEqual(cat.get("epoc").description, "oxygen debt")
+        self.assertEqual(cat.get("mass").link_method, "prose_read")
+        self.assertEqual(cat.get("epoc").link_method, "prose_read")
 
     def test_cached_reader_reads_each_chunk_once_including_negatives(self):
         spy = _CountingReader()
@@ -628,19 +666,18 @@ class ProseReaderTierTest(unittest.TestCase):
         self.assertEqual(len(spy.calls), 1)                  # inner not called again
         self.assertEqual(second["mass"].description, "wet body mass")
 
-    def test_cache_is_shared_across_tables_of_a_bundle(self):
-        # The same reader instance is threaded through every table's resolution, so a
-        # chunk shared by two tables' columns is read once for the whole bundle.
+    def test_bundle_hoist_reads_shared_chunk_once_across_tables(self):
+        # Two tables each have a residual 'mass' (reversed def, regex-invisible). The
+        # bundle-level hoist unions them into ONE batched pass over the shared doc, so
+        # the chunk is read once for the whole bundle — even without a cache.
         pd.DataFrame({"mass": [1.0, 2.0]}).to_csv(os.path.join(self.dir, "t1.csv"), index=False)
         pd.DataFrame({"mass": [3.0, 4.0]}).to_csv(os.path.join(self.dir, "t2.csv"), index=False)
         t1 = create_context(os.path.join(self.dir, "t1.csv"), name="t1")
         t2 = create_context(os.path.join(self.dir, "t2.csv"), name="t2")
         doc = self._doc("m.md", "# M\n\nWet body mass (mass) was measured in grams.\n")
-        spy = _CountingReader()
-        cached = CachedProseReader(spy)
-        cat = resolve_bundle([t1, t2], sources=[doc], prose_reader=cached)
-        # Both tables' 'mass' resolve, but the shared chunk is read from source once.
-        self.assertEqual(len(spy.calls), 1)
+        spy = _CountingReader()  # uncached: the hoist alone gives the single call
+        cat = resolve_bundle([t1, t2], sources=[doc], prose_reader=spy)
+        self.assertEqual(len(spy.calls), 1)                  # hoisted union, one chunk
         self.assertEqual(cat.find("mass", "t1").description, "Wet body mass")
         self.assertEqual(cat.find("mass", "t2").description, "Wet body mass")
 

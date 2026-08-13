@@ -28,35 +28,25 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from collections import Counter
 from pathlib import Path
 from typing import List, Tuple
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from rich import box
 from rich.console import Console
-from rich.table import Table
 
 from src.context import create_context
 from src.router import (
     Catalog,
     DeterministicProseReader,
     ProseReader,
+    render_catalog,
     resolve_bundle,
     resolve_catalog,
 )
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_BUNDLE = REPO / "data/sample/sharetrait_preprocessed/TRADAT031"
-
-_CONF_STYLE = {"high": "green", "medium": "yellow", "low": "red", "none": "dim"}
-_METHOD_ABBR = {
-    "structured_dictionary": "dictionary",
-    "lexical_prose": "prose",
-    "value_prior": "value",
-    "none": "none",
-}
 
 
 def discover(bundle: Path, dictionaries: List[str]) -> Tuple[List[Path], List[Path], List[Path]]:
@@ -87,68 +77,6 @@ def resolve(
     return resolve_bundle(table_ctx, sources=sources, prose_reader=prose_reader)
 
 
-# ---------------------------------------------------------------------------
-# Presentation
-# ---------------------------------------------------------------------------
-
-
-def print_overview(console: Console, catalog: Catalog) -> None:
-    table = Table(
-        title="Resolved catalog", box=box.SIMPLE_HEAVY, header_style="bold",
-        title_justify="left", expand=True,
-    )
-    table.add_column("Table", style="dim", no_wrap=True)
-    table.add_column("Column", style="cyan bold", no_wrap=True)
-    table.add_column("Prior", no_wrap=True)
-    table.add_column("Method", no_wrap=True)
-    table.add_column("Conf", no_wrap=True)
-    table.add_column("Meaning (and citation)", ratio=1)
-
-    for c in catalog.columns:
-        conf = f"[{_CONF_STYLE.get(c.link_confidence, 'white')}]{c.link_confidence}[/]"
-        meaning = c.description or "[dim](unresolved — abstained)[/]"
-        if c.units:
-            meaning += f"  [dim]\\[{c.units}][/]"
-        if c.link_evidence:
-            meaning += f"  [dim]← {c.link_evidence}[/]"
-        table.add_row(
-            c.resource, c.name, c.value_label or "-",
-            _METHOD_ABBR.get(c.link_method, c.link_method), conf, meaning,
-        )
-    console.print(table)
-
-
-def print_conflicts_and_corroboration(console: Console, catalog: Catalog) -> None:
-    interesting = [
-        c for c in catalog.columns if c.conflicts or c.corroborated_by or c.alternatives
-    ]
-    if not interesting:
-        return
-    console.print("\n[bold]Conflicts, corroboration, and alternatives[/]")
-    for c in interesting:
-        console.print(f"\n[cyan bold]{c.resource}.{c.name}[/] — {c.description or '(unresolved)'}")
-        for msg in c.conflicts:
-            console.print(f"  [red]✗ conflict:[/] {msg}")
-        for cite in c.corroborated_by:
-            console.print(f"  [green]✓ corroborated by:[/] {cite}")
-        for alt in c.alternatives:
-            desc = alt.get("description") or alt.get("units") or "?"
-            console.print(
-                f"  [dim]· alternative ({alt.get('method')}, {alt.get('confidence')}): "
-                f"{desc} — {alt.get('evidence')}[/]"
-            )
-
-
-def print_summary(console: Console, catalog: Catalog) -> None:
-    methods = Counter(c.link_method for c in catalog.columns)
-    confs = Counter(c.link_confidence for c in catalog.columns)
-    resolved = sum(1 for c in catalog.columns if c.link_method != "none")
-    console.print(
-        f"\n[bold]{resolved}/{len(catalog.columns)}[/] columns resolved   "
-        f"methods={dict(methods)}   confidence={dict(confs)}"
-    )
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description="Resolve a bundle's columns and show the evidence.")
     ap.add_argument("--bundle", type=Path, default=DEFAULT_BUNDLE, help="bundle directory")
@@ -172,9 +100,7 @@ def main() -> None:
                   f"prose-reader: {'on' if reader else 'off'}\n")
 
     catalog = resolve(tables, dicts, docs, prose_reader=reader)
-    print_overview(console, catalog)
-    print_conflicts_and_corroboration(console, catalog)
-    print_summary(console, catalog)
+    render_catalog(catalog, console)
 
 
 if __name__ == "__main__":
