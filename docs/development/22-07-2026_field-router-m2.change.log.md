@@ -1,5 +1,13 @@
 # Change log 2026-07-22 — Field router M2: catalog resolution (symbol linking)
 
+> **Status:** landed, then **extended by later work** — M3 (routing), M4 (the
+> FieldPlan→Plan compiler), the multi-table follow-up (`resolve_bundle`), and the
+> retrieve-then-read prose reader. The "Scope and limits" section below is the M2
+> snapshot with follow-ups appended inline; items marked *resolved* were closed by
+> that later work. For the whole subsystem's current shape see
+> [plan_field_router.md](plan_field_router.md) and the
+> [M4 change log](04-08-2026_field-router-m4.change.log.md).
+
 **Goal:** Land milestone 2 of the field-driven router
 ([plan_field_router.md](plan_field_router.md), layer 3) — the pre-routing pass
 that closes the semantic gap M1 exposed. `TabularContext.search` cannot reach a
@@ -281,14 +289,14 @@ negatives and sharing its cache across a bundle's tables).
   explicit `sources` list rather than assuming a single multimodal context (that
   unification is separate work). This composes forward: a future multimodal
   context can pass its own other resources as `sources`.
-- **Multiple data tables (follow-up).** `resolve_catalog` resolves *one* target
-  table. A real repository is many tables, and a schema's fields are answered by
-  columns in different ones. `resolve_bundle(targets, sources)` resolves each table
-  and concatenates the resolved columns into a single catalog — every
-  `ResolvedColumn` keeps its `resource`, so the router ranks a field against all
-  tables' columns at once and the compiler groups extraction per table, with no
-  change to routing or compilation. A column name can occur in two tables, so
-  resource-aware lookup (`Catalog.find(name, resource)`) replaces name-only `get`
-  where a routed candidate's assurance is read. Tests: `MultiTableBundleTest`.
-- **Not yet wired into the planner.** The router that walks `FieldSpec`s and
-  routes each over `Catalog.search` (with `phase="route"`) is M3.
+- **Multiple data tables — resolved (follow-up), not a limit.** `resolve_catalog`
+  alone resolves *one* target table, but a real repository is many tables and a
+  schema's fields are answered by columns in different ones. `resolve_bundle(targets,
+  sources)` handles this: it resolves each table and concatenates the resolved
+  columns into a single catalog — every `ResolvedColumn` keeps its `resource`, so the
+  router ranks a field against all tables' columns at once and the compiler groups
+  extraction per table, with no change to routing or compilation. A column name can
+  occur in two tables, so resource-aware lookup (`Catalog.find(name, resource)`)
+  replaces name-only `get` where a routed candidate's assurance is read. Tests:
+  `MultiTableBundleTest`. (Listed here as the one-table→many-table generalization; the
+  multi-table case itself is done.)
