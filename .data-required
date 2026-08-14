@@ -1,4 +1,3 @@
-data/sample/
-data/end2end_test/
+data/
 logs/
 .env
