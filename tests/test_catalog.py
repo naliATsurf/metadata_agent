@@ -639,6 +639,77 @@ class ProseReaderTierTest(unittest.TestCase):
         out = reader.read_many(columns=[("mass", "float")], chunk="x")
         self.assertEqual(out["mass"].description, "fish mass")
 
+    def test_llm_reader_returns_the_supporting_quote(self):
+        reader = LLMProseReader(
+            lambda p: '{"mass": {"description": "fish mass", "units": "g", '
+                      '"quote": "Mass is the fish mass in grams."}}'
+        )
+        out = reader.read_many(columns=[("mass", "float")], chunk="x")
+        self.assertEqual(out["mass"].quote, "Mass is the fish mass in grams.")
+
+    def test_llm_read_produces_an_offset_located_quoted_span(self):
+        # The supporting quote is located back in the source, turning the citation into a
+        # real span whose offsets address the exact sentence — verifiable provenance.
+        text = "In this tab, Mass is the fish mass in grams. epoc is the oxygen debt.\n"
+        doc = self._doc("hard.txt", text)
+        quote = "Mass is the fish mass in grams."
+        stub = _StubLLM({"mass": {"description": "fish mass", "units": "g", "quote": quote}})
+        col = resolve_catalog(self.tab, sources=[doc], prose_reader=LLMProseReader(stub)).get("mass")
+        self.assertEqual(col.link_method, "prose_read")
+        resource, span = col.link_evidence.split("#")
+        start, end = (int(x) for x in span.split("-"))
+        self.assertEqual(text[start:end], quote)             # offsets address the exact sentence
+
+    def test_unlocatable_quote_falls_back_to_a_coarse_citation(self):
+        # If the model paraphrases (no verbatim hit), no span is fabricated — the citation
+        # stays document-level rather than pointing at the wrong offsets.
+        doc = self._doc("hard.txt", "Mass is the fish mass in grams.\n")
+        stub = _StubLLM({"mass": {"description": "fish mass", "units": "g",
+                                  "quote": "the fish's body mass"}})   # not verbatim
+        col = resolve_catalog(self.tab, sources=[doc], prose_reader=LLMProseReader(stub)).get("mass")
+        self.assertEqual(col.link_evidence, "hard#0")        # coarse, no fabricated span
+
+    # --- grounding grade: the located quote verifies the read (deterministic) ---
+
+    def test_grounded_read_is_high_confidence(self):
+        # Quote locates, names the column, and carries the description → well-grounded.
+        doc = self._doc("hard.txt", "In this tab, Mass is the fish mass in grams.\n")
+        stub = _StubLLM({"mass": {"description": "fish mass", "units": "g",
+                                  "quote": "Mass is the fish mass in grams."}})
+        col = resolve_catalog(self.tab, sources=[doc], prose_reader=LLMProseReader(stub)).get("mass")
+        self.assertEqual(col.link_confidence, "high")
+        self.assertEqual(col.conflicts, [])
+
+    def test_located_but_offtopic_quote_is_medium(self):
+        # The quote locates but neither names the column nor carries the description's
+        # words — a real sentence with a weak link, so medium not high.
+        text = "The study spanned six weeks across two tanks in spring.\n"
+        doc = self._doc("hard.txt", text)
+        stub = _StubLLM({"mass": {"description": "fish mass", "units": "g",
+                                  "quote": "The study spanned six weeks across two tanks in spring."}})
+        col = resolve_catalog(self.tab, sources=[doc], prose_reader=LLMProseReader(stub)).get("mass")
+        self.assertEqual(col.link_confidence, "medium")
+
+    def test_ungrounded_read_is_low_and_records_a_conflict(self):
+        # No verbatim quote in the source → evidence unconfirmed → low, with a conflict.
+        doc = self._doc("hard.txt", "Mass is the fish mass in grams.\n")
+        stub = _StubLLM({"mass": {"description": "fish mass", "units": "g",
+                                  "quote": "an entirely different sentence"}})
+        col = resolve_catalog(self.tab, sources=[doc], prose_reader=LLMProseReader(stub)).get("mass")
+        self.assertEqual(col.link_confidence, "low")
+        self.assertTrue(any("unconfirmed" in m for m in col.conflicts))
+
+    def test_locate_tolerates_reflowed_whitespace(self):
+        # The model returns the sentence with collapsed spacing; a re-flowed newline in
+        # the source must still locate (not be misread as a paraphrase → unfair demotion).
+        text = "In this tab, Mass is the\nfish mass in grams.\n"     # newline mid-sentence
+        doc = self._doc("hard.txt", text)
+        stub = _StubLLM({"mass": {"description": "fish mass", "units": "g",
+                                  "quote": "Mass is the fish mass in grams."}})
+        col = resolve_catalog(self.tab, sources=[doc], prose_reader=LLMProseReader(stub)).get("mass")
+        self.assertEqual(col.link_confidence, "high")        # located despite the newline
+        self.assertIn("-", col.link_evidence.split("#")[1])  # a real span, not coarse
+
     # --- the tier in the resolution pipeline -----------------------------
 
     def test_reader_resolves_a_reversed_definition_the_regex_misses(self):
@@ -660,8 +731,9 @@ class ProseReaderTierTest(unittest.TestCase):
         ).get("mass")
         self.assertEqual(with_reader.link_method, "prose_read")
         self.assertIn("mass", with_reader.description.lower())
-        self.assertEqual(with_reader.link_confidence, "medium")
-        self.assertIn("manuscript", with_reader.link_evidence)   # cites the chunk's offset
+        # Well-grounded: the quote locates, names the column, and carries the description.
+        self.assertEqual(with_reader.link_confidence, "high")
+        self.assertIn("manuscript", with_reader.link_evidence)   # cites the located span
 
     def test_retrieval_localizes_the_defining_document_among_many(self):
         # Long-doc (retrieval) path: forced by a low whole-doc threshold. A long decoy

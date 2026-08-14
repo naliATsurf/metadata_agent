@@ -225,9 +225,9 @@ A new **retrieve-then-read** tier slots in above the glossary regex, opt-in via
    implementations against that one seam: `DeterministicProseReader`, the LLM-free
    floor, extracts only a *cued* definition — forward (`mass – fish mass`), reversed
    (`fish mass (mass)`) — and splits trailing units, abstaining when no cue is
-   present (no free-sentence guessing); `LLMProseReader` is the documented seam for
-   the ceiling that reads genuine narrative prose. The winning chunk's offset is the
-   citation.
+   present (no free-sentence guessing); `LLMProseReader` is the ceiling that reads
+   genuine narrative prose (now implemented — see the follow-up below). The winning
+   chunk's offset is the citation.
 
 It emits `_Candidate(method="prose_read")` registered at the **same tier as the
 glossary regex** (`_TIER_RANK["prose_read"] = 2`), so `_decide` needs no change: when
@@ -271,6 +271,96 @@ defining document among decoys; the **bundle hoist** (a chunk shared by two tabl
 residual columns read once, uncached); and `CachedProseReader` reading each chunk
 once including negatives.
 
+## Follow-up: the LLM reader, wired — narrative prose and a doc-size switch
+
+The deterministic tiers all need a *cue* (`term – def`, `def (term)`). Real documentation
+is often pure narrative — "Mass is the fish mass in grams", "pH means acclimation pH" —
+which has no cue, so on a natural-language readme the glossary regex **and** the cued
+reader both resolve **0/45**. That is the common case, and the reason the reader seam
+exists. `LLMProseReader` is now a working implementation:
+
+- **Injectable `invoke`.** Its only dependency is a callable `prompt -> text`, so it is
+  free of any SDK and trivially stub-tested; `LLMProseReader.from_chat_model(model)`
+  adapts a LangChain chat model (the same `create_llm` the players use).
+- **Batched, structured, grounded.** It overrides `read_many` (not `read`): one
+  structured-JSON call defines *every* column handed to a passage — "define only the
+  columns this passage describes; omit the rest." Abstention is first-class (omit a
+  column), a malformed/failed call returns `{}` rather than crashing, hallucinated
+  columns are dropped, and trimmed names map back to the true header. The **value
+  profile still referees** every read in `_decide`, so an LLM claim the data refutes
+  (e.g. "latitude" over 100–200) is flagged and demoted, not trusted.
+
+**Doc-size switch (retrieval is not always the right move).** Retrieval by column token
+fails when the prose never uses the literal name ("oxygen debt" for `EPOC`). So
+`_read_residuals` chooses the read path by document size (`_WHOLE_DOC_MAX_CHARS`):
+
+- **Short docs — skip retrieval** (`_whole_doc_reads`). Hand the reader the *whole* small
+  readme plus *all* residual columns in one call, so a column resolves even if its name
+  never appears verbatim. This is the natural-language-readme case.
+- **Long docs — localize first** (`_localized_reads`). A manuscript can't go to the reader
+  whole, so token retrieval (`_batch_prose_reads`) localizes the spans. The stronger
+  localizer for a manuscript — embedding retrieval with dtype/value-profile query
+  expansion, heading-aware routing — is sketched and deferred (`TODO(long-doc)`).
+
+**Live result.** On the real bundle with a pure-narrative `readme_hard.txt` (every glossary
+entry rewritten as prose, column names preserved), against the configured SURF model
+(`Qwen2.5-VL-32B`): the deterministic tiers resolve **0/45**; the LLM reader resolves
+**43/45** — with units — in **one** live model call for the whole 6-table bundle (whole-doc
+mode reads the readme once; `CachedProseReader` shares it across tables). Examples of the
+live reads: `EPOC → excess post-exercise oxygen consumption [mg O2 kg-1 h-1]`, `no2 →
+blood nitrite concentration [mg/L]`, `masskg → fish mass [kilograms]`. The 2 misses
+(`id`, `length`) are the model's recall, not a pipeline gap. Wired into
+`examples/resolve_catalog.py` behind `--llm-reader` (with `--doc` to restrict sources).
+
+**Quoted spans (grounded provenance).** A read now carries its *verbatim* supporting
+sentence: `ReadResult.quote`, requested in the prompt alongside description/units. After
+reading, `_locate` finds that sentence back in the source (exact, then case-insensitive,
+then whitespace-tolerant) and the citation is upgraded from a document-level pointer to a
+real span
+`resource#start-end`, where `source[start:end]` **is** the quoted sentence (a paraphrase
+that doesn't locate verbatim falls back to the coarse citation rather than fabricating an
+offset). The deterministic reader supplies its matched sentence as the quote too, so both
+readers produce located spans. Live, the model cites e.g.
+`mass → readme_hard#1452-1483 → "Mass is the fish mass in grams."`, offsets addressing the
+exact sentence.
+
+**Grounding grade — deterministic verify-*lite* (the quote as a confidence signal).** The
+locate is not just for the citation: whether the quote checks out is itself evidence. The
+LLM *proposes* its supporting sentence; locating it *disposes* of the claim, and
+`_ground_read` grades the read from three deterministic checks — the quote **locates**
+(provenance), **names the column** (relevance), and **carries the description's words**
+(support):
+
+- all three → **high** (well-grounded — trusted; the field gets a single extractor);
+- located but weak token/word overlap → **medium**;
+- quote absent or paraphrased → **low**, with a recorded conflict ("reader evidence
+  unconfirmed") — the read may still be right, but its evidence isn't confirmed.
+
+This replaces the flat `medium` every read used to get with an *earned* grade, and it is the
+one signal that crosses the only threshold the pipeline acts on (`_topology_for`'s
+`== "high"` → single vs. debate). The **value-profile referee stacks on top** unchanged
+(`_decide`) — a read the values refute is still forced to `low`. Because the reader enriches
+a *column* (`prose_read`), the grade reaches routing through `ambiguous_structural`, which
+passes `link_confidence` through (the hardcoded `narrative → "low"` applies to raw document
+spans, not catalog reads). Live on `readme_hard.txt`, the flat `medium` became **37 high / 2
+medium / 1 low** — the well-grounded reads are now trusted and the unconfirmed ones flagged.
+
+Scope is deliberate: this confirms provenance and *lexical* support, not semantic
+entailment (a real, on-topic sentence can still be mis-summarised; lexical overlap won't
+catch negation). The entailment check — read the span, confirm it *means* the description,
+promote to a `verified` grade / `verified_span` — is the **M5 seam**, deliberately not built
+here; `verified_span` stays reserved. Steps done here give M5 a graded, span-cited read to
+verify.
+
+Tests use a **stub `invoke`** (no network): parse/abstain, malformed → abstain, name
+mapping, dropped hallucinations, `from_chat_model`, the returned quote; the grounding grade
+(grounded → high, off-topic located → medium, unlocated → low + conflict, whitespace-tolerant
+locate); plus pipeline tests — narrative resolves where the deterministic path returns 0 (one
+call); whole-doc mode reads a column whose name never appears; the value profile referees an
+LLM read; an LLM read produces an offset-located span whose `source[start:end]` equals the
+quote (and a paraphrase falls back to a coarse citation); and a forced-retrieval test keeps
+the long-doc path covered.
+
 ## Scope and limits
 
 - **The value profile identifies a narrow set by design.** Only coordinate and
@@ -283,15 +373,16 @@ once including negatives.
   documents the columns, and the descriptions are free natural language — needs
   **retrieval-first discovery** (turn each column into a query, rank spans across the
   whole doc corpus, extract with a grounded, cross-checked reader). The
-  retrieve-then-read tier (follow-up above) is the first half of that generalization
-  — retrieval localizes the span and a pluggable reader interprets it — but the
-  deterministic reader still only extracts a *cued* definition; a grounded LLM reader
-  over the retrieved chunk is the deferred ceiling. The other deterministic rungs
-  remain its high-precision short-circuits.
+  retrieve-then-read tier (follow-up above) is that generalization, and the free-prose
+  half is now covered: the `LLMProseReader` reads narrative (short docs whole, long docs
+  localized), grounded by the value-profile referee. What remains deferred is the
+  **long-doc localizer** — embedding retrieval and heading routing so a manuscript that
+  never uses a column's literal name is still placed (`TODO(long-doc)`). The other
+  deterministic rungs remain its high-precision short-circuits.
 - **Deferred rungs.** Fuzzy/positional linking (`la`~`lat`) and per-`context_key`
-  caching are not implemented. Grounded LLM extraction from free prose now has a
-  seam (`LLMProseReader`, see the retrieve-then-read follow-up) but no wired
-  implementation.
+  caching are not implemented. Grounded LLM extraction from free prose **is** now wired
+  (`LLMProseReader`, see the follow-up); the deferred piece is the long-doc localizer
+  above, not the reader itself.
 - **Bundle representation.** `resolve_catalog` takes the auxiliary resources as an
   explicit `sources` list rather than assuming a single multimodal context (that
   unification is separate work). This composes forward: a future multimodal

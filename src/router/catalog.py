@@ -385,11 +385,17 @@ def _prose_candidates(name: str, docs: List[TextContext]) -> List[Dict[str, Any]
 
 @dataclass(frozen=True)
 class ReadResult:
-    """What a :class:`ProseReader` extracts from a localized chunk."""
+    """What a :class:`ProseReader` extracts from a localized chunk.
+
+    ``quote`` is the *verbatim* sentence the reader based its answer on. When present it
+    is located back in the source to turn a document-level citation into a real quoted
+    span (``resource#start-end``) — the provenance a later verify pass re-checks.
+    """
 
     description: str
     units: Optional[str] = None
     confidence: str = "medium"      # a reader may temper this; capped at its tier's base
+    quote: Optional[str] = None     # verbatim supporting sentence, for an offset-located span
 
 
 class ProseReader:
@@ -521,7 +527,7 @@ class DeterministicProseReader(ProseReader):
                 if phrase:
                     desc, units = _split_trailing_units(phrase)
                     if len(desc) >= 3:
-                        return ReadResult(desc, units, "medium")
+                        return ReadResult(desc, units, "medium", sentence.strip())
         return None
 
 
@@ -530,10 +536,11 @@ class DeterministicProseReader(ProseReader):
 _LLM_READER_INSTRUCTION = (
     "You extract a data dictionary from documentation. You are given a PASSAGE and a "
     "list of COLUMN names from a dataset's tables. For every column the passage "
-    "*explicitly* describes, return its meaning and unit; omit any column the passage "
-    "does not describe — never guess.\n"
+    "*explicitly* describes, return its meaning, unit, and the supporting sentence; omit "
+    "any column the passage does not describe — never guess.\n"
     'Return ONE JSON object mapping column name to {{"description": <concise noun '
-    'phrase>, "units": <unit string or null>}}. No prose, no code fence.\n\n'
+    'phrase>, "units": <unit string or null>, "quote": <the exact sentence from the '
+    "PASSAGE that defines this column, copied verbatim>}}. No prose, no code fence.\n\n"
     "COLUMNS: {columns}\n\nPASSAGE:\n\"\"\"\n{passage}\n\"\"\"\n"
 )
 
@@ -603,8 +610,70 @@ class LLMProseReader(ProseReader):
                 continue                    # no description → treated as abstention
             units = val.get("units")
             units = units.strip() if isinstance(units, str) and units.strip() else None
-            out[name] = ReadResult(desc.strip(), units, "medium")
+            quote = val.get("quote")
+            quote = quote.strip() if isinstance(quote, str) and quote.strip() else None
+            out[name] = ReadResult(desc.strip(), units, "medium", quote)
         return out
+
+
+def _locate(quote: Optional[str], text: str) -> Optional[Tuple[int, int]]:
+    """Find a reader's verbatim ``quote`` in ``text`` and return its ``(start, end)``.
+
+    Turns a document-level citation into a real quoted span. Tries an exact match, then
+    case-insensitive, then whitespace-tolerant (the model may re-flow newlines/spacing) —
+    so only a genuine paraphrase misses and returns ``None``. Offsets are into the
+    *original* ``text``, so ``text[start:end]`` is the exact source span.
+    """
+    if not quote:
+        return None
+    idx = text.find(quote)
+    if idx != -1:
+        return idx, idx + len(quote)
+    lower = text.lower().find(quote.lower())
+    if lower != -1:
+        return lower, lower + len(quote)
+    # Whitespace-tolerant: match the quote's tokens separated by any run of whitespace,
+    # so a re-flowed newline or double space is not read as a paraphrase.
+    words = quote.split()
+    if len(words) >= 2:
+        m = re.search(r"\s+".join(re.escape(w) for w in words), text, re.IGNORECASE)
+        if m:
+            return m.start(), m.end()
+    return None
+
+
+def _grounding_grade(column: str, description: str, quote: str) -> str:
+    """Grade a *located* read by how well its own quote supports it.
+
+    ``high`` when the quote both mentions the column (relevance) and carries the
+    description's content words (support); ``medium`` otherwise (a real sentence, but a
+    weaker link). This is deterministic verify-*lite*: it confirms provenance and lexical
+    support, not semantic entailment — the entailment check is the M5 ``verified`` rung.
+    """
+    q = quote.lower()
+    token_present = _match_key(column).lower() in q
+    desc_words = [w for w in re.findall(r"[a-z0-9]+", (description or "").lower()) if len(w) > 2]
+    supported = bool(desc_words) and sum(w in q for w in desc_words) / len(desc_words) >= 0.5
+    return "high" if (token_present and supported) else "medium"
+
+
+def _ground_read(
+    result: "ReadResult", column: str, resource: str, base_offset: int, text: str
+) -> Tuple[str, str, Optional[str]]:
+    """Verify a read against its own quote and grade it → (evidence, confidence, conflict).
+
+    The LLM proposes the evidence (a verbatim sentence); locating it here *disposes* of
+    it. A located quote yields a real span citation and a grounding grade; a quote that
+    is absent or paraphrased yields the coarse citation, ``low`` confidence, and a
+    recorded conflict — the read may still be right, but its evidence is unconfirmed.
+    """
+    span = _locate(result.quote, text)
+    if span is None:
+        reason = "not found verbatim" if result.quote else "no supporting quote"
+        return f"{resource}#{base_offset}", "low", f"reader evidence unconfirmed ({reason})"
+    start, end = span
+    evidence = f"{resource}#{base_offset + start}-{base_offset + end}"
+    return evidence, _grounding_grade(column, result.description, text[start:end]), None
 
 
 # Chunks retrieved per column before reading — enough to survive a mis-ranked top
@@ -666,12 +735,16 @@ def _batch_prose_reads(
             result = reads_by_chunk.get(i, {}).get(name)
             if result:
                 chunk = chunks[i]
-                found.append({
-                    "description": result.description,
-                    "units": result.units,
-                    "confidence": result.confidence,
-                    "evidence": f"{chunk.resource}#{chunk.start_offset}",
-                })
+                evidence, confidence, conflict = _ground_read(
+                    result, name, chunk.resource, chunk.start_offset, chunk.text
+                )
+                candidate = {
+                    "description": result.description, "units": result.units,
+                    "confidence": confidence, "evidence": evidence,
+                }
+                if conflict:
+                    candidate["conflict"] = conflict
+                found.append(candidate)
         if found:
             out[name] = found
     return out
@@ -831,14 +904,17 @@ def _whole_doc_reads(
     out: Dict[str, List[Dict[str, Any]]] = {}
     for doc in docs:
         for resource in doc.resources:
-            results = reader.read_many(columns=residual, chunk=doc.read_text(resource))
+            text = doc.read_text(resource)
+            results = reader.read_many(columns=residual, chunk=text)
             for name, result in results.items():
-                out.setdefault(name, []).append({
-                    "description": result.description,
-                    "units": result.units,
-                    "confidence": result.confidence,
-                    "evidence": f"{resource}#0",
-                })
+                evidence, confidence, conflict = _ground_read(result, name, resource, 0, text)
+                candidate = {
+                    "description": result.description, "units": result.units,
+                    "confidence": confidence, "evidence": evidence,
+                }
+                if conflict:
+                    candidate["conflict"] = conflict
+                out.setdefault(name, []).append(candidate)
     return out
 
 
@@ -1035,10 +1111,13 @@ def _resolve_column(name, dtype, resource, profile, dictionaries, docs, prose_re
             f"value profile of '{name}' ({dtype})",
         ))
 
-    return _decide(name, dtype, resource, label, profile, candidates)
+    # A read whose quote could not be located carries a grounding conflict, keyed by its
+    # (unique) evidence so _decide attaches it only if that read is the one chosen.
+    ground_conflicts = {rc["evidence"]: rc["conflict"] for rc in prose_reads if rc.get("conflict")}
+    return _decide(name, dtype, resource, label, profile, candidates, ground_conflicts)
 
 
-def _decide(name, dtype, resource, label, profile, candidates) -> ResolvedColumn:
+def _decide(name, dtype, resource, label, profile, candidates, ground_conflicts=None) -> ResolvedColumn:
     """Choose among candidates: top tier wins, the value profile referees conflicts."""
     if not candidates:
         # Abstain — nothing describes this column and its values cannot name it.
@@ -1067,6 +1146,8 @@ def _decide(name, dtype, resource, label, profile, candidates) -> ResolvedColumn
     corroborated_by = [c.evidence for c in corroborators]
 
     conflicts: List[str] = list(refuted(chosen))   # the chosen claim's own value conflicts
+    if ground_conflicts and chosen.evidence in ground_conflicts:
+        conflicts.append(ground_conflicts[chosen.evidence])   # chosen read's quote unconfirmed
     for c in top:                                  # a same-tier claim the values rejected
         if c is not chosen:
             conflicts += [f"{c.summary()}: {msg}" for msg in refuted(c)]
