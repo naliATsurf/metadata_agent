@@ -121,3 +121,6 @@ temp/
 
 # W&B files
 wandb/
+
+# Mlflow
+mlflow.db
