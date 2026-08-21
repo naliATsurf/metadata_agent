@@ -41,7 +41,7 @@ class TestSurfConnection(unittest.TestCase):
 
         self.assertGreater(len(text_sequences), 0)
         self.assertTrue(
-            all("name" in sequence and "description" in sequence for sequence in text_sequences)
+            all("name" in sequence and "latency_mode" in sequence for sequence in text_sequences)
         )
 
 
