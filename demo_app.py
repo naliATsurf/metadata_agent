@@ -1,6 +1,6 @@
-"""Streamlit launcher for the metadata generation demo."""
+"""Streamlit launcher for the metadata agent demo."""
 
-from demo.pages.metadata_generation import main
+from demo.app import main
 
 
 if __name__ == "__main__":

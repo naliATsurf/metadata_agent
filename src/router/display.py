@@ -26,7 +26,10 @@ from src.router.catalog import Catalog
 
 # How each confidence grade and resolution method reads in the overview.
 _CONF_STYLE = {"high": "green", "medium": "yellow", "low": "red", "none": "dim"}
-_METHOD_ABBR = {
+
+# How a resolution method is named to a reader. Public so other front ends label
+# a method the same way this one does.
+METHOD_LABELS = {
     "structured_dictionary": "dictionary",
     "lexical_prose": "prose",
     "prose_read": "prose·read",
@@ -57,7 +60,7 @@ def catalog_overview(catalog: Catalog) -> Table:
             meaning += f"  [dim]← {c.link_evidence}[/]"
         table.add_row(
             c.resource, c.name, c.value_label or "-",
-            _METHOD_ABBR.get(c.link_method, c.link_method), conf, meaning,
+            METHOD_LABELS.get(c.link_method, c.link_method), conf, meaning,
         )
     return table
 

@@ -347,8 +347,6 @@ def render_result(result: dict[str, Any]) -> None:
 
 def main() -> None:
     """Render the metadata generation Streamlit page."""
-    st.set_page_config(page_title="Metadata Generation", page_icon="MD", layout="wide")
-
     with st.container(border=True):
         data_control_col, standard_control_col = st.columns(2, gap="large")
         with data_control_col:

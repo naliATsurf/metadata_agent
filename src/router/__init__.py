@@ -20,6 +20,7 @@ from src.router.catalog import (
 )
 from src.router.compile import compile_field_plan
 from src.router.display import (
+    METHOD_LABELS,
     catalog_conflicts,
     catalog_overview,
     catalog_summary,
@@ -29,6 +30,7 @@ from src.router.route import FieldPlan, FieldRouting, route_fields
 from src.router.schema import FieldSpec, walk_schema
 
 __all__ = [
+    "METHOD_LABELS",
     "CachedProseReader",
     "Catalog",
     "DeterministicProseReader",

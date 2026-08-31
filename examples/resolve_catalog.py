@@ -130,7 +130,12 @@ def build_reader(args, console: Console) -> Tuple[ProseReader | None, str]:
     return None, "off"
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """The example's argument surface, built separately so a UI can render it.
+
+    Keeping the parser out of :func:`main` lets a front end enumerate the flags
+    (and their help text) to build a form, instead of duplicating them.
+    """
     ap = argparse.ArgumentParser(description="Resolve a bundle's columns and show the evidence.")
     ap.add_argument("--bundle", type=Path, default=DEFAULT_BUNDLE, help="bundle directory")
     ap.add_argument("--dictionary", action="append", default=["codebook.csv"],
@@ -147,15 +152,23 @@ def main() -> None:
     ap.add_argument("--debug", action="store_true",
                     help="with --llm-reader, log each prompt and raw model response (and "
                          "surface an error the reader would otherwise swallow)")
-    args = ap.parse_args()
+    return ap
 
+
+def run(args: argparse.Namespace, console: Console) -> Catalog:
+    """Resolve the bundle described by ``args`` and print the evidence to ``console``.
+
+    Everything is written through ``console``, so a caller can pass a
+    ``Console(record=True)`` and capture the whole run instead of printing it.
+    The resolved catalog is returned as well, for callers that would rather
+    render it themselves than read the printed table.
+    """
     if not args.bundle.exists() or not any(args.bundle.iterdir()):
         raise SystemExit(f"Bundle {args.bundle} is missing or empty.")
 
     tables, dicts, docs = discover(args.bundle, args.dictionary)
     if args.doc:
         docs = [d for d in docs if d.name in set(args.doc)]
-    console = Console()
     reader, reader_kind = build_reader(args, console)
     console.print(f"[bold]bundle:[/] {args.bundle}")
     console.print(f"tables: {[p.name for p in tables]}   "
@@ -165,6 +178,11 @@ def main() -> None:
 
     catalog = resolve(tables, dicts, docs, prose_reader=reader)
     render_catalog(catalog, console)
+    return catalog
+
+
+def main() -> None:
+    run(build_parser().parse_args(), Console())
 
 
 if __name__ == "__main__":

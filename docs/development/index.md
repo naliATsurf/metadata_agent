@@ -19,4 +19,5 @@ router_buckets
 22-07-2026_field-router-m2.change.log
 22-07-2026_field-router-m3.change.log
 04-08-2026_field-router-m4.change.log
+31-08-2026_demo-module-pages.change.log
 ```
