@@ -56,6 +56,7 @@ Example ``.env`` file::
     DEFAULT_TOPOLOGY=default
 """
 import os
+from dataclasses import dataclass
 from typing import Optional, Any
 from dotenv import load_dotenv
 
@@ -99,13 +100,123 @@ PROVIDER_CONFIGS = {
 # Can be overridden by environment variable: LLM_MODEL
 DEFAULT_MODEL = os.getenv("LLM_MODEL", None)  # None means use provider default
 
-# Default temperature for planning (lower = more deterministic)
-# Can be overridden by environment variable: LLM_TEMPERATURE_PLANNING
-PLANNING_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE_PLANNING", "0.0"))
 
-# Default temperature for players (higher = more creative)
-# Can be overridden by environment variable: LLM_TEMPERATURE_PLAYER  
-PLAYER_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE_PLAYER", "0.3"))
+# =============================================================================
+# PER-MODULE LLM SELECTION
+# =============================================================================
+#
+# The modules that call a model want different ones: planning wants a strong
+# reasoner, extraction can be cheaper, the catalog resolver's prose reader only
+# has to copy out definitions a document already states. Each therefore resolves
+# its own provider, model, and temperature, in this order:
+#
+#   1. an explicit argument (a --provider / --model / --temperature flag)
+#   2. the module's own environment variable, LLM_<FIELD>_<MODULE>
+#   3. the global LLM_PROVIDER / LLM_MODEL / the module's default temperature
+#
+# So an unconfigured module behaves exactly as it did before this existed, and
+# pointing one module at another model is one line in .env.
+
+#: Modules that select a model, and the temperature each wants by default.
+LLM_MODULES = {
+    "PLANNING": 0.0,           # orchestrator plan generation — deterministic
+    "PLAYER": 0.3,             # extraction players — a little latitude
+    "CATALOG_RESOLVER": 0.0,   # prose reader — copies stated definitions
+}
+
+
+@dataclass(frozen=True)
+class LLMSettings:
+    """The provider, model, and temperature one module should run with."""
+
+    provider: str
+    model: str
+    temperature: float
+
+    def describe(self) -> str:
+        """A short label naming the model, for output that records what ran."""
+        return f"{self.provider}:{self.model} @ T={self.temperature}"
+
+
+def _module_env(field: str, module: Optional[str]) -> Optional[str]:
+    """Read ``LLM_<FIELD>_<MODULE>``, or None when unset or module-less."""
+    if not module:
+        return None
+    return os.getenv(f"LLM_{field}_{module.upper().replace('-', '_')}")
+
+
+def llm_settings(
+    module: Optional[str] = None,
+    *,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    temperature: Optional[float] = None,
+) -> LLMSettings:
+    """Resolve which model ``module`` should use.
+
+    :param module: Module name, e.g. ``"PLANNING"``. Omit for the global default.
+    :param provider: Explicit provider, overriding any configuration.
+    :param model: Explicit model name, overriding any configuration.
+    :param temperature: Explicit temperature, overriding any configuration.
+    :returns: The resolved :class:`LLMSettings`.
+
+    A module that names a provider but no model gets *that provider's* default
+    model rather than the global ``LLM_MODEL``, which belongs to whichever
+    provider ``LLM_PROVIDER`` names.
+    """
+    resolved_provider = provider or _module_env("PROVIDER", module) or LLM_PROVIDER
+
+    resolved_model = model or _module_env("MODEL", module)
+    if not resolved_model:
+        # DEFAULT_MODEL is stated for the global provider; it does not transfer
+        # to a module that switched providers.
+        if resolved_provider == LLM_PROVIDER and DEFAULT_MODEL:
+            resolved_model = DEFAULT_MODEL
+        else:
+            resolved_model = PROVIDER_CONFIGS.get(resolved_provider, {}).get(
+                "default_model", "gpt-4o-mini"
+            )
+
+    if temperature is None:
+        from_env = _module_env("TEMPERATURE", module)
+        temperature = (
+            float(from_env)
+            if from_env is not None
+            else LLM_MODULES.get((module or "").upper(), 0.0)
+        )
+
+    return LLMSettings(
+        provider=resolved_provider, model=resolved_model, temperature=temperature
+    )
+
+
+def create_llm_for(module: Optional[str] = None, **overrides: Any) -> Any:
+    """Build the chat model ``module`` is configured to use.
+
+    :param module: Module name, as in :func:`llm_settings`.
+    :param overrides: ``provider`` / ``model`` / ``temperature`` overrides, plus
+        any additional keyword arguments for the model constructor.
+    :returns: LangChain chat model instance.
+    """
+    settings = llm_settings(
+        module,
+        provider=overrides.pop("provider", None),
+        model=overrides.pop("model", None),
+        temperature=overrides.pop("temperature", None),
+    )
+    return create_llm(
+        model_name=settings.model,
+        temperature=settings.temperature,
+        provider=settings.provider,
+        **overrides,
+    )
+
+
+# Temperatures the planner and the players run at, kept as names because they
+# are read directly in a few places. Both are LLM_MODULES entries, so they honour
+# LLM_TEMPERATURE_PLANNING / LLM_TEMPERATURE_PLAYER exactly as they always did.
+PLANNING_TEMPERATURE = llm_settings("PLANNING").temperature
+PLAYER_TEMPERATURE = llm_settings("PLAYER").temperature
 
 # Player tool execution.
 #   "investigate" — after the deterministic survey, let the model call the tools

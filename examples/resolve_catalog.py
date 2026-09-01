@@ -28,6 +28,11 @@ Usage:
     # add --debug to log every LLM prompt and raw response (and surface an error the
     # reader would otherwise swallow into a silent abstention)
     python examples/resolve_catalog.py --doc readme_hard.txt --llm-reader --debug
+
+    # the reader uses this module's own model (LLM_*_CATALOG_RESOLVER in .env,
+    # falling back to the global LLM_PROVIDER / LLM_MODEL), overridable per run
+    python examples/resolve_catalog.py --llm-reader --provider openai --model gpt-4o-mini
+    python examples/resolve_catalog.py --llm-reader --temperature 0.2
 """
 
 from __future__ import annotations
@@ -42,6 +47,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from rich.console import Console
 
+from src.config import PROVIDER_CONFIGS, llm_settings
 from src.context import create_context
 from src.router import (
     CachedProseReader,
@@ -53,6 +59,9 @@ from src.router import (
     resolve_bundle,
     resolve_catalog,
 )
+
+#: This example's module name for per-module LLM selection (see src/config.py).
+LLM_MODULE = "CATALOG_RESOLVER"
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_BUNDLE = REPO / "data/sample/sharetrait_preprocessed/TRADAT031"
@@ -112,19 +121,30 @@ def _logging_invoke(model, console: Console):
 def build_reader(args, console: Console) -> Tuple[ProseReader | None, str]:
     """Pick the prose reader from the flags. --llm-reader wins over --prose-reader.
 
-    The LLM reader is built from the repo's configured model (create_llm) and wrapped
-    in CachedProseReader so a document is read once across the bundle's tables. With
-    --debug the model's invoke is wrapped to log prompts and responses.
+    The LLM reader is built from the provider, model, and temperature on ``args``
+    (each defaulting to the repo's configuration) and wrapped in CachedProseReader
+    so a document is read once across the bundle's tables. With --debug the model's
+    invoke is wrapped to log prompts and responses.
+
+    The returned label names the model that read, so a run's output records what
+    produced it rather than leaving it to the environment.
     """
     if args.llm_reader:
-        from src.config import create_llm   # lazy: only pulls provider SDKs when used
-        model = create_llm(temperature=0.0)
+        from src.config import create_llm_for  # lazy: pulls provider SDKs when used
+        settings = llm_settings(
+            LLM_MODULE,
+            provider=args.provider,
+            model=args.model,
+            temperature=args.temperature,
+        )
+        model = create_llm_for(LLM_MODULE, **vars(settings))
         reader = (
             LLMProseReader(_logging_invoke(model, console))
             if args.debug
             else LLMProseReader.from_chat_model(model)
         )
-        return CachedProseReader(reader), "llm (debug)" if args.debug else "llm"
+        label = f"llm {settings.describe()}"
+        return CachedProseReader(reader), f"{label} (debug)" if args.debug else label
     if args.prose_reader:
         return DeterministicProseReader(), "deterministic"
     return None, "off"
@@ -152,6 +172,18 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--debug", action="store_true",
                     help="with --llm-reader, log each prompt and raw model response (and "
                          "surface an error the reader would otherwise swallow)")
+    # This module's configured model, as the flags' defaults — so --help and the
+    # UI show what a run would actually use, and an override is visibly an override.
+    configured = llm_settings(LLM_MODULE)
+    ap.add_argument("--provider", choices=list(PROVIDER_CONFIGS), default=configured.provider,
+                    help="provider backing --llm-reader (default: "
+                         "LLM_PROVIDER_CATALOG_RESOLVER, else LLM_PROVIDER)")
+    ap.add_argument("--model", default=configured.model,
+                    help="model backing --llm-reader (default: "
+                         "LLM_MODEL_CATALOG_RESOLVER, else LLM_MODEL)")
+    ap.add_argument("--temperature", type=float, default=configured.temperature,
+                    help="sampling temperature for --llm-reader (default: "
+                         "LLM_TEMPERATURE_CATALOG_RESOLVER)")
     return ap
 
 

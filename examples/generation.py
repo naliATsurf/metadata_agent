@@ -93,12 +93,7 @@ logger.info("=" * 60)
 # metadata standard. The selected topology controls which planning strategy is
 # used, while provider/model/temperature control the LLM call.
 log_step_section(3, "Generate plan")
-orchestrator = Orchestrator(
-    topology_name=topology_name,
-    model_name=agent_config.get_model_name(),
-    temperature=agent_config.PLANNING_TEMPERATURE,
-    provider=agent_config.LLM_PROVIDER,
-)
+orchestrator = Orchestrator(topology_name=topology_name)
 plan = orchestrator.generate_plan(
     context=context,
     metadata_standard=METADATA_STANDARDS["spatial_ecological"]

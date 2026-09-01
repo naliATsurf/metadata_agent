@@ -10,7 +10,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 
 from src.core import ExecutionResult, Plan
 
-from src.config import DEFAULT_TOPOLOGY, LLM_PROVIDER, PLANNING_TEMPERATURE, create_llm
+from src.config import DEFAULT_TOPOLOGY, create_llm, llm_settings
 from src.context import ContextType, ExecutionContext, create_context
 from src.context.context_classifier import classify_context_type
 from src.players import PLAYER_CONFIGS, Player, create_player_from_config
@@ -47,8 +47,10 @@ class Orchestrator:
         provider: Optional[str] = None,
     ):
         topology_name = topology_name or DEFAULT_TOPOLOGY
-        temperature = temperature if temperature is not None else PLANNING_TEMPERATURE
-        provider = provider or LLM_PROVIDER
+        # Unset arguments fall back to the PLANNING module's configuration.
+        settings = llm_settings(
+            "PLANNING", provider=provider, model=model_name, temperature=temperature
+        )
 
         if topology_name not in EXECUTION_TOPOLOGIES:
             available = list(EXECUTION_TOPOLOGIES.keys())
@@ -58,10 +60,13 @@ class Orchestrator:
 
         self.topology_name = topology_name
         self.topology = EXECUTION_TOPOLOGIES[topology_name]
-        self.provider = provider
+        self.provider = settings.provider
+        self.llm_settings = settings
 
         self.llm = create_llm(
-            model_name=model_name, temperature=temperature, provider=provider
+            model_name=settings.model,
+            temperature=settings.temperature,
+            provider=settings.provider,
         )
         self.parser = PydanticOutputParser(pydantic_object=Plan)
 

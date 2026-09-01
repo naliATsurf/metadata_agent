@@ -106,10 +106,68 @@ Two nav entries, deliberately:
 
 ## Changes in `src`
 
-One, and it is small: `_METHOD_ABBR` in `src/router/display.py` became public
-`METHOD_LABELS`, exported from `src.router`. The browser and the terminal now
-spell "dictionary" / "prose·read" from the same table instead of each keeping a
-copy.
+`_METHOD_ABBR` in `src/router/display.py` became public `METHOD_LABELS`,
+exported from `src.router`. The browser and the terminal now spell "dictionary"
+/ "prose·read" from the same table instead of each keeping a copy.
+
+## Per-module LLM selection
+
+Exposing the catalog resolver's model turned out to be a instance of a general
+gap: **every module shared one model**. `LLM_PROVIDER` and `LLM_MODEL` were
+global, and the only per-module setting in existence was a temperature
+(`LLM_TEMPERATURE_PLANNING`, `LLM_TEMPERATURE_PLAYER`). But the modules want
+different models — planning wants the strongest reasoner, the players make the
+bulk of the calls and can be cheaper, and the prose reader only copies out
+definitions a document already states.
+
+`src/config.py` gained `LLMSettings` and `llm_settings(module, ...)`, resolving
+three fields in a fixed order:
+
+1. an explicit argument — a `--provider` / `--model` / `--temperature` flag
+2. the module's own `LLM_<FIELD>_<MODULE>` variable
+3. the global `LLM_PROVIDER` / `LLM_MODEL`, or the module's default temperature
+
+`LLM_MODULES` names the three that select a model — `PLANNING`, `PLAYER`,
+`CATALOG_RESOLVER` — with the temperature each wants. The existing
+`LLM_TEMPERATURE_PLANNING` / `LLM_TEMPERATURE_PLAYER` are already instances of
+the `LLM_<FIELD>_<MODULE>` scheme, which is why that naming was chosen over a
+`<MODULE>_LLM_*` prefix: the convention was already in the file, and the two
+existing variables keep working untouched. `PLANNING_TEMPERATURE` and
+`PLAYER_TEMPERATURE` survive as names, now derived from `llm_settings`.
+
+One resolution rule is worth stating because getting it wrong is silent:
+**`LLM_MODEL` does not transfer across a provider switch.** It names a model
+belonging to whatever `LLM_PROVIDER` is, so a module that sets
+`LLM_PROVIDER_PLAYER=openai` without naming a model gets *OpenAI's* default,
+not the global `Qwen/...`. Sending a Qwen model name to OpenAI would fail at the
+API, far from the line that caused it.
+
+`Orchestrator` and `Player` now resolve through `llm_settings("PLANNING")` /
+`llm_settings("PLAYER")`, and each keeps its resolved `llm_settings` as an
+attribute. Their constructor arguments are unchanged and still win when passed.
+
+**Five call sites were re-passing the globals explicitly** — the demo workflow,
+the TUI, and the `generation` / `mlflow_trace` / `wandb_weave` examples all did
+`Orchestrator(model_name=get_model_name(), temperature=PLANNING_TEMPERATURE,
+provider=LLM_PROVIDER)`. That is identical to the default *today*, but as an
+explicit argument it takes precedence over module configuration, so it would
+have silently defeated `LLM_MODEL_PLANNING`. All five now pass only
+`topology_name`.
+
+`.env` gained a "Per-module LLM selection" section documenting the precedence,
+with each module's three variables — provider and model commented out (so the
+global applies), temperature set to the value it already had.
+
+The catalog resolver takes its flag *defaults* from `llm_settings`, so `--help`
+and the UI show the model a run would actually use, and an override reads as an
+override. Its run header names the model that read (`llm openai:gpt-4o @ T=0.2`)
+rather than a bare `llm`, since the model is no longer implied by the
+environment alone.
+
+In the UI, all three appeared **with no demo-side code**: `--provider` has
+`choices`, so it rendered as a selectbox of the three providers; `--model` as a
+text input; `--temperature` as a number input, `type=float` picking the widget.
+This is what deriving the form from the parser was for.
 
 ## Verified
 
@@ -123,6 +181,15 @@ copy.
   non-existent bundle surfaces as a clean error, not a traceback.
 - The module picker confirmed with two modules registered: both options list and
   switching swaps the body.
+- Per-module LLM selection: with nothing set, all three modules resolve to the
+  configured global (`surf` / `Qwen2.5-VL-32B`), unchanged from before. With
+  `LLM_PROVIDER_PLAYER=openai LLM_MODEL_PLAYER=gpt-4o` and
+  `LLM_PROVIDER_CATALOG_RESOLVER=google`, the player resolves to `openai:gpt-4o`,
+  the resolver to `google:gemini-2.5-flash` (that provider's default, *not* the
+  global Qwen), and planning stays on the global — three modules, three models.
+  Confirmed through the real constructors: an `Orchestrator` built under
+  `LLM_MODEL_PLANNING=gpt-4o` reports that model while a `Player` built in the
+  same process stays on the global.
 - All three routes serve 200 against a live server. `python -m unittest discover
   -s tests` → 218 pass.
 

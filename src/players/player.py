@@ -22,11 +22,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 from src.config import (
-    LLM_PROVIDER,
     PLAYER_MAX_TOOL_ITERATIONS,
-    PLAYER_TEMPERATURE,
     PLAYER_TOOL_EXECUTION_MODE,
     create_llm,
+    llm_settings,
 )
 from src.context.base_context import ExecutionContext
 from src.provenance import Caller, attributed_to
@@ -145,18 +144,20 @@ class Player:
             provider: LLM provider to use (default from config)
             role_key: Canonical player role key from PLAYER_CONFIGS
         """
-        # Use config defaults if not specified
-        temperature = temperature if temperature is not None else PLAYER_TEMPERATURE
-        provider = provider or LLM_PROVIDER
+        # Unset arguments fall back to the PLAYER module's configuration.
+        settings = llm_settings(
+            "PLAYER", provider=provider, model=model_name, temperature=temperature
+        )
+        self.llm_settings = settings
         
         self.name = name
         self.role_key = role_key or name
         self.role_prompt = role_prompt
         self.tools = tools or []
         self.llm = create_llm(
-            model_name=model_name,
-            temperature=temperature,
-            provider=provider
+            model_name=settings.model,
+            temperature=settings.temperature,
+            provider=settings.provider,
         )
         self._output_parser = StrOutputParser()
     

@@ -118,12 +118,7 @@ step_start = log_step_timing("Create context", step_start)
 # used, while provider/model/temperature control the LLM call.
 log_step_section(3, "Generate plan")
 
-orchestrator = TrackedOrchestrator(
-    topology_name=topology_name,
-    model_name=agent_config.get_model_name(),
-    temperature=agent_config.PLANNING_TEMPERATURE,
-    provider=agent_config.LLM_PROVIDER,
-)
+orchestrator = TrackedOrchestrator(topology_name=topology_name)
 plan = orchestrator.generate_plan(
     context=context,
     metadata_standard=METADATA_STANDARDS["spatial_ecological"]

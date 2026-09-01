@@ -471,12 +471,7 @@ class MetadataTUI(App):
 
         self.reference_session = ReferenceSessionState()
         try:
-            self.orchestrator = Orchestrator(
-                topology_name=DEFAULT_TOPOLOGY,
-                model_name=get_model_name(),
-                temperature=PLANNING_TEMPERATURE,
-                provider=LLM_PROVIDER,
-            )
+            self.orchestrator = Orchestrator(topology_name=DEFAULT_TOPOLOGY)
         except Exception:
             # Keep TUI usable even if backend initialization fails.
             self.orchestrator = None

@@ -11,9 +11,6 @@ import pandas as pd
 
 from src.config import (
     DEFAULT_TOPOLOGY,
-    LLM_PROVIDER,
-    PLANNING_TEMPERATURE,
-    get_model_name,
 )
 from src.context import create_context
 from src.orchestrator import Orchestrator
@@ -114,12 +111,9 @@ def generate_metadata(
         _publish_progress(progress_callback, "context_created", context.to_dict())
 
         _publish_progress(progress_callback, "initializing_orchestrator")
-        orchestrator = Orchestrator(
-            topology_name=topology_name,
-            model_name=get_model_name(),
-            temperature=PLANNING_TEMPERATURE,
-            provider=LLM_PROVIDER,
-        )
+        # Provider, model, and temperature come from the PLANNING module's
+        # configuration; re-passing the globals here would mask it.
+        orchestrator = Orchestrator(topology_name=topology_name)
 
         _publish_progress(progress_callback, "generating_plan")
         plan = orchestrator.generate_plan(
