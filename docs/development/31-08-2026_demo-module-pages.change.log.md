@@ -169,11 +169,28 @@ the recording console was also writing to the server's stdout (`file=StringIO()`
 
 ## Unrelated, found in passing
 
-- **`uv.lock` is corrupt at HEAD.** Around line 948 the `iniconfig` wheels array
-  is unterminated and an `importlib-metadata` block is spliced in without its
-  `[[package]]` header. This breaks `uv sync`, and with it `make demo`, `make ci`,
-  and the Docker build. `uv sync` **exits 0** while printing the parse error,
-  which is how it went unnoticed. Not fixed here — regenerating the lock is a
-  dependency decision. The demo was run from `.venv` directly.
-- `ruff check .` reports one pre-existing failure: unused `EvidenceRef` import in
-  `tests/test_searchable.py`. Auto-fixable, untouched.
+- **`uv.lock` was corrupt at HEAD, and is repaired.** Between the `iniconfig`
+  wheel entry and an `importlib-metadata` block, a merge had dropped three
+  lines: the `]` closing `iniconfig`'s `wheels` array, the blank line, and the
+  `[[package]]` header. TOML then read `name = "importlib-metadata"` as a member
+  of the open array and refused the file. This broke `uv sync`, and with it
+  `make demo`, `make ci`, and the Docker build — quietly, because **`uv sync`
+  prints the parse error and still exits 0**, so a caller checking the exit code
+  sees success.
+
+  Repaired in place rather than regenerated: re-locking would have been a
+  dependency decision, while restoring the three structural lines is a
+  three-line diff that changes no pinned version. Verified by parsing the file
+  with `tomllib` (192 packages) and by a clean `uv sync --no-default-groups
+  --group demo`. Note this pulls Streamlit back to the locked **1.57.0**; the
+  pages were re-verified against it, having been developed against 1.62.0.
+
+- **`make demo` works again**, and is the way to launch the demo. Two makefile
+  fixes alongside: `.PHONY` named a non-existent `install-demo` target (the real
+  one is `demo-install`) and omitted `tui`, `tracking-install`, and `ci-install`;
+  the help text now lists `demo-install` separately.
+
+- `make lint` still reports one pre-existing failure — unused `EvidenceRef`
+  import in `tests/test_searchable.py:13` — so `make ci` remains red on that
+  alone. `make compile` and `make test` (218 pass) are green. Auto-fixable,
+  untouched, because it is unrelated to this change.

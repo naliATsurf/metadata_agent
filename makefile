@@ -6,7 +6,7 @@ PYTHON-VERSION := 3.11
 PYTHON := $(VENV)/bin/python
 RUFF := $(VENV)/bin/ruff
 
-.PHONY: help uv-setup uv-clean activate docs-install docs docs-rebuild docs-update docs-clean install-demo demo docker-install-demo docker-run-demo docker-build docker-up docker-down docker-logs lint compile test ci
+.PHONY: help uv-setup uv-clean activate docs-install docs docs-rebuild docs-update docs-clean demo-install demo docker-install-demo docker-run-demo docker-build docker-up docker-down docker-logs lint compile test ci tui tracking-install ci-install
 
 help:
 	@printf '%s\n' \
@@ -19,7 +19,8 @@ help:
 		'  make docs-rebuild - rebuild all documentation from a fresh Sphinx environment' \
 		'  make docs-update - watch docs and incrementally rebuild on changes' \
 		'  make docs-clean - clean the generated documentation files' \
-		'  make demo       - install demo dependencies and launch Streamlit locally' \
+		'  make demo-install - install the dependencies under the demo group' \
+		'  make demo       - install demo dependencies and launch the Streamlit demo locally' \
 		'  make docker-install-demo - install locked demo dependencies for Docker' \
 		'  make docker-run-demo - launch Streamlit for Docker' \
 		'  make docker-build - build the Docker image' \
