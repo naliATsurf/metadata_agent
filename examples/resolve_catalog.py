@@ -41,7 +41,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -54,9 +54,11 @@ from src.router import (
     Catalog,
     DeterministicProseReader,
     LLMProseReader,
+    NONE,
     ProseReader,
-    looks_like_dictionary,
+    discover_bundle,
     render_catalog,
+    select,
     resolve_bundle,
     resolve_catalog,
 )
@@ -66,54 +68,6 @@ LLM_MODULE = "CATALOG_RESOLVER"
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_BUNDLE = REPO / "data/sample/sharetrait_preprocessed/TRADAT031"
-
-
-def discover(bundle: Path) -> Tuple[List[Path], List[Path], List[Path]]:
-    """Classify a bundle into data tables, codebooks, and documents — no filenames.
-
-    This is what production does: a document identifies itself by extension, and a
-    codebook by its shape (a column whose values are the bundle's column names), so a
-    bundle resolves with nothing declared about it. :func:`select` then narrows the
-    result when a caller wants to experiment with a subset.
-    """
-    csvs = sorted(bundle.glob("*.csv"))
-    docs = sorted([*bundle.glob("*.md"), *bundle.glob("*.txt")])
-    if not csvs:
-        raise SystemExit(f"No CSV found in {bundle}.")
-
-    contexts = {c: create_context(str(c), name=c.stem) for c in csvs}
-    vocabulary = [
-        name
-        for ctx in contexts.values()
-        for name in ctx.get_resource_info(ctx.resources[0]).field_names
-    ]
-    codebooks = [c for c in csvs if looks_like_dictionary(contexts[c], vocabulary)]
-    tables = [c for c in csvs if c not in codebooks]
-    if not tables:
-        raise SystemExit("No data table found; every CSV looks like a codebook.")
-    return tables, codebooks, docs
-
-
-#: Passed to --dictionary / --doc to use none of that source kind (see :func:`select`).
-NONE = "none"
-
-
-def select(discovered: List[Path], chosen: Optional[List[str]]) -> List[Path]:
-    """Narrow what auto-discovery found, for a caller that wants a specific subset.
-
-    Three states, so the UI can express every one of them and the equivalent command
-    line round-trips:
-
-    * ``None`` — the flag was not passed: use everything discovered (production).
-    * ``["none"]`` — use nothing of this kind.
-    * filenames — use exactly those.
-    """
-    if chosen is None:
-        return discovered
-    names = {c.strip() for c in chosen}
-    if NONE in {n.lower() for n in names}:
-        return []
-    return [p for p in discovered if p.name in names]
 
 
 def resolve(
@@ -247,7 +201,11 @@ def run(args: argparse.Namespace, console: Console) -> Catalog:
     if not args.bundle.exists() or not any(args.bundle.iterdir()):
         raise SystemExit(f"Bundle {args.bundle} is missing or empty.")
 
-    tables, codebooks, documents = discover(args.bundle)
+    try:
+        bundle = discover_bundle(args.bundle)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    tables, codebooks, documents = bundle.tables, bundle.codebooks, bundle.documents
     dicts = select(codebooks, args.dictionary)
     docs = select(documents, args.doc)
     reader, reader_kind = build_reader(args, console)

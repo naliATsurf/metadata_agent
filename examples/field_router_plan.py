@@ -31,6 +31,7 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple
 
@@ -39,39 +40,29 @@ import yaml
 # Make the repo importable when run directly (python examples/field_router_plan.py).
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from rich.console import Console
+
 from src.context import create_context
 from src.core.schemas import Plan
 from src.router import (
+    NONE,
     Catalog,
     DeterministicProseReader,
     FieldPlan,
     ProseReader,
     compile_field_plan,
+    discover_bundle,
     resolve_bundle,
     route_fields,
+    select,
 )
-from src.standards import get_schema_for_standard
+from src.standards import METADATA_STANDARDS, get_schema_for_standard
 
 REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / "data" / "sample_output"
 
 DEFAULT_BUNDLE = REPO / "data/sample/sharetrait_preprocessed/TRADAT031"
 DEFAULT_STANDARD = "sharetrait_basic"
-
-
-def discover(bundle: Path, dictionaries: List[str]) -> Tuple[List[Path], List[Path], List[Path]]:
-    """Partition a bundle into data tables, dictionary CSVs, and documents."""
-    csvs = sorted(bundle.glob("*.csv"))
-    docs = sorted([*bundle.glob("*.md"), *bundle.glob("*.txt")])
-    if not csvs:
-        raise SystemExit(f"No CSV found in {bundle}. Add the data table(s).")
-
-    dict_names = set(dictionaries or [])
-    tables = [c for c in csvs if c.name not in dict_names]
-    dicts = [c for c in csvs if c.name in dict_names]
-    if not tables:
-        raise SystemExit("Every CSV was marked --dictionary; at least one data table is needed.")
-    return tables, dicts, docs
 
 
 def build_plan(
@@ -106,75 +97,153 @@ def _yaml(obj) -> str:
     return yaml.safe_dump(json.loads(json.dumps(obj, default=str)), sort_keys=False, width=100)
 
 
-def print_catalog(catalog: Catalog) -> None:
-    print("\n=== 1. Resolved catalog (columns across all tables) ===")
-    print(f"{'table':<16}{'column':<24}{'method':<22}{'conf':<7}meaning")
+def print_catalog(catalog: Catalog, console: Console) -> None:
+    """The resolved columns across every table."""
+    console.print("\n[bold]1. Resolved catalog (columns across all tables)[/]")
+    console.print(f"{'table':<16}{'column':<24}{'method':<22}{'conf':<7}meaning", style="dim")
     for c in catalog.columns:
         meaning = c.description or "(unresolved)"
-        print(f"{c.resource:<16}{c.name:<24}{c.link_method:<22}{c.link_confidence:<7}{meaning}")
+        console.print(
+            f"{c.resource:<16}{c.name:<24}{c.link_method:<22}{c.link_confidence:<7}{meaning}"
+        )
         for msg in c.conflicts:
-            print(f"{'':<16}conflict: {msg}")
+            console.print(f"{'':<16}conflict: {msg}", style="yellow")
 
 
-def print_routing(field_plan: FieldPlan) -> None:
-    print("\n=== 2. Field routing (which table/column answers each field) ===")
-    print(f"{'field':<28}{'bucket':<22}{'assurance':<10}source")
+def print_routing(field_plan: FieldPlan, console: Console) -> None:
+    """Which table, column, or document span answers each schema field."""
+    console.print("\n[bold]2. Field routing (which table/column answers each field)[/]")
+    console.print(f"{'field':<28}{'bucket':<22}{'assurance':<10}source", style="dim")
     for path, r in field_plan.routings.items():
-        if r.candidates:
-            c = r.candidates[0]
-            src = f"{c.resource}:{c.locator}" if c.resource else str(c.locator)
-        else:
-            src = "—"
-        print(f"{path:<28}{r.bucket:<22}{r.assurance:<10}{src}")
+        console.print(f"{path:<28}{r.bucket:<22}{r.assurance:<10}{_source_of(r)}")
     cov = field_plan.coverage()
-    print(f"\ncoverage: {cov['routed']}/{cov['total']} routed, "
-          f"unresolved={cov['unresolved']}, by_bucket={cov['by_bucket']}")
+    console.print(
+        f"\n[bold]coverage:[/] {cov['routed']}/{cov['total']} routed, "
+        f"unresolved={cov['unresolved']}, by_bucket={cov['by_bucket']}"
+    )
 
 
-def print_plan(plan: Plan) -> None:
-    print("\n=== 3. Compiled plan (one extraction task per table) ===")
+def _source_of(routing) -> str:
+    """The routing's top candidate, rendered as ``resource:locator``."""
+    if not routing.candidates:
+        return "—"
+    c = routing.candidates[0]
+    return f"{c.resource}:{c.locator}" if c.resource else str(c.locator)
+
+
+def print_plan(plan: Plan, console: Console) -> None:
+    """The compiled plan: one extraction task per table."""
+    console.print("\n[bold]3. Compiled plan (one extraction task per table)[/]")
     for i, t in enumerate(plan.steps):
         scope = t.target_resources or ["<context>"]
-        print(f"[{i}] task={t.task:<26} player={t.player:<19} topology={t.topology or '-':<7} "
-              f"scope={scope} fields={len(t.fields)}")
+        console.print(
+            f"[{i}] task={t.task:<26} player={t.player:<19} "
+            f"topology={t.topology or '-':<7} scope={scope} fields={len(t.fields)}"
+        )
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Build a field-driven plan for a multi-table bundle.")
-    ap.add_argument("--bundle", type=Path, default=DEFAULT_BUNDLE, help="bundle directory")
-    ap.add_argument("--standard", default=DEFAULT_STANDARD, help="metadata standard name")
-    ap.add_argument("--dictionary", action="append", default=[],
-                    help="a codebook CSV to treat as a source, not a data table (repeatable)")
-    ap.add_argument("--prose-reader", action="store_true",
-                    help="enable the retrieve-then-read prose tier (localize + read a "
-                         "cued definition) above the glossary regex")
-    args = ap.parse_args()
+@dataclass(frozen=True)
+class RouterResult:
+    """Everything one run produced, for a caller that renders it itself."""
 
+    catalog: Catalog
+    field_plan: FieldPlan
+    plan: Plan
+    standard: str
+    written: List[Path]
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """The example's argument surface, built separately so a UI can render it."""
+    ap = argparse.ArgumentParser(
+        description="Build a field-driven plan for a multi-table bundle."
+    )
+    source = ap.add_argument_group(
+        "Input", "The bundle, the target standard, and which discovered sources to use."
+    )
+    tier = ap.add_argument_group(
+        "Prose tiers", "Which readers run above the codebook and the value prior."
+    )
+    output = ap.add_argument_group(
+        "Output", f"Artifacts written under {OUT.relative_to(REPO)}."
+    )
+
+    source.add_argument("--bundle", type=Path, default=DEFAULT_BUNDLE,
+                        help="bundle directory")
+    source.add_argument("--standard", default=DEFAULT_STANDARD,
+                        choices=sorted(METADATA_STANDARDS),
+                        help="metadata standard whose fields are routed")
+    source.add_argument("--dictionary", action="append", default=None,
+                        help="codebooks to use, by filename (repeatable). Omit to use every "
+                             f"codebook found in the bundle; pass '{NONE}' to use none")
+    source.add_argument("--doc", action="append", default=None,
+                        help="documents to use, by filename (repeatable). Omit to use every "
+                             f"document found in the bundle; pass '{NONE}' to use none")
+    tier.add_argument("--prose-reader", action="store_true",
+                      help="enable the retrieve-then-read prose tier (localize + read a "
+                           "cued definition) above the glossary regex")
+    output.add_argument("--no-write", action="store_true",
+                        help="do not write the field plan and compiled plan to disk; "
+                             "useful when trying inputs rather than producing artifacts")
+    return ap
+
+
+def run(args: argparse.Namespace, console: Console) -> RouterResult:
+    """Resolve, route, and compile, reporting through ``console``.
+
+    Returns what it built as well, so a caller can render the routing itself rather
+    than read the printed tables.
+    """
     if not args.bundle.exists() or not any(args.bundle.iterdir()):
         raise SystemExit(
             f"Bundle {args.bundle} is missing or empty. Put the data table(s) there "
             f"(plus any codebook / README), then rerun."
         )
+    try:
+        bundle = discover_bundle(args.bundle)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
-    tables, dicts, docs = discover(args.bundle, args.dictionary)
+    dicts = select(bundle.codebooks, args.dictionary)
+    docs = select(bundle.documents, args.doc)
     reader = DeterministicProseReader() if args.prose_reader else None
-    print(f"bundle:   {args.bundle}")
-    print(f"standard: {args.standard}")
-    print(f"tables:   {[p.name for p in tables]}")
-    print(f"sources:  dictionaries={[p.name for p in dicts] or 'none'}  docs={[p.name for p in docs] or 'none'}"
-          f"  prose-reader={'on' if reader else 'off'}")
 
-    catalog, field_plan, plan = build_plan(tables, dicts, docs, args.standard, prose_reader=reader)
-    print_catalog(catalog)
-    print_routing(field_plan)
-    print_plan(plan)
+    console.print(f"[bold]bundle:[/] {args.bundle}")
+    console.print(f"standard: {args.standard}")
+    console.print(f"tables:   {[p.name for p in bundle.tables]}")
+    console.print(
+        f"sources:  dictionaries={[p.name for p in dicts] or 'none'}  "
+        f"docs={[p.name for p in docs] or 'none'}  "
+        f"prose-reader={'on' if reader else 'off'}"
+    )
+    excluded = [
+        p.name for p in (*bundle.codebooks, *bundle.documents) if p not in (*dicts, *docs)
+    ]
+    if excluded:
+        console.print(f"[dim]discovered but not used: {excluded}[/]")
 
-    OUT.mkdir(parents=True, exist_ok=True)
-    fp_path = OUT / f"{args.standard}_field_plan.yaml"
-    plan_path = OUT / f"{args.standard}_compiled_plan.yaml"
-    fp_path.write_text(_yaml(field_plan.to_dict()))
-    plan_path.write_text(_yaml({"plan": plan.model_dump()}))
-    print(f"\nWrote {fp_path} and {plan_path}.")
+    catalog, field_plan, plan = build_plan(
+        bundle.tables, dicts, docs, args.standard, prose_reader=reader
+    )
+    print_catalog(catalog, console)
+    print_routing(field_plan, console)
+    print_plan(plan, console)
+
+    written: List[Path] = []
+    if not args.no_write:
+        OUT.mkdir(parents=True, exist_ok=True)
+        field_plan_path = OUT / f"{args.standard}_field_plan.yaml"
+        plan_path = OUT / f"{args.standard}_compiled_plan.yaml"
+        field_plan_path.write_text(_yaml(field_plan.to_dict()))
+        plan_path.write_text(_yaml({"plan": plan.model_dump()}))
+        written = [field_plan_path, plan_path]
+        console.print(f"\nWrote {field_plan_path} and {plan_path}.")
+
+    return RouterResult(catalog, field_plan, plan, args.standard, written)
+
+
+def main() -> None:
+    run(build_parser().parse_args(), Console())
 
 
 if __name__ == "__main__":

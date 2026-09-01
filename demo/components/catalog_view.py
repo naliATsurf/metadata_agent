@@ -39,8 +39,12 @@ def render_catalog_view(catalog: Catalog, *, key: str) -> None:
     if not matching:
         st.caption("No columns match the current filters.")
     else:
-        _render_table(matching, st.session_state.get(f"{key}.columns", list(OPTIONAL_COLUMNS)))
-    _render_conflicts(columns)
+        _render_table(
+            matching,
+            st.session_state.get(f"{key}.columns", list(OPTIONAL_COLUMNS)),
+            key,
+        )
+    _render_conflicts(columns, key)
 
 
 def _render_summary(columns: list[ResolvedColumn]) -> None:
@@ -66,6 +70,22 @@ def _render_summary(columns: list[ResolvedColumn]) -> None:
         st.progress(len(resolved) / len(columns))
 
 
+def _remembered(key: str, fallback: Any) -> Any:
+    """The last value this widget held, surviving a switch away from the page.
+
+    Streamlit drops widget state for anything a run did not render, so a page the
+    user navigates back to would otherwise arrive with its filters reset. The shadow
+    copy is a plain session-state entry, which is not garbage collected.
+    """
+    return st.session_state.get(f"{key}.kept", fallback)
+
+
+def _remember(key: str, value: Any) -> Any:
+    """Record a widget's value for :func:`_remembered`, and pass it through."""
+    st.session_state[f"{key}.kept"] = value
+    return value
+
+
 def _render_filters(
     columns: list[ResolvedColumn], *, key: str
 ) -> list[ResolvedColumn]:
@@ -76,7 +96,8 @@ def _render_filters(
     with st.container(border=True):
         search_col, resource_col, method_col = st.columns([2, 1.5, 1.5], gap="medium")
         query = search_col.text_input(
-            "Search", placeholder="column name or meaning", key=f"{key}.query"
+            "Search columns", placeholder="column name or meaning",
+            value=_remembered(f"{key}.query", ""), key=f"{key}.query",
         ).strip().lower()
         chosen_resources = resource_col.multiselect(
             "Tables", resources, default=[], key=f"{key}.resources",
@@ -97,7 +118,7 @@ def _render_filters(
         column_col.multiselect(
             "Columns shown",
             OPTIONAL_COLUMNS,
-            default=list(OPTIONAL_COLUMNS),
+            default=_remembered(f"{key}.columns", list(OPTIONAL_COLUMNS)),
             key=f"{key}.columns",
             help="Hide what you are not reading; the table fits the window instead "
                  "of scrolling sideways.",
@@ -116,6 +137,8 @@ def _render_filters(
                 return False
         return True
 
+    _remember(f"{key}.query", query)
+    _remember(f"{key}.columns", st.session_state.get(f"{key}.columns", list(OPTIONAL_COLUMNS)))
     return [column for column in columns if keeps(column)]
 
 
@@ -136,8 +159,14 @@ _HELP = {
 }
 
 
-def _render_table(columns: list[ResolvedColumn], visible: list[str]) -> None:
-    """Show the resolved columns as a sortable table."""
+def _render_table(columns: list[ResolvedColumn], visible: list[str], key: str) -> None:
+    """Show the resolved columns as a sortable table.
+
+    The explicit ``key`` matters: without one Streamlit identifies a dataframe by its
+    position in the render tree, so switching to another module reuses this element
+    for a differently shaped table and the frontend keeps the previous one's column
+    sizing and sort state.
+    """
     multi_table = len({c.resource for c in columns}) > 1
     rows = [
         _row(column, include_table=multi_table, visible=visible) for column in columns
@@ -160,6 +189,7 @@ def _render_table(columns: list[ResolvedColumn], visible: list[str]) -> None:
         hide_index=True,
         height=min(600, 40 + 35 * len(rows)),
         column_config=config,
+        key=f"{key}.table",
     )
 
 
@@ -186,7 +216,7 @@ def _row(
     return row
 
 
-def _render_conflicts(columns: list[ResolvedColumn]) -> None:
+def _render_conflicts(columns: list[ResolvedColumn], key: str) -> None:
     """Break out the columns where sources disagreed, agreed, or lost."""
     contested = [
         c for c in columns if c.conflicts or c.corroborated_by or c.alternatives
@@ -233,4 +263,5 @@ def _render_conflicts(columns: list[ResolvedColumn]) -> None:
                     ],
                     width="stretch",
                     hide_index=True,
+                    key=f"{key}.alt.{column.resource}.{column.name}",
                 )

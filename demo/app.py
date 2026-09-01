@@ -32,7 +32,9 @@ _PAGE_STYLE = """
       max-width: 100% !important;
       padding-left: 3rem !important;
       padding-right: 3rem !important;
-      padding-top: 2.5rem !important;
+      /* Top padding is deliberately NOT overridden. Streamlit's default clears the
+         fixed header bar; anything smaller slides the first element underneath it,
+         which reads as the top control being cut in half. */
   }
 </style>
 """

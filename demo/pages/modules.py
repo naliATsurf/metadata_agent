@@ -12,12 +12,13 @@ from typing import Callable
 
 import streamlit as st
 
-from demo.pages import catalog_resolver
+from demo.pages import catalog_resolver, field_router
 
 
 # Module label -> the function that renders it. Order is the order shown.
 MODULES: dict[str, Callable[[], None]] = {
     "Catalog resolver": catalog_resolver.main,
+    "Field router": field_router.main,
 }
 
 _SELECTION_KEY = "modules.selected"
@@ -43,7 +44,12 @@ def main() -> None:
             label_visibility="collapsed",
         ) or labels[0]
 
-    MODULES[selected]()
+    # A container keyed by module: Streamlit matches elements by position, so without
+    # a distinct subtree the next module's widgets inherit the previous one's frontend
+    # state — a table keeping the old column layout, most visibly.
+    slug = selected.lower().replace(" ", "_")
+    with st.container(key=f"module_{slug}"):
+        MODULES[selected]()
 
 
 if __name__ == "__main__":
