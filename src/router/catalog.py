@@ -96,6 +96,16 @@ def _match_key(name: Any) -> str:
     return str(name).strip()
 
 
+def _read_key(name: Any) -> str:
+    """A column name normalized for *cross-table* identity — trimmed and case-folded.
+
+    Two tables spelling one variable ``ID`` and ``id`` are asking about the same thing,
+    and a document defines it once. Used to dedupe the reader's work and to fan a single
+    read back out to every table that has the column.
+    """
+    return _match_key(name).lower()
+
+
 @dataclass(frozen=True)
 class ResolvedColumn:
     """One column after symbol linking: what it means, and on what evidence."""
@@ -108,6 +118,7 @@ class ResolvedColumn:
     link_method: str = "none"              # structured_dictionary | lexical_prose | value_prior | none
     link_confidence: str = "none"          # high | medium | low | none
     link_evidence: Optional[str] = None    # citation for the interpretation
+    link_quote: Optional[str] = None       # the cited text itself, when there is one
     value_label: Optional[str] = None      # coarse prior: coordinate | temporal | numeric | categorical
     conflicts: List[str] = field(default_factory=list)
     corroborated_by: List[str] = field(default_factory=list)  # citations of agreeing sources
@@ -128,6 +139,7 @@ class ResolvedColumn:
             "link_method": self.link_method,
             "link_confidence": self.link_confidence,
             "link_evidence": self.link_evidence,
+            "link_quote": self.link_quote,
             "value_label": self.value_label,
             "conflicts": self.conflicts,
             "corroborated_by": self.corroborated_by,
@@ -334,6 +346,7 @@ def _prose_candidates(name: str, docs: List[TextContext]) -> List[Dict[str, Any]
                 found.append({
                     "description": _trim_absorbed_definition(match.group(1).strip()).rstrip(".;,"),
                     "evidence": f"{resource}#{match.start()}",
+                    "quote": match.group(0).strip(),
                 })
     return found
 
@@ -659,8 +672,12 @@ def _grounding_grade(column: str, description: str, quote: str) -> str:
 
 def _ground_read(
     result: "ReadResult", column: str, resource: str, base_offset: int, text: str
-) -> Tuple[str, str, Optional[str]]:
-    """Verify a read against its own quote and grade it → (evidence, confidence, conflict).
+) -> Tuple[str, str, Optional[str], Optional[str]]:
+    """Verify a read against its own quote and grade it → (evidence, confidence, conflict, quote).
+
+    The quote returned is the text *as located in the document*, not as the model
+    reproduced it, so a caller can show the supporting sentence beside its citation
+    without re-reading the source.
 
     The LLM proposes the evidence (a verbatim sentence); locating it here *disposes* of
     it. A located quote yields a real span citation and a grounding grade; a quote that
@@ -670,10 +687,14 @@ def _ground_read(
     span = _locate(result.quote, text)
     if span is None:
         reason = "not found verbatim" if result.quote else "no supporting quote"
-        return f"{resource}#{base_offset}", "low", f"reader evidence unconfirmed ({reason})"
+        return (
+            f"{resource}#{base_offset}", "low",
+            f"reader evidence unconfirmed ({reason})", None,
+        )
     start, end = span
     evidence = f"{resource}#{base_offset + start}-{base_offset + end}"
-    return evidence, _grounding_grade(column, result.description, text[start:end]), None
+    quote = text[start:end]
+    return evidence, _grounding_grade(column, result.description, quote), None, quote
 
 
 # Chunks retrieved per column before reading — enough to survive a mis-ranked top
@@ -735,12 +756,12 @@ def _batch_prose_reads(
             result = reads_by_chunk.get(i, {}).get(name)
             if result:
                 chunk = chunks[i]
-                evidence, confidence, conflict = _ground_read(
+                evidence, confidence, conflict, quote = _ground_read(
                     result, name, chunk.resource, chunk.start_offset, chunk.text
                 )
                 candidate = {
                     "description": result.description, "units": result.units,
-                    "confidence": confidence, "evidence": evidence,
+                    "confidence": confidence, "evidence": evidence, "quote": quote,
                 }
                 if conflict:
                     candidate["conflict"] = conflict
@@ -850,11 +871,22 @@ class _TableResolution:
 
 
 def _resolve_table_deterministic(
-    target: TabularContext, resource: str, sources: List[ExecutionContext]
+    target: TabularContext,
+    resource: str,
+    sources: List[ExecutionContext],
+    vocabulary: Optional[List[str]] = None,
 ) -> _TableResolution:
     """Resolve one table with the deterministic tiers only (dictionary, prose regex,
     value prior) — no reader. The reader pass is applied afterwards, and only to the
-    columns this leaves unresolved (:func:`_read_residuals`)."""
+    columns this leaves unresolved (:func:`_read_residuals`).
+
+    ``vocabulary`` is the set of column names a tabular source is judged against when
+    deciding whether it is a data dictionary. It defaults to this table's own columns;
+    :func:`resolve_bundle` passes the whole bundle's columns instead, so **one codebook
+    describing every table is recognised at each of them**. Without that, a bundle-wide
+    codebook is mostly *other* tables' names from any single table's point of view and
+    falls under the key-column precision floor.
+    """
     resource = resource or target.resources[0]
     info = target.get_resource_info(resource)
     frame = target.read_resource(resource, limit=_PROFILE_SAMPLE)
@@ -863,7 +895,7 @@ def _resolve_table_deterministic(
         d
         for src in sources
         if isinstance(src, TabularContext)
-        for d in [_as_dictionary(src, info.field_names)]
+        for d in [_as_dictionary(src, vocabulary or info.field_names)]
         if d is not None
     ]
     docs = [src for src in sources if isinstance(src, TextContext)]
@@ -907,10 +939,12 @@ def _whole_doc_reads(
             text = doc.read_text(resource)
             results = reader.read_many(columns=residual, chunk=text)
             for name, result in results.items():
-                evidence, confidence, conflict = _ground_read(result, name, resource, 0, text)
+                evidence, confidence, conflict, quote = _ground_read(
+                    result, name, resource, 0, text
+                )
                 candidate = {
                     "description": result.description, "units": result.units,
-                    "confidence": confidence, "evidence": evidence,
+                    "confidence": confidence, "evidence": evidence, "quote": quote,
                 }
                 if conflict:
                     candidate["conflict"] = conflict
@@ -961,9 +995,14 @@ def _read_residuals(
     seen: set = set()
     for t in tables:
         for col in t.columns:
-            if col.link_method == "none" and col.name not in seen:
-                seen.add(col.name)
-                residual.append((col.name, t.dtypes[col.name]))
+            # Dedupe on the *normalized* name. The same variable is spelled
+            # differently from table to table ('nitrate' / 'Nitrate ' / 'ID' / 'id'),
+            # and a document defines it once — so reading each spelling separately
+            # both wastes calls and leaves the odd spelling unresolved.
+            key = _read_key(col.name)
+            if col.link_method == "none" and key not in seen:
+                seen.add(key)
+                residual.append((_match_key(col.name), t.dtypes[col.name]))
     if not residual:
         return
     reads = (
@@ -973,13 +1012,28 @@ def _read_residuals(
     )
     if not reads:
         return
+    # Fold back on the same normalized key, so a read reaches every spelling.
+    by_key: Dict[str, List[Dict[str, Any]]] = {}
+    for name, candidates in reads.items():
+        by_key.setdefault(_read_key(name), []).extend(candidates)
     for t in tables:
         for i, col in enumerate(t.columns):
-            if col.link_method == "none" and col.name in reads:
+            candidates = by_key.get(_read_key(col.name))
+            if col.link_method == "none" and candidates:
                 t.columns[i] = _resolve_column(
                     col.name, t.dtypes[col.name], t.resource,
-                    t.profiles[col.name], [], [], reads[col.name],
+                    t.profiles[col.name], [], [], candidates,
                 )
+
+
+def looks_like_dictionary(source: TabularContext, columns: List[str]) -> bool:
+    """True when ``source`` is recognisable as a data dictionary for ``columns``.
+
+    The resolver already detects a dictionary structurally — a column whose values
+    *are* the data's column names. This exposes that test so a caller partitioning a
+    bundle can ask rather than depend on a filename convention.
+    """
+    return _as_dictionary(source, columns) is not None
 
 
 def resolve_catalog(
@@ -1026,7 +1080,14 @@ def resolve_bundle(
     lookups that need to disambiguate use :meth:`Catalog.find` with the resource.
     """
     sources = sources or []
-    tables = [_resolve_table_deterministic(t, "", sources) for t in targets]
+    # A codebook for the bundle is judged against the bundle's columns, not each
+    # table's — see _resolve_table_deterministic.
+    vocabulary = [
+        name
+        for t in targets
+        for name in t.get_resource_info(t.resources[0]).field_names
+    ]
+    tables = [_resolve_table_deterministic(t, "", sources, vocabulary) for t in targets]
     if prose_reader is not None and tables:
         docs = [src for src in sources if isinstance(src, TextContext)]
         _read_residuals(tables, docs, prose_reader)   # one hoisted, residual-only pass
@@ -1055,6 +1116,7 @@ class _Candidate:
     method: str
     confidence: str          # the tier's base confidence
     evidence: str
+    quote: Optional[str] = None   # the cited text, for candidates that quote a document
 
     def summary(self) -> str:
         return f"{self.method} '{self.description or self.units or '?'}'"
@@ -1063,8 +1125,25 @@ class _Candidate:
         return {
             "description": self.description, "units": self.units,
             "method": self.method, "confidence": self.confidence,
-            "evidence": self.evidence,
+            "evidence": self.evidence, "quote": self.quote,
         }
+
+
+def _dictionary_quote(entry: Dict[str, Optional[str]]) -> str:
+    """Render a codebook row as the text it states.
+
+    A dictionary citation addresses a row; this is what that row says, so the row can
+    be shown beside its citation exactly as a prose quote is. It also surfaces the
+    ``notes`` column, which is otherwise parsed and never seen.
+    """
+    quote = str(entry["key"])
+    if entry["description"]:
+        quote += f" — {entry['description']}"
+    if entry["units"]:
+        quote += f" [{entry['units']}]"
+    if entry["notes"]:
+        quote += f" ({entry['notes']})"
+    return quote
 
 
 def _norm(text: Optional[str]) -> str:
@@ -1086,12 +1165,13 @@ def _resolve_column(name, dtype, resource, profile, dictionaries, docs, prose_re
         if entry and (entry["description"] or entry["units"]):
             candidates.append(_Candidate(
                 entry["description"], entry["units"], "structured_dictionary",
-                "high", f"{d.resource} row '{entry['key']}'",
+                "high", f"{d.resource} row '{entry['key']}'", _dictionary_quote(entry),
             ))
 
     for pc in _prose_candidates(name, docs):
         candidates.append(_Candidate(
             pc["description"], None, "lexical_prose", "medium", pc["evidence"],
+            pc.get("quote"),
         ))
 
     # The retrieve-then-read tier. Precomputed and passed in (empty unless a reader
@@ -1101,7 +1181,8 @@ def _resolve_column(name, dtype, resource, profile, dictionaries, docs, prose_re
     # differing read surfaces as a tier-2 conflict rather than silently overriding.
     for rc in prose_reads:
         candidates.append(_Candidate(
-            rc["description"], rc["units"], "prose_read", rc["confidence"], rc["evidence"],
+            rc["description"], rc["units"], "prose_read", rc["confidence"],
+            rc["evidence"], rc.get("quote"),
         ))
 
     if label in _SELF_EVIDENT:
@@ -1175,6 +1256,6 @@ def _decide(name, dtype, resource, label, profile, candidates, ground_conflicts=
         resource=resource, name=name, dtype=dtype,
         description=chosen.description, units=chosen.units,
         link_method=chosen.method, link_confidence=confidence,
-        link_evidence=chosen.evidence, value_label=label,
+        link_evidence=chosen.evidence, link_quote=chosen.quote, value_label=label,
         conflicts=conflicts, corroborated_by=corroborated_by, alternatives=alternatives,
     )

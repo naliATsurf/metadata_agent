@@ -41,7 +41,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -55,6 +55,7 @@ from src.router import (
     DeterministicProseReader,
     LLMProseReader,
     ProseReader,
+    looks_like_dictionary,
     render_catalog,
     resolve_bundle,
     resolve_catalog,
@@ -67,18 +68,52 @@ REPO = Path(__file__).resolve().parents[1]
 DEFAULT_BUNDLE = REPO / "data/sample/sharetrait_preprocessed/TRADAT031"
 
 
-def discover(bundle: Path, dictionaries: List[str]) -> Tuple[List[Path], List[Path], List[Path]]:
-    """Partition a bundle into data tables, dictionary CSVs, and documents."""
+def discover(bundle: Path) -> Tuple[List[Path], List[Path], List[Path]]:
+    """Classify a bundle into data tables, codebooks, and documents — no filenames.
+
+    This is what production does: a document identifies itself by extension, and a
+    codebook by its shape (a column whose values are the bundle's column names), so a
+    bundle resolves with nothing declared about it. :func:`select` then narrows the
+    result when a caller wants to experiment with a subset.
+    """
     csvs = sorted(bundle.glob("*.csv"))
     docs = sorted([*bundle.glob("*.md"), *bundle.glob("*.txt")])
     if not csvs:
         raise SystemExit(f"No CSV found in {bundle}.")
-    dict_names = set(dictionaries or [])
-    tables = [c for c in csvs if c.name not in dict_names]
-    dicts = [c for c in csvs if c.name in dict_names]
+
+    contexts = {c: create_context(str(c), name=c.stem) for c in csvs}
+    vocabulary = [
+        name
+        for ctx in contexts.values()
+        for name in ctx.get_resource_info(ctx.resources[0]).field_names
+    ]
+    codebooks = [c for c in csvs if looks_like_dictionary(contexts[c], vocabulary)]
+    tables = [c for c in csvs if c not in codebooks]
     if not tables:
-        raise SystemExit("Every CSV was marked --dictionary; at least one data table is needed.")
-    return tables, dicts, docs
+        raise SystemExit("No data table found; every CSV looks like a codebook.")
+    return tables, codebooks, docs
+
+
+#: Passed to --dictionary / --doc to use none of that source kind (see :func:`select`).
+NONE = "none"
+
+
+def select(discovered: List[Path], chosen: Optional[List[str]]) -> List[Path]:
+    """Narrow what auto-discovery found, for a caller that wants a specific subset.
+
+    Three states, so the UI can express every one of them and the equivalent command
+    line round-trips:
+
+    * ``None`` — the flag was not passed: use everything discovered (production).
+    * ``["none"]`` — use nothing of this kind.
+    * filenames — use exactly those.
+    """
+    if chosen is None:
+        return discovered
+    names = {c.strip() for c in chosen}
+    if NONE in {n.lower() for n in names}:
+        return []
+    return [p for p in discovered if p.name in names]
 
 
 def resolve(
@@ -157,31 +192,45 @@ def build_parser() -> argparse.ArgumentParser:
     (and their help text) to build a form, instead of duplicating them.
     """
     ap = argparse.ArgumentParser(description="Resolve a bundle's columns and show the evidence.")
-    ap.add_argument("--bundle", type=Path, default=DEFAULT_BUNDLE, help="bundle directory")
-    ap.add_argument("--dictionary", action="append", default=["codebook.csv"],
-                    help="a codebook CSV to treat as a source, not a data table (repeatable)")
-    ap.add_argument("--prose-reader", action="store_true",
+
+    # Groups are part of the argument surface: --help prints them, and a UI built from
+    # this parser lays its form out by them.
+    source = ap.add_argument_group(
+        "Input", "The bundle, and which of its discovered sources to resolve from."
+    )
+    tier = ap.add_argument_group(
+        "Prose tiers", "Which readers run above the codebook and the value prior."
+    )
+    model = ap.add_argument_group(
+        "Model", "Backing the LLM prose reader; each defaults to this module's configuration."
+    )
+
+    source.add_argument("--bundle", type=Path, default=DEFAULT_BUNDLE, help="bundle directory")
+    source.add_argument("--dictionary", action="append", default=None,
+                    help="codebooks to use, by filename (repeatable). Omit to use every "
+                         f"codebook found in the bundle; pass '{NONE}' to use none")
+    tier.add_argument("--prose-reader", action="store_true",
                     help="enable the deterministic retrieve-then-read prose tier (reads a "
                          "cued definition) above the glossary regex")
-    ap.add_argument("--llm-reader", action="store_true",
+    tier.add_argument("--llm-reader", action="store_true",
                     help="enable the LLM prose reader (reads free narrative) using the "
                          "configured model; wins over --prose-reader")
-    ap.add_argument("--doc", action="append", default=[],
-                    help="restrict documents to these filenames (repeatable), e.g. to use "
-                         "only a narrative readme")
-    ap.add_argument("--debug", action="store_true",
+    source.add_argument("--doc", action="append", default=None,
+                    help="documents to use, by filename (repeatable). Omit to use every "
+                         f"document found in the bundle; pass '{NONE}' to use none")
+    tier.add_argument("--debug", action="store_true",
                     help="with --llm-reader, log each prompt and raw model response (and "
                          "surface an error the reader would otherwise swallow)")
     # This module's configured model, as the flags' defaults — so --help and the
     # UI show what a run would actually use, and an override is visibly an override.
     configured = llm_settings(LLM_MODULE)
-    ap.add_argument("--provider", choices=list(PROVIDER_CONFIGS), default=configured.provider,
+    model.add_argument("--provider", choices=list(PROVIDER_CONFIGS), default=configured.provider,
                     help="provider backing --llm-reader (default: "
                          "LLM_PROVIDER_CATALOG_RESOLVER, else LLM_PROVIDER)")
-    ap.add_argument("--model", default=configured.model,
+    model.add_argument("--model", default=configured.model,
                     help="model backing --llm-reader (default: "
                          "LLM_MODEL_CATALOG_RESOLVER, else LLM_MODEL)")
-    ap.add_argument("--temperature", type=float, default=configured.temperature,
+    model.add_argument("--temperature", type=float, default=configured.temperature,
                     help="sampling temperature for --llm-reader (default: "
                          "LLM_TEMPERATURE_CATALOG_RESOLVER)")
     return ap
@@ -198,15 +247,19 @@ def run(args: argparse.Namespace, console: Console) -> Catalog:
     if not args.bundle.exists() or not any(args.bundle.iterdir()):
         raise SystemExit(f"Bundle {args.bundle} is missing or empty.")
 
-    tables, dicts, docs = discover(args.bundle, args.dictionary)
-    if args.doc:
-        docs = [d for d in docs if d.name in set(args.doc)]
+    tables, codebooks, documents = discover(args.bundle)
+    dicts = select(codebooks, args.dictionary)
+    docs = select(documents, args.doc)
     reader, reader_kind = build_reader(args, console)
     console.print(f"[bold]bundle:[/] {args.bundle}")
     console.print(f"tables: {[p.name for p in tables]}   "
                   f"dictionaries: {[p.name for p in dicts] or 'none'}   "
                   f"docs: {[p.name for p in docs] or 'none'}   "
-                  f"reader: {reader_kind}\n")
+                  f"reader: {reader_kind}")
+    excluded = [p.name for p in (*codebooks, *documents) if p not in (*dicts, *docs)]
+    if excluded:
+        console.print(f"[dim]discovered but not used: {excluded}[/]")
+    console.print("")
 
     catalog = resolve(tables, dicts, docs, prose_reader=reader)
     render_catalog(catalog, console)

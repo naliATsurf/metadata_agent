@@ -7,13 +7,48 @@ setup.
 
 import streamlit as st
 
-st.set_page_config(page_title="Metadata Agent", page_icon="MD", layout="wide")
+from demo.pages import metadata_generation, modules
 
-from demo.pages import metadata_generation, modules  # noqa: E402
+
+# Wide mode still caps the content column, and these pages are tables and forms that
+# read better across the full window. Several selectors, because the container's test
+# id and class have both been renamed across Streamlit versions and a rule that misses
+# is silent.
+_PAGE_STYLE = """
+<style>
+  /* Multiselect chips list what is currently selected — they are not a call to
+     action and should not carry the accent colour. Streamlit's own theme variables
+     keep this correct in both light and dark mode. */
+  [data-testid="stMultiSelect"] [data-baseweb="tag"] {
+      background-color: var(--secondary-background-color, #e9ecef) !important;
+      color: var(--text-color, inherit) !important;
+  }
+  [data-testid="stMultiSelect"] [data-baseweb="tag"] svg { fill: currentColor !important; }
+
+  [data-testid="stMainBlockContainer"],
+  [data-testid="stAppViewBlockContainer"],
+  section.main > div.block-container,
+  .block-container {
+      max-width: 100% !important;
+      padding-left: 3rem !important;
+      padding-right: 3rem !important;
+      padding-top: 2.5rem !important;
+  }
+</style>
+"""
 
 
 def main() -> None:
-    """Build the navigation and run the selected page."""
+    """Configure the app, then build the navigation and run the selected page.
+
+    Everything here runs on *every* script run, deliberately. Streamlit re-executes
+    the entry script on each interaction but keeps imported modules cached, so
+    configuration placed at module level would apply once to the first session in the
+    process and silently not at all to any later one.
+    """
+    st.set_page_config(page_title="Metadata Agent", page_icon="MD", layout="wide")
+    st.html(_PAGE_STYLE)
+
     navigation = st.navigation(
         [
             st.Page(

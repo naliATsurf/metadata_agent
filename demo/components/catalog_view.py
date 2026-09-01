@@ -35,11 +35,11 @@ def render_catalog_view(catalog: Catalog, *, key: str) -> None:
         return
 
     _render_summary(columns)
-    visible = _render_filters(columns, key=key)
-    if not visible:
+    matching = _render_filters(columns, key=key)
+    if not matching:
         st.caption("No columns match the current filters.")
     else:
-        _render_table(visible)
+        _render_table(matching, st.session_state.get(f"{key}.columns", list(OPTIONAL_COLUMNS)))
     _render_conflicts(columns)
 
 
@@ -90,8 +90,17 @@ def _render_filters(
             key=f"{key}.methods",
             placeholder="all methods",
         )
-        unresolved_only = st.checkbox(
+        control_col, column_col = st.columns([1, 3], gap="medium")
+        unresolved_only = control_col.checkbox(
             "Unresolved only", value=False, key=f"{key}.unresolved"
+        )
+        column_col.multiselect(
+            "Columns shown",
+            OPTIONAL_COLUMNS,
+            default=list(OPTIONAL_COLUMNS),
+            key=f"{key}.columns",
+            help="Hide what you are not reading; the table fits the window instead "
+                 "of scrolling sideways.",
         )
 
     def keeps(column: ResolvedColumn) -> bool:
@@ -110,28 +119,40 @@ def _render_filters(
     return [column for column in columns if keeps(column)]
 
 
-def _render_table(columns: list[ResolvedColumn]) -> None:
+# Always shown: the column and what it was resolved to. The rest are optional, so a
+# narrow window can be given to the ones being read rather than clipping the last.
+OPTIONAL_COLUMNS = ("Source text", "Units", "Prior", "Method", "Confidence", "Citation")
+
+# Only the two prose-bearing columns get a fixed width. The rest size to their content,
+# so the grid fits the container instead of overflowing a fixed total and scrolling.
+_WIDTHS = {"Meaning": "medium", "Source text": "large"}
+
+_HELP = {
+    "Prior": "Coarse prior read from the column's own values.",
+    "Method": "How the meaning was resolved.",
+    "Citation": "Where the meaning was taken from.",
+    "Source text": "What that source actually says — the codebook row, or the "
+                   "sentence located in the document.",
+}
+
+
+def _render_table(columns: list[ResolvedColumn], visible: list[str]) -> None:
     """Show the resolved columns as a sortable table."""
     multi_table = len({c.resource for c in columns}) > 1
-    rows = [_row(column, include_table=multi_table) for column in columns]
+    rows = [
+        _row(column, include_table=multi_table, visible=visible) for column in columns
+    ]
+    if not rows:
+        return
 
-    config: dict[str, Any] = {
-        "Column": st.column_config.TextColumn(width="small", pinned=multi_table),
-        "Meaning": st.column_config.TextColumn(width="large"),
-        "Units": st.column_config.TextColumn(width="small"),
-        "Prior": st.column_config.TextColumn(
-            width="small", help="Coarse prior read from the column's own values."
-        ),
-        "Method": st.column_config.TextColumn(
-            width="small", help="How the meaning was resolved."
-        ),
-        "Confidence": st.column_config.TextColumn(width="small"),
-        "Citation": st.column_config.TextColumn(
-            width="medium", help="The source the meaning was taken from."
-        ),
-    }
-    if multi_table:
-        config["Table"] = st.column_config.TextColumn(width="small")
+    config: dict[str, Any] = {}
+    for name in rows[0]:
+        config[name] = st.column_config.TextColumn(
+            width=_WIDTHS.get(name),
+            help=_HELP.get(name),
+            # Keep the identifying columns in view while the rest scroll.
+            pinned=name in ("Table", "Column"),
+        )
 
     st.dataframe(
         rows,
@@ -142,18 +163,26 @@ def _render_table(columns: list[ResolvedColumn]) -> None:
     )
 
 
-def _row(column: ResolvedColumn, *, include_table: bool) -> dict[str, Any]:
-    """Flatten one resolved column into a table row."""
+def _row(
+    column: ResolvedColumn, *, include_table: bool, visible: list[str]
+) -> dict[str, Any]:
+    """Flatten one resolved column into a table row, keeping only wanted columns."""
+    available = {
+        "Source text": column.link_quote or "",
+        "Units": column.units or "",
+        "Prior": column.value_label or "",
+        "Method": METHOD_LABELS.get(column.link_method, column.link_method),
+        "Confidence": _CONFIDENCE_MARK.get(column.link_confidence, ""),
+        "Citation": column.link_evidence or "",
+    }
     row: dict[str, Any] = {}
     if include_table:
         row["Table"] = column.resource
     row["Column"] = column.name
     row["Meaning"] = column.description or _UNRESOLVED
-    row["Units"] = column.units or ""
-    row["Prior"] = column.value_label or ""
-    row["Method"] = METHOD_LABELS.get(column.link_method, column.link_method)
-    row["Confidence"] = _CONFIDENCE_MARK.get(column.link_confidence, "")
-    row["Citation"] = column.link_evidence or ""
+    for name in OPTIONAL_COLUMNS:
+        if name in visible:
+            row[name] = available[name]
     return row
 
 
@@ -167,16 +196,24 @@ def _render_conflicts(columns: list[ResolvedColumn]) -> None:
 
     st.subheader("Conflicts, corroboration, and alternatives")
     st.caption(
-        "Columns where more than one source had something to say. A conflict is "
-        "a claim the column's own values contradict."
+        "Columns where more than one source had something to say. A conflict is a "
+        "claim the column's own values contradict — the resolver catching it is the "
+        "system working, not an error."
     )
     for column in contested:
         label = f"{column.resource}.{column.name} — {column.description or 'unresolved'}"
         with st.expander(label, expanded=bool(column.conflicts)):
+            if column.link_quote:
+                st.caption(f"Cited from {column.link_evidence}")
+                st.markdown(f"> {column.link_quote}")
+            # Deliberately not st.error/st.success. A conflict is a finding — the
+            # value profile caught a claim the data refutes — not a failure, and
+            # alarm colouring pulls attention to the part that worked. Red is kept
+            # for a run that actually broke.
             for message in column.conflicts:
-                st.error(message, icon="⚠️")
+                st.markdown(f"**Conflict** — {message}")
             for citation in column.corroborated_by:
-                st.success(f"Corroborated by {citation}", icon="✅")
+                st.markdown(f"**Corroborated by** {citation}")
             if column.alternatives:
                 st.caption("Candidates that lost")
                 st.dataframe(
@@ -190,6 +227,7 @@ def _render_conflicts(columns: list[ResolvedColumn]) -> None:
                             or alternative.get("units")
                             or "",
                             "Citation": alternative.get("evidence") or "",
+                            "Source text": alternative.get("quote") or "",
                         }
                         for alternative in column.alternatives
                     ],

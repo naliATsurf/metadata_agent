@@ -14,12 +14,15 @@ from pathlib import Path
 
 import streamlit as st
 
+from demo.components.bundle_tree import render_bundle_tree
 from demo.components.catalog_view import render_catalog_view
 from demo.components.example_runner import run_example
 from examples import resolve_catalog
+from examples.resolve_catalog import NONE, discover
 
 
 REPO = Path(__file__).resolve().parents[2]
+DEFAULT_BUNDLE = REPO / 'data/sample/sharetrait_preprocessed/TRADAT031'
 
 # Where to look for bundles to offer in the picker.
 BUNDLE_ROOTS = (
@@ -77,8 +80,71 @@ def bundle_picker(action: argparse.Action, key: str) -> Path:
     return REPO / choice
 
 
+def _render_tree() -> None:
+    """Show the selected bundle's classified contents in the sidebar.
+
+    Read from session state rather than the form, because the sidebar is drawn
+    before the form runs; on the first load nothing is set yet and the parser's
+    own default applies.
+    """
+    bundle = Path(_selected_bundle("catalog_resolver"))
+    try:
+        tables, codebooks, documents = discover(bundle)
+    except SystemExit as exc:
+        st.sidebar.warning(str(exc))
+        return
+    render_bundle_tree(bundle, tables, codebooks, documents)
+
+
+@st.cache_data(show_spinner=False)
+def _sources(bundle: str) -> tuple[list[str], list[str]]:
+    """The codebooks and documents auto-discovery finds in ``bundle``.
+
+    Cached because the page re-runs on every widget change and classification reads
+    each CSV's header.
+    """
+    try:
+        _, codebooks, documents = discover(Path(bundle))
+    except SystemExit:
+        return [], []
+    return [p.name for p in codebooks], [p.name for p in documents]
+
+
+def _selected_bundle(key: str) -> str:
+    """The bundle the form currently has, so the source pickers can look inside it."""
+    chosen = st.session_state.get(f"{key}.bundle")
+    if chosen == CUSTOM_PATH:
+        chosen = st.session_state.get(f"{key}.bundle.custom") or None
+    return str(REPO / chosen) if chosen else str(DEFAULT_BUNDLE)
+
+
+def source_picker(kind: int):
+    """Build an override that ticks off the discovered sources of one kind.
+
+    Production resolves whatever the bundle contains; this page exists to try
+    subsets, so it shows what was found and lets each be turned off. Everything is
+    selected by default, which is the production behaviour.
+    """
+    def picker(action: argparse.Action, key: str) -> list[str] | None:
+        options = _sources(_selected_bundle(key.rsplit(".", 1)[0]))[kind]
+        if not options:
+            st.caption(f"No {action.dest}s found in this bundle.")
+            return [NONE]
+        chosen = st.multiselect(
+            _LABELS[kind], options, default=options, help=action.help, key=key
+        )
+        # An empty pick means "use none", which the CLI spells as the NONE token —
+        # so the command line shown beside the form reproduces this run exactly.
+        return chosen or [NONE]
+    return picker
+
+
+_LABELS = {0: "Codebooks", 1: "Documents"}
+
+
 def main() -> None:
     """Render the catalog resolver page."""
+    _render_tree()
     run_example(
         resolve_catalog,
         key="catalog_resolver",
@@ -89,7 +155,11 @@ def main() -> None:
             "evidence: how each column was resolved, on what citation, at what "
             "confidence, and anything that conflicted along the way."
         ),
-        overrides={"bundle": bundle_picker},
+        overrides={
+            "bundle": bundle_picker,
+            "dictionary": source_picker(0),
+            "doc": source_picker(1),
+        },
         render=lambda catalog: render_catalog_view(catalog, key="catalog_resolver"),
     )
 

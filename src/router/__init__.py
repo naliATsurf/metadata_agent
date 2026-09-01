@@ -15,6 +15,7 @@ from src.router.catalog import (
     ProseReader,
     ReadResult,
     ResolvedColumn,
+    looks_like_dictionary,
     resolve_bundle,
     resolve_catalog,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "catalog_conflicts",
     "catalog_overview",
     "catalog_summary",
+    "looks_like_dictionary",
     "compile_field_plan",
     "render_catalog",
     "resolve_bundle",

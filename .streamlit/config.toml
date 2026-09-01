@@ -3,3 +3,11 @@ runOnSave = true
 
 [client]
 toolbarMode = "viewer"
+
+[theme]
+# Streamlit's default primary colour is red (#FF4B4B), which it uses for the
+# multiselect chips holding the current selection. A row of red tags reads as a row
+# of warnings, so the accent is a muted green and red is left to mean an error.
+# Chosen dark enough to carry white button text and light enough to stay legible
+# against a dark background.
+primaryColor = "#2E8B62"

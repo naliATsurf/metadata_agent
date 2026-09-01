@@ -96,54 +96,100 @@ def _render_arguments(
     overrides: dict[str, WidgetOverride] | None,
     columns: int,
 ) -> argparse.Namespace:
-    """Lay the parser's widgets out inside a bordered container."""
-    with st.container(border=True):
-        if columns <= 1:
-            return render_form(parser, key_prefix=key, overrides=overrides)
-        # Streamlit widgets bind to the column active when they are created, so
-        # the form is split by cycling a column per argument.
-        return _render_in_columns(parser, key, overrides, columns)
+    """Render the form, one bordered section per argument group.
+
+    argparse groups are part of the argument surface — ``--help`` prints them — so the
+    form follows them rather than inventing its own arrangement. A parser that defines
+    no groups renders as a single section, as before.
+    """
+    populated = [
+        (group, _visible_actions(group))
+        for group in _argument_groups(parser)
+        if _visible_actions(group)
+    ]
+    values: dict[str, Any] = {}
+
+    # Groups side by side, each one's arguments stacked under its title: the form
+    # stays one screen tall instead of scrolling. A parser with no groups of its own
+    # falls back to spreading its arguments across `columns`.
+    if len(populated) > 1:
+        for (group, actions), column in zip(
+            populated, st.columns(len(populated), gap="medium")
+        ):
+            with column, st.container(border=True):
+                _render_group_heading(group)
+                values.update(vars(_render_actions(actions, key, overrides, 1)))
+        return argparse.Namespace(**values)
+
+    for group, actions in populated:
+        with st.container(border=True):
+            _render_group_heading(group)
+            values.update(vars(_render_actions(actions, key, overrides, columns)))
+    return argparse.Namespace(**values)
 
 
-def _render_in_columns(
-    parser: argparse.ArgumentParser,
+def _render_group_heading(group: Any) -> None:
+    """Title and blurb for a group argparse did not invent itself."""
+    if group.title and group.title.lower() not in _DEFAULT_GROUP_TITLES:
+        st.markdown(f"**{group.title}**")
+        if group.description:
+            st.caption(group.description)
+
+
+# argparse's own groups, which carry no meaning for a form.
+_DEFAULT_GROUP_TITLES = {"positional arguments", "options", "optional arguments"}
+
+
+def _argument_groups(parser: argparse.ArgumentParser) -> list[Any]:
+    """The parser's argument groups, in declaration order."""
+    return list(parser._action_groups)
+
+
+def _visible_actions(group: Any) -> list[argparse.Action]:
+    """The group's arguments, minus the ones a form should not show."""
+    return [
+        action
+        for action in group._group_actions
+        if not isinstance(action, (argparse._HelpAction, argparse._VersionAction))
+    ]
+
+
+def _render_actions(
+    actions: list[argparse.Action],
     key: str,
     overrides: dict[str, WidgetOverride] | None,
     columns: int,
 ) -> argparse.Namespace:
-    """Render one sub-form per column, then merge the namespaces."""
-    actions = [
-        action.dest
-        for action in parser._actions
-        if not isinstance(action, (argparse._HelpAction, argparse._VersionAction))
-    ]
-    groups: list[list[str]] = [[] for _ in range(columns)]
-    for index, dest in enumerate(actions):
-        groups[index % columns].append(dest)
+    """Lay one group's arguments out across ``columns`` and collect their values."""
+    if columns <= 1 or len(actions) == 1:
+        return render_form(
+            _parser_over(actions), key_prefix=key, overrides=overrides
+        )
+
+    groups: list[list[argparse.Action]] = [[] for _ in range(columns)]
+    for index, action in enumerate(actions):
+        groups[index % columns].append(action)
 
     values: dict[str, Any] = {}
-    for group, column in zip(groups, st.columns(columns, gap="large")):
-        if not group:
+    for subset, column in zip(groups, st.columns(columns, gap="large")):
+        if not subset:
             continue
         with column:
-            subset = _subset_parser(parser, group)
-            namespace = render_form(subset, key_prefix=key, overrides=overrides)
+            namespace = render_form(
+                _parser_over(subset), key_prefix=key, overrides=overrides
+            )
             values.update(vars(namespace))
     return argparse.Namespace(**values)
 
 
-def _subset_parser(
-    parser: argparse.ArgumentParser, dests: list[str]
-) -> argparse.ArgumentParser:
-    """A view of ``parser`` holding only the named arguments.
+def _parser_over(actions: list[argparse.Action]) -> argparse.ArgumentParser:
+    """A view holding only ``actions``.
 
-    The actions themselves are shared, so their types, defaults, and help text
-    are the originals; only the iteration order is narrowed.
+    The actions themselves are shared, so their types, defaults, and help text are the
+    originals; only the iteration order is narrowed.
     """
     view = argparse.ArgumentParser(add_help=False)
-    view._actions = [
-        action for action in parser._actions if action.dest in set(dests)
-    ]
+    view._actions = list(actions)
     return view
 
 
