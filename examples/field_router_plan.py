@@ -119,7 +119,7 @@ def print_routing(field_plan: FieldPlan, console: Console) -> None:
     cov = field_plan.coverage()
     console.print(
         f"\n[bold]coverage:[/] {cov['routed']}/{cov['total']} routed, "
-        f"unresolved={cov['unresolved']}, by_bucket={cov['by_bucket']}"
+        f"unanswered={cov['unanswered']}, by_bucket={cov['by_bucket']}"
     )
 
 

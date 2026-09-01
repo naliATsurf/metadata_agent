@@ -16,13 +16,12 @@ import streamlit as st
 from demo.components.catalog_view import render_catalog_view
 
 
-# The router's buckets, in the order they degrade: a whole-resource fact is the most
-# assured, a narrative span the least.
+# Each bucket names where a field's answer comes from.
 _BUCKET_HELP = {
-    "structural": "A whole-resource fact, answered by a deterministic tool.",
-    "ambiguous_structural": "A column, found through the resolved catalog.",
-    "narrative": "A meaning stated only in prose, answered by a document span.",
-    "unresolved": "Nothing could answer this field.",
+    "tool": "Computed by a deterministic tool, from the data itself.",
+    "column": "Read from a column, found through the resolved catalog.",
+    "document": "Quoted from a document, where the meaning is only stated in prose.",
+    "unanswered": "Nothing in the bundle can answer this field.",
 }
 _ASSURANCE_MARK = {"high": "🟢 high", "medium": "🟡 medium", "low": "🟠 low"}
 
@@ -56,12 +55,12 @@ def _render_coverage(coverage: dict[str, Any], result: Any) -> None:
     """The headline: how much of the standard the bundle can answer."""
     total = coverage["total"]
     routed = coverage["routed"]
-    unresolved = coverage["unresolved"]
+    unanswered = coverage["unanswered"]
 
-    routed_col, unresolved_col, standard_col, tasks_col = st.columns(4)
+    routed_col, unanswered_col, standard_col, tasks_col = st.columns(4)
     routed_col.metric("Routed", f"{routed}/{total}")
-    unresolved_col.metric(
-        "Unresolved", len(unresolved),
+    unanswered_col.metric(
+        "Unanswered", len(unanswered),
         help="Fields nothing in the bundle can answer — found before extraction, "
              "not discovered as a confabulation afterwards.",
     )
@@ -70,8 +69,8 @@ def _render_coverage(coverage: dict[str, Any], result: Any) -> None:
     if total:
         st.progress(routed / total)
 
-    if unresolved:
-        st.markdown("**Unresolved fields** — " + ", ".join(f"`{f}`" for f in unresolved))
+    if unanswered:
+        st.markdown("**Unanswered fields** — " + ", ".join(f"`{f}`" for f in unanswered))
 
 
 def _render_routings(field_plan: Any, key: str) -> None:

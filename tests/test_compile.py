@@ -68,7 +68,7 @@ class CompilerCase(unittest.TestCase):
     def assert_well_formed(self, fp: FieldPlan, plan: Plan, schema) -> None:
         """The invariants that must hold for any compiled plan."""
         schema_fields = [s.path for s in walk_schema(schema)]
-        routed = [p for p, r in fp.routings.items() if r.status != "unresolved"]
+        routed = [p for p, r in fp.routings.items() if r.status != "unanswered"]
         extraction = self.extraction_tasks(plan)
         assembly = self.assembly(plan)
 
@@ -198,7 +198,7 @@ class RealisticCompileTest(CompilerCase):
         return fp, compile_field_plan(fp)
 
     def _narrative_fields(self, fp: FieldPlan):
-        return [p for p, r in fp.routings.items() if r.bucket == "narrative"]
+        return [p for p, r in fp.routings.items() if r.bucket == "document"]
 
     def test_plan_is_well_formed(self):
         fp, plan = self._compiled()
@@ -206,7 +206,7 @@ class RealisticCompileTest(CompilerCase):
 
     def test_unresolved_field_skipped_from_extraction_but_nulled_at_assembly(self):
         fp, plan = self._compiled()
-        self.assertEqual(fp.routings["provenance_notes"].status, "unresolved")
+        self.assertEqual(fp.routings["provenance_notes"].status, "unanswered")
         self.assertNotIn(
             "provenance_notes", {f for t in self.extraction_tasks(plan) for f in t.fields}
         )
@@ -219,7 +219,7 @@ class RealisticCompileTest(CompilerCase):
         groups them into *one* task targeting that document — not a task per field.
         """
         fp, plan = self._compiled()
-        narrative = [t for t in self.extraction_tasks(plan) if self.bucket_of(fp, t) == "narrative"]
+        narrative = [t for t in self.extraction_tasks(plan) if self.bucket_of(fp, t) == "document"]
         self.assertEqual(len(narrative), 1)
         task = narrative[0]
         self.assertEqual(task.target_resources, ["README"])
@@ -292,7 +292,7 @@ class RealisticCompileTest(CompilerCase):
         narrative_fields = self._narrative_fields(fp)
         plan = compile_field_plan(fp, budget=1)
         self.assert_well_formed(fp, plan, Survey)
-        narrative = [t for t in self.extraction_tasks(plan) if self.bucket_of(fp, t) == "narrative"]
+        narrative = [t for t in self.extraction_tasks(plan) if self.bucket_of(fp, t) == "document"]
         self.assertGreater(len(narrative), 1)  # actually split
         self.assertTrue(all(t.target_resources == ["README"] for t in narrative))
         carried = [f for t in narrative for f in t.fields]
@@ -313,7 +313,7 @@ class RealisticCompileTest(CompilerCase):
     def test_structural_field_is_context_level(self):
         fp, plan = self._compiled()
         rc_task = next(t for t in plan.steps if "row_count" in t.fields)
-        self.assertEqual(self.bucket_of(fp, rc_task), "structural")
+        self.assertEqual(self.bucket_of(fp, rc_task), "tool")
         self.assertEqual(rc_task.target_resources, [])  # whole-context tool
         self.assertEqual(rc_task.topology, "single")
 
@@ -367,7 +367,7 @@ class MultiDocumentTest(CompilerCase):
     def test_fields_split_across_documents_yield_per_document_tasks(self):
         fp, plan = self._compiled()
         self.assert_well_formed(fp, plan, Narrative)
-        narrative = [t for t in self.extraction_tasks(plan) if self.bucket_of(fp, t) == "narrative"]
+        narrative = [t for t in self.extraction_tasks(plan) if self.bucket_of(fp, t) == "document"]
         # license lives in LICENSE.md; overview/methods in README.md → two documents,
         # so two narrative tasks, each targeting exactly one resource.
         targets = {tuple(t.target_resources) for t in narrative}
@@ -419,13 +419,13 @@ class BudgetTest(CompilerCase):
         fp = self._fp()
         plan = compile_field_plan(fp, budget=10_000)
         self.assert_well_formed(fp, plan, Geo)
-        col_tasks = [t for t in self.extraction_tasks(plan) if self.bucket_of(fp, t) == "ambiguous_structural"]
+        col_tasks = [t for t in self.extraction_tasks(plan) if self.bucket_of(fp, t) == "column"]
         # All same-tier columns from the same resource → a single task.
         self.assertEqual(len(col_tasks), 1)
 
     def test_tiny_budget_splits_but_drops_nothing(self):
         fp = self._fp()
-        routed = [p for p, r in fp.routings.items() if r.status != "unresolved"]
+        routed = [p for p, r in fp.routings.items() if r.status != "unanswered"]
         plan = compile_field_plan(fp, budget=1)
         self.assert_well_formed(fp, plan, Geo)  # still valid, just more tasks
         extraction = self.extraction_tasks(plan)
@@ -440,7 +440,7 @@ class BudgetTest(CompilerCase):
 
         fp = self._fp()
         group = sorted(
-            (r for r in fp.routings.values() if r.bucket == "ambiguous_structural"),
+            (r for r in fp.routings.values() if r.bucket == "column"),
             key=lambda r: r.field_path,
         )
         self.assertGreaterEqual(len(group), 2)
@@ -462,7 +462,7 @@ class BudgetTest(CompilerCase):
         fp = self._fp()
         plan = compile_field_plan(fp, budget=1)
         carried = [f for t in self.extraction_tasks(plan) for f in t.fields]
-        routed = [p for p, r in fp.routings.items() if r.status != "unresolved"]
+        routed = [p for p, r in fp.routings.items() if r.status != "unanswered"]
         self.assertEqual(sorted(carried), sorted(routed))
 
 
@@ -535,7 +535,7 @@ class OverrideTest(CompilerCase):
         fp = self._fp()
         plan = compile_field_plan(
             fp,
-            bucket_player={"narrative": "critic"},
+            bucket_player={"document": "critic"},
             assembly_player="schema_expert",
         )
         self.assertEqual(self.assembly(plan).player, "schema_expert")
@@ -543,7 +543,7 @@ class OverrideTest(CompilerCase):
         self.assertEqual(narrative.player, "critic")
         # Unspecified buckets keep their default.
         col = next(t for t in plan.steps if "lat_field" in t.fields)
-        self.assertEqual(col.player, _BUCKET_PLAYER["ambiguous_structural"])
+        self.assertEqual(col.player, _BUCKET_PLAYER["column"])
 
 
 if __name__ == "__main__":

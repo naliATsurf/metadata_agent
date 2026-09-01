@@ -49,7 +49,7 @@ class RouterTest(unittest.TestCase):
 
     def test_structural_field_binds_to_a_tool(self):
         r = self._plan().routings["record_count"]
-        self.assertEqual(r.bucket, "structural")
+        self.assertEqual(r.bucket, "tool")
         self.assertEqual(r.assurance, "high")
         self.assertEqual(r.candidates[0].locator, "get_item_count")
 
@@ -66,27 +66,27 @@ class RouterTest(unittest.TestCase):
 
         catalog = resolve_catalog(self.tab, sources=[self.cb])
         r = route_fields(Other, catalog=catalog, docs=[self.doc]).routings["n_rows"]
-        self.assertEqual(r.bucket, "structural")
+        self.assertEqual(r.bucket, "tool")
         self.assertEqual(r.candidates[0].locator, "get_item_count")
 
     def test_ambiguous_structural_routes_to_a_column(self):
         r = self._plan().routings["lat_field"]
-        self.assertEqual(r.bucket, "ambiguous_structural")
+        self.assertEqual(r.bucket, "column")
         self.assertEqual(r.candidates[0].locator, "la")
 
     def test_narrative_routes_to_a_document_span(self):
         r = self._plan().routings["title"]
-        self.assertEqual(r.bucket, "narrative")
+        self.assertEqual(r.bucket, "document")
         self.assertTrue(r.candidates)
         self.assertEqual(r.candidates[0].kind, "quoted_span")
 
     def test_unresolved_field_is_flagged(self):
         plan = self._plan()
         r = plan.routings["mystery"]
-        self.assertEqual(r.bucket, "unresolved")
-        self.assertEqual(r.status, "unresolved")
+        self.assertEqual(r.bucket, "unanswered")
+        self.assertEqual(r.status, "unanswered")
         self.assertEqual(r.assurance, "none")
-        self.assertIn("mystery", plan.unresolved())
+        self.assertIn("mystery", plan.unanswered())
 
     def test_assurance_inherits_the_catalog_confidence(self):
         """Two-hop: a column resolved high → high; resolved by value only → medium."""
@@ -97,8 +97,8 @@ class RouterTest(unittest.TestCase):
         cov = self._plan().coverage()
         self.assertEqual(cov["total"], 4)
         self.assertEqual(cov["routed"], 3)
-        self.assertEqual(cov["unresolved"], ["mystery"])
-        self.assertEqual(cov["by_bucket"]["structural"], 1)
+        self.assertEqual(cov["unanswered"], ["mystery"])
+        self.assertEqual(cov["by_bucket"]["tool"], 1)
 
     def test_plan_is_serializable(self):
         d = self._plan().to_dict()
@@ -186,9 +186,9 @@ class RouterRealisticTest(unittest.TestCase):
 
     def test_buckets_across_the_schema(self):
         r = self._plan().routings
-        self.assertEqual(r["row_count"].bucket, "structural")
-        self.assertEqual(r["title"].bucket, "narrative")
-        self.assertEqual(r["provenance_notes"].bucket, "unresolved")
+        self.assertEqual(r["row_count"].bucket, "tool")
+        self.assertEqual(r["title"].bucket, "document")
+        self.assertEqual(r["provenance_notes"].bucket, "unanswered")
 
     def test_codebook_resolved_columns_are_high_assurance(self):
         r = self._plan().routings
@@ -198,7 +198,7 @@ class RouterRealisticTest(unittest.TestCase):
     def test_coverage_over_a_full_schema(self):
         cov = self._plan().coverage()
         self.assertEqual(cov["total"], 12)
-        self.assertEqual(cov["unresolved"], ["provenance_notes"])
+        self.assertEqual(cov["unanswered"], ["provenance_notes"])
         self.assertEqual(cov["routed"], 11)
 
 

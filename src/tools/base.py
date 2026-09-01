@@ -249,7 +249,7 @@ def context_tool(
         answers_field: True when the tool's whole-resource result *is* a metadata
             value (a row count, the column list), not an inspection aid. The field
             router ranks a field's query against these tools' descriptions to bind
-            "structural" fields — so the binding is by the tool's declared purpose,
+            "tool" fields — so the binding is by the tool's declared purpose,
             not a per-standard keyword table.
     """
 

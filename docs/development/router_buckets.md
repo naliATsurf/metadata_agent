@@ -59,13 +59,13 @@ grounded, ordered from most to least verifiable.
 
 | `kind` | The location is… | Value produced by | Grounding | Produced by |
 |---|---|---|---|---|
-| `structural` | a whole-resource **tool** (e.g. `get_item_count`) | a deterministic computation | recomputable → high | `_structured_candidates` (`route.py`), from `field_answering_tools()` |
+| `tool` | a whole-resource **tool** (e.g. `get_item_count`) | a deterministic computation | recomputable → high | `_structured_candidates` (`route.py`), from `field_answering_tools()` |
 | `computed_column` | a specific **column**, enriched with a resolved meaning | a computation over that column | recomputable, but only as sure as the column's resolution | `Catalog.search` / `TabularContext.search` |
 | `verified_span` | a prose **span** a verifier has confirmed supports the value | quoting, then confirmed | medium (checked) | *reserved for the verify pass (M5); not emitted yet* |
 | `quoted_span` | a prose **span**, retrieved but unconfirmed | quoting/extraction | low (retrieved only) | `TextContext.search` |
 
 The assurance ordering is `computed_column` > `verified_span` > `quoted_span`
-(with `structural` the recomputable whole-resource case). Two points worth
+(with `tool` the recomputable whole-resource case). Two points worth
 stressing for a report:
 
 - **`kind` is set by the producer, not asserted by an extractor.** Each search
@@ -73,7 +73,7 @@ stressing for a report:
   *where a value comes from*, never a model's self-reported confidence.
 - **`verified_span` is aspirational.** It is the target state of the M5 verify pass —
   a `quoted_span` promoted once `attribute_field` confirms the produced value traces
-  to it. Today the router emits only `structural`, `computed_column`, and
+  to it. Today the router emits only `tool`, `computed_column`, and
   `quoted_span`.
 
 ## bucket — the field's value-production mechanism
@@ -81,11 +81,11 @@ stressing for a report:
 A bucket (`FieldRouting.bucket`, `src/router/route.py`) records how one schema
 field will be answered. Four values:
 
-- **`structural`** — a whole-resource fact (record count, column list), bound to a
+- **`tool`** — a whole-resource fact (record count, column list), bound to a
   deterministic tool; no "which part?" question.
-- **`ambiguous_structural`** — a specific column must be identified first, then
+- **`column`** — a specific column must be identified first, then
   computed over ("which column is the temperature?").
-- **`narrative`** — a meaning stated only in prose (abstract, licence), quoted from
+- **`document`** — a meaning stated only in prose (abstract, licence), quoted from
   a document span.
 - **`unresolved`** — nothing can answer it; flagged *before* extraction.
 
@@ -118,21 +118,21 @@ The **router** (`route_fields` → `_route_one`, `route.py`) is the sole assigne
 each field it forms a query from the field's description, then:
 
 1. `_structured_candidates(query, catalog)` runs **one pooled BM25 ranking** over the
-   field-answering **tools** (`kind="structural"`) and the enriched **columns**
+   field-answering **tools** (`kind="tool"`) and the enriched **columns**
    (`kind="computed_column"`), pooled so a tool and a column compete on equal
    footing. If anything scores, the **winning candidate's `kind` names the bucket**:
-   `structural` → bucket `structural`; `computed_column` → bucket
-   `ambiguous_structural`.
+   `tool` → bucket `tool`; `computed_column` → bucket
+   `column`.
 2. Otherwise `_search_docs` ranks the document corpus; a hit (`kind="quoted_span"`)
-   → bucket `narrative`.
+   → bucket `document`.
 3. Otherwise → bucket `unresolved`.
 
 ```
 candidate.kind          ── winning candidate ──▶     field.bucket
 ─────────────────                                    ────────────
-"structural"     (a field-answering tool)      →     "structural"
-"computed_column"(an enriched column)          →     "ambiguous_structural"
-"quoted_span"    (a document span)             →     "narrative"
+"tool"     (a field-answering tool)      →     "tool"
+"computed_column"(an enriched column)          →     "column"
+"quoted_span"    (a document span)             →     "document"
 (no candidate scored)                          →     "unresolved"
 ```
 
@@ -147,9 +147,9 @@ A candidate's `kind` is exactly **which search space produced it** — the mappi
 
 | Search space (producer) | `kind` |
 |---|---|
-| field-answering tools (structured pass) | `structural` |
+| field-answering tools (structured pass) | `tool` |
 | enriched columns from catalog resolution (structured pass) | `computed_column` |
-| document spans (narrative pass) | `quoted_span` |
+| document spans (document pass) | `quoted_span` |
 
 Two consequences worth being precise about:
 
@@ -159,9 +159,9 @@ Two consequences worth being precise about:
   the query. So the query selects the winner, and the winner's (space-derived) kind
   then names the bucket — the query never stamps a kind itself.
 - **The two structured kinds share one ranking pass but stay distinct.** Tools and
-  columns are pooled into a single BM25 ranking, yet a tool remains `structural` and
+  columns are pooled into a single BM25 ranking, yet a tool remains `tool` and
   a column remains `computed_column`: `kind` tracks the *producer*, not the pass, so
-  it is finer-grained than "structured vs narrative."
+  it is finer-grained than "structured vs document."
 
 The full chain is therefore **search space → kind → (winning candidate) → bucket**.
 (The one kind outside this rule is `verified_span`: it is produced not by a search
@@ -213,13 +213,13 @@ query picked the winner (via score); the space fixed the kind.
 
 ```python
 top = structured[0]                 # la, kind="computed_column"
-bucket = "structural" if top.kind == "structural" else "ambiguous_structural"
+bucket = "tool" if top.kind == "tool" else "column"
 ```
 
-`la`'s kind is `computed_column`, so **bucket = `ambiguous_structural`**. (Had
-`get_item_count` won, kind `structural` → bucket `structural`.)
+`la`'s kind is `computed_column`, so **bucket = `column`**. (Had
+`get_item_count` won, kind `tool` → bucket `tool`.)
 
-**Step 3 — grade the assurance.** `_assurance("ambiguous_structural", top, catalog)`
+**Step 3 — grade the assurance.** `_assurance("column", top, catalog)`
 reads `catalog.get("la").link_confidence` → **`high`** (the codebook resolved `la`
 with high confidence). Two-hop: the value is computable, but the *interpretation*
 that `la` means latitude is only as strong as the resolution behind it.
@@ -228,7 +228,7 @@ that `la` means latitude is only as strong as the resolution behind it.
 
 ```python
 FieldRouting(field_path="min_latitude", query="the southernmost latitude sampled",
-             bucket="ambiguous_structural", candidates=[la, ...],
+             bucket="column", candidates=[la, ...],
              assurance="high", status="routed")
 ```
 
@@ -237,10 +237,10 @@ FieldRouting(field_path="min_latitude", query="the southernmost latitude sampled
 - **`license`** (query `{licence, data, released}`): no tool or column mentions
   "licence," so the structured space scores all-zero and returns empty; `_route_one`
   falls to `_search_docs`, which BM25-ranks the README's *chunks* and returns a
-  `quoted_span` — kind `quoted_span` → bucket **`narrative`**, assurance `low`.
+  `quoted_span` — kind `quoted_span` → bucket **`document`**, assurance `low`.
 - **`row_count`** (query `{number, rows, observations, table}`):
   `get_item_count`'s description shares "number/row," so the **tool** wins the
-  structured pass — kind `structural` → bucket **`structural`**, bound directly to
+  structured pass — kind `tool` → bucket **`tool`**, bound directly to
   the tool with no search over data, assurance `high`.
 - **`provenance_notes`** (query `{qzzx, wvvq, blorp}`): nothing scores in either
   space → bucket **`unresolved`**, empty candidates — the coverage signal, produced
@@ -259,9 +259,9 @@ Two properties follow from routing being pure lexical BM25 (no embeddings):
 
 **Within the router** (`route.py`):
 
-- `_assurance(bucket, …)` grades the field from its bucket: `ambiguous_structural`
-  inherits the resolved column's confidence (two-hop); `narrative` → `low`;
-  `structural` → `high`.
+- `_assurance(bucket, …)` grades the field from its bucket: `column`
+  inherits the resolved column's confidence (two-hop); `document` → `low`;
+  `tool` → `high`.
 - `FieldPlan.coverage()` reports the `by_bucket` histogram and lists the
   `unresolved` fields — coverage known before any extraction runs.
 - `FieldPlan.to_dict()` serializes the bucket for external and evaluation consumers
@@ -274,11 +274,11 @@ consumer. It reads the bucket for five distinct decisions:
    axis fields group along into extraction tasks.
 2. **Skip-or-emit** — `unresolved` fields get *no* extraction task (named only on the
    assembly task, so the record nulls them explicitly).
-3. **Player role** — `_BUCKET_PLAYER[bucket]`: `structural`/`ambiguous_structural` →
-   `data_analyst`; `narrative` → `metadata_specialist`.
+3. **Player role** — `_BUCKET_PLAYER[bucket]`: `tool`/`column` →
+   `data_analyst`; `document` → `metadata_specialist`.
 4. **Instruction phrasing** — `_instruction(bucket, …)`: "compute via the bound tool"
    vs "extract from column *X*" vs "quote the supporting span".
-5. **Target scoping** — `structural` tasks are context-level (`target_resources=[]`);
+5. **Target scoping** — `tool` tasks are context-level (`target_resources=[]`);
    column and span tasks target the resource that holds them.
 
 **Downstream (future — M5/M6):** the executor runs the compiled `Plan`; the
@@ -300,12 +300,12 @@ built yet.
 
 The router matches each field to a ranked list of *candidates* — locations that
 could answer it, proposed sources rather than answers. Every candidate carries a
-*kind* — a tag for what sort of location it is (`structural` tool,
+*kind* — a tag for what sort of location it is (`tool` tool,
 `computed_column`, `quoted_span`, or the verify-pass `verified_span`), ordered by
 how verifiable a value drawn from it would be. These kinds are stamped by the producers of the candidate spaces — the tool
 registry, catalog resolution, and the document sources — never by an extractor.
-The router assigns each field a *bucket* — `structural`, `ambiguous_structural`,
-`narrative`, or `unresolved` — by reading the kind of the field's highest-ranked
+The router assigns each field a *bucket* — `tool`, `column`,
+`document`, or `unresolved` — by reading the kind of the field's highest-ranked
 candidate, and stores it on the routing artifact. The bucket is then read-only: the
 router's own grader and coverage reporter consume it, and the plan compiler uses it
 to group fields into tasks, decide which are answerable, choose the responsible

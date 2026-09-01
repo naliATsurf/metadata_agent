@@ -22,7 +22,7 @@ follow, both surfaced repeatedly in practice:
 - **It floods.** Every player is handed the whole survey; ~64% of a measured run
   was three tools describing the same context. The 2026-07-22 dedup treats the
   symptom; it does not remove the cause.
-- **It cannot reach the narrative fields.** `abstract`, `methodology`, `license`
+- **It cannot reach the document fields.** `abstract`, `methodology`, `license`
   live in description documents, not in tabular tool output, so they surface as
   `unverifiable` no matter how hard the tabular tools work.
 
@@ -34,7 +34,7 @@ where its answer could live.**
 **The approach is one inversion:** start from the target schema's fields, *route*
 each to its candidate source(s), then extract from those candidates only. This
 dissolves the flood (each field's extraction sees only its candidates —
-*retrieval is the curation*) and reaches the narrative fields (documents become a
+*retrieval is the curation*) and reaches the document fields (documents become a
 routable surface).
 
 We **extend, not fork**, consistent with the previous two plans. The router emits
@@ -153,10 +153,10 @@ verifier confirms not just the value-to-column trace but that the **link** is re
 
 Scope bound: fields fall into three buckets, and only two need search.
 
-1. **Structurally determined** → direct tool binding, no search. `row_count` is
+1. **Toolly determined** → direct tool binding, no search. `row_count` is
    *always* `get_item_count`; `columns` is *always* `get_field_names`.
-2. **Ambiguous-structural** → the *schema router* ("which column is the date?").
-3. **Narrative** → *document retrieval* (`abstract`, `license`, `methodology`).
+2. **Column** → the *schema router* ("which column is the date?").
+3. **Document** → *document retrieval* (`abstract`, `license`, `methodology`).
 
 ## Data model 🟡
 
@@ -214,10 +214,10 @@ Ordered so each is testable before the next and the migration stays incremental.
    [The semantic gap](#the-semantic-gap-and-cross-file-symbol-resolution).
 4. ✅ **Router → `FieldPlan`** (`src/router/route.py`). `route_fields(schema,
    catalog, docs)` walks the schema and routes each field to a bucket —
-   **structural** (a whole-resource tool), **ambiguous-structural** (`Catalog.
-   search` over the enriched columns), or **narrative** (document search) —
+   **tool** (a whole-resource tool), **column** (`Catalog.
+   search` over the enriched columns), or **document** (document search) —
    producing a `FieldRouting` per field and a `FieldPlan`. **The bucket is
-   standard-agnostic:** no keyword table. Structural tools self-declare with
+   standard-agnostic:** no keyword table. Tools self-declare with
    `answers_field=True` on `@context_tool`, and the router ranks the field query
    against those tools' descriptions pooled with the columns (one BM25 ranking);
    the winning candidate's kind names the bucket, and a field matching nothing
@@ -347,7 +347,7 @@ is contained to layers 1–6 and the swap is reversible.
   does not bake in the lexical top-1. Unresolved fields get no extraction task but are named for
   assembly so the record nulls them. Tests: `tests/test_compile.py`. The
   verify/reconcile pass (linchpin 2), and making the assembly's field→finding map
-  structural, are M5; wiring the strategy behind an orchestrator flag is M6.
+  tool, are M5; wiring the strategy behind an orchestrator flag is M6.
 - **M5 — Assurance axis + verify reconciliation** (layer 6, provenance). Closes
   linchpin 2.
 - **M6 — Diff against source-driven on sample datasets; flip the default.**
@@ -363,18 +363,18 @@ bundle, so the router cannot ingest it.
 
 - `observations.csv` — 200 rows, opaque columns `oid, la, lo, dt, sp, n, tmp, elv`.
 - `codebook.csv` — data dictionary mapping each opaque column to a label + units.
-- `README.md` — the narrative source (title, abstract, methods, licence, …).
+- `README.md` — the document source (title, abstract, methods, licence, …).
 
 **Expected fills, by routing bucket:**
 
 | Field | Bucket | Source | Expected |
 |---|---|---|---|
-| `title`, `abstract`, `methodology`, `creator`, `funding`, `license` | narrative | README.md | quoted from prose (`license` = CC BY 4.0) |
-| `record_count` | structural | observations.csv | **200** (see conflict below) |
-| `temporal_coverage` | ambiguous-structural | `dt` column / README | 2019-03-11 … 2021-09-30 (README says "March 2019 to September 2021") |
-| `spatial_coverage` | ambiguous-structural | `la`/`lo` via codebook | ~ min_lat 53.22, max_lat 54.79, min_lon −10.20, max_lon −8.61 |
-| `variables` | ambiguous-structural | codebook.csv | the measured columns explained (`sp` → species codes, etc.) |
-| `temperature_units` | ambiguous-structural | codebook vs values | **conflict below** |
+| `title`, `abstract`, `methodology`, `creator`, `funding`, `license` | document | README.md | quoted from prose (`license` = CC BY 4.0) |
+| `record_count` | tool | observations.csv | **200** (see conflict below) |
+| `temporal_coverage` | column | `dt` column / README | 2019-03-11 … 2021-09-30 (README says "March 2019 to September 2021") |
+| `spatial_coverage` | column | `la`/`lo` via codebook | ~ min_lat 53.22, max_lat 54.79, min_lon −10.20, max_lon −8.61 |
+| `variables` | column | codebook.csv | the measured columns explained (`sp` → species codes, etc.) |
+| `temperature_units` | column | codebook vs values | **conflict below** |
 
 **Planted traps:**
 

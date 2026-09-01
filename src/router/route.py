@@ -5,12 +5,15 @@ fall out, the router starts from *what it must fill* — the target schema's lea
 fields (:func:`~src.router.schema.walk_schema`) — and routes each to the source
 that can answer it. A field falls into one of three buckets:
 
-- **structural** — a property of the data itself (record count), bound directly
-  to a deterministic tool, no search;
-- **ambiguous-structural** — "which column?", routed over the *enriched* catalog
+- **tool** — a property of the data itself (record count), computed by a
+  deterministic tool, no search;
+- **column** — "which column?", routed over the *enriched* catalog
   (:meth:`Catalog.search`), so opaque names resolved in layer 3 are reachable;
-- **narrative** — a meaning stated only in prose (abstract, licence), routed over
+- **document** — a meaning stated only in prose (abstract, licence), routed over
   the document sources.
+
+Each bucket names **where the answer comes from**, so a routing can be read
+without recalling a definition. A field nothing answers is ``unanswered``.
 
 The output is a :class:`FieldPlan` — the persisted routing artifact and the
 source of truth the M4 compiler turns into executable `Task`s. Coverage falls
@@ -47,10 +50,10 @@ class FieldRouting:
 
     field_path: str
     query: str                              # the field description, used as the query
-    bucket: str                             # structural | ambiguous_structural | narrative | unresolved
+    bucket: str                             # tool | column | document | unanswered
     candidates: List[EvidenceRef] = field(default_factory=list)
     assurance: str = "none"                 # high | medium | low | none
-    status: str = "routed"                  # routed | unresolved
+    status: str = "routed"                  # routed | unanswered
     # Populated by the M4 compiler, not the router:
     extractor_role: Optional[str] = None
     topology: Optional[str] = None
@@ -75,9 +78,9 @@ class FieldPlan:
     schema_name: str
     routings: Dict[str, FieldRouting]
 
-    def unresolved(self) -> List[str]:
+    def unanswered(self) -> List[str]:
         """Fields with no candidate source — flagged before extraction runs."""
-        return [p for p, r in self.routings.items() if r.status == "unresolved"]
+        return [p for p, r in self.routings.items() if r.status == "unanswered"]
 
     def coverage(self) -> Dict[str, Any]:
         """A one-glance report: how many fields routed, where, and how grounded."""
@@ -87,11 +90,11 @@ class FieldPlan:
             by_bucket[r.bucket] = by_bucket.get(r.bucket, 0) + 1
             by_assurance[r.assurance] = by_assurance.get(r.assurance, 0) + 1
         total = len(self.routings)
-        unresolved = self.unresolved()
+        unanswered = self.unanswered()
         return {
             "total": total,
-            "routed": total - len(unresolved),
-            "unresolved": unresolved,
+            "routed": total - len(unanswered),
+            "unanswered": unanswered,
             "by_bucket": by_bucket,
             "by_assurance": by_assurance,
         }
@@ -139,7 +142,7 @@ def _structured_candidates(
     for tool in _answer_tools():
         entries.append(
             EvidenceRef(
-                resource="", locator=tool.name, kind="structural",
+                resource="", locator=tool.name, kind="tool",
                 snippet=tool.description or tool.name, score=0.0,
             )
         )
@@ -180,7 +183,7 @@ def _route_one(
     structured = _structured_candidates(query, catalog, k)
     if structured:
         top = structured[0]
-        bucket = "structural" if top.kind == "structural" else "ambiguous_structural"
+        bucket = "tool" if top.kind == "tool" else "column"
         return FieldRouting(
             field_path=spec.path, query=query, bucket=bucket,
             candidates=structured, assurance=_assurance(bucket, top, catalog),
@@ -189,13 +192,13 @@ def _route_one(
     doc_hits = _search_docs(docs, query, k)
     if doc_hits:
         return FieldRouting(
-            field_path=spec.path, query=query, bucket="narrative",
+            field_path=spec.path, query=query, bucket="document",
             candidates=doc_hits, assurance="low",
         )
 
     return FieldRouting(
-        field_path=spec.path, query=query, bucket="unresolved",
-        candidates=[], assurance="none", status="unresolved",
+        field_path=spec.path, query=query, bucket="unanswered",
+        candidates=[], assurance="none", status="unanswered",
     )
 
 
@@ -207,12 +210,12 @@ def _assurance(bucket: str, top: EvidenceRef, catalog: Optional[Catalog]) -> str
     strong as the catalog resolution behind it, so the weaker hop wins. A retrieved
     span is quoted-only (low) until a verifier confirms it (a later milestone).
     """
-    if bucket == "ambiguous_structural" and catalog is not None:
+    if bucket == "column" and catalog is not None:
         # Disambiguate by resource: a multi-table catalog can hold the same column
         # name in two tables, and the routed candidate names the one that won.
         column = catalog.find(top.locator, top.resource)
         return column.link_confidence if column else "low"
-    if bucket == "narrative":
+    if bucket == "document":
         return "low"
     return "high"
 

@@ -64,13 +64,13 @@ from src.router.route import FieldPlan, FieldRouting
 
 # Default player role per bucket. Roles request *capabilities* (toolsets), never a
 # standard's vocabulary, so a bucket maps to a role by what it must *do*, not by
-# field names: structural and column extraction are tabular analysis; narrative
+# field names: tool and column extraction are tabular analysis; document
 # extraction reads prose (the seeded spans) and writes fields. Overridable so the
 # mapping is a default, not a hardcoding.
 _BUCKET_PLAYER = {
-    "structural": "data_analyst",
-    "ambiguous_structural": "data_analyst",
-    "narrative": "metadata_specialist",
+    "tool": "data_analyst",
+    "column": "data_analyst",
+    "document": "metadata_specialist",
 }
 
 # `task` is a short *action identifier* (like the source-driven planner's
@@ -78,9 +78,9 @@ _BUCKET_PLAYER = {
 # `field_bindings` (the ranked candidates per field) and rendered into a player
 # prompt at execution time — not stored as a paragraph on the task.
 _TASK_NAME = {
-    "structural": "compute_structural_fields",
-    "ambiguous_structural": "extract_column_fields",
-    "narrative": "extract_narrative_fields",
+    "tool": "compute_tool_fields",
+    "column": "extract_column_fields",
+    "document": "extract_document_fields",
 }
 _ASSEMBLY_TASK_NAME = "assemble_metadata_record"
 
@@ -116,7 +116,7 @@ def compile_field_plan(
     # assembly. Insertion order (schema order) is preserved for determinism.
     groups: "OrderedDict[Tuple[str, str, str], List[FieldRouting]]" = OrderedDict()
     for routing in field_plan.routings.values():
-        if routing.status == "unresolved":
+        if routing.status == "unanswered":
             continue
         groups.setdefault(_group_key(routing), []).append(routing)
 
@@ -244,10 +244,10 @@ def _extraction_task(
     fields = [r.field_path for r in routings]
     # Structural fields are context-level (empty target = all/context); column and
     # span fields target the resource that holds them.
-    target = [] if bucket == "structural" or not resource else [resource]
+    target = [] if bucket == "tool" or not resource else [resource]
     return Task(
         task=_TASK_NAME[bucket],
-        player=players.get(bucket, _BUCKET_PLAYER["ambiguous_structural"]),
+        player=players.get(bucket, _BUCKET_PLAYER["column"]),
         rationale=(
             f"Field-driven routing sent {len(fields)} field(s) to the {bucket} "
             f"extractor for '{resource or 'context'}'. For each, select the candidate "
