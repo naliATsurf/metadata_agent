@@ -150,7 +150,6 @@ class RouterResult:
     field_plan: FieldPlan
     plan: Plan
     standard: str
-    written: List[Path]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -159,18 +158,18 @@ def build_parser() -> argparse.ArgumentParser:
         description="Build a field-driven plan for a multi-table bundle."
     )
     source = ap.add_argument_group(
-        "Input", "The bundle, the target standard, and which discovered sources to use."
+        "Input", "The bundle, and which of its discovered sources to resolve from."
+    )
+    target = ap.add_argument_group(
+        "Metadata standard", "The schema whose fields are routed."
     )
     tier = ap.add_argument_group(
         "Prose tiers", "Which readers run above the codebook and the value prior."
     )
-    output = ap.add_argument_group(
-        "Output", f"Artifacts written under {OUT.relative_to(REPO)}."
-    )
 
     source.add_argument("--bundle", type=Path, default=DEFAULT_BUNDLE,
                         help="bundle directory")
-    source.add_argument("--standard", default=DEFAULT_STANDARD,
+    target.add_argument("--standard", default=DEFAULT_STANDARD,
                         choices=sorted(METADATA_STANDARDS),
                         help="metadata standard whose fields are routed")
     source.add_argument("--dictionary", action="append", default=None,
@@ -182,9 +181,6 @@ def build_parser() -> argparse.ArgumentParser:
     tier.add_argument("--prose-reader", action="store_true",
                       help="enable the retrieve-then-read prose tier (localize + read a "
                            "cued definition) above the glossary regex")
-    output.add_argument("--no-write", action="store_true",
-                        help="do not write the field plan and compiled plan to disk; "
-                             "useful when trying inputs rather than producing artifacts")
     return ap
 
 
@@ -229,21 +225,28 @@ def run(args: argparse.Namespace, console: Console) -> RouterResult:
     print_routing(field_plan, console)
     print_plan(plan, console)
 
-    written: List[Path] = []
-    if not args.no_write:
-        OUT.mkdir(parents=True, exist_ok=True)
-        field_plan_path = OUT / f"{args.standard}_field_plan.yaml"
-        plan_path = OUT / f"{args.standard}_compiled_plan.yaml"
-        field_plan_path.write_text(_yaml(field_plan.to_dict()))
-        plan_path.write_text(_yaml({"plan": plan.model_dump()}))
-        written = [field_plan_path, plan_path]
-        console.print(f"\nWrote {field_plan_path} and {plan_path}.")
+    return RouterResult(catalog, field_plan, plan, args.standard)
 
-    return RouterResult(catalog, field_plan, plan, args.standard, written)
+
+def write_artifacts(result: RouterResult, console: Console) -> List[Path]:
+    """Persist the field plan and the compiled plan, and say where they went.
+
+    Kept out of :func:`run` so that producing artifacts is a command-line act. A UI
+    driving ``run`` is trying inputs, not building outputs, and should not overwrite
+    the checked-in plans on every click.
+    """
+    OUT.mkdir(parents=True, exist_ok=True)
+    field_plan_path = OUT / f"{result.standard}_field_plan.yaml"
+    plan_path = OUT / f"{result.standard}_compiled_plan.yaml"
+    field_plan_path.write_text(_yaml(result.field_plan.to_dict()))
+    plan_path.write_text(_yaml({"plan": result.plan.model_dump()}))
+    console.print(f"\nWrote {field_plan_path} and {plan_path}.")
+    return [field_plan_path, plan_path]
 
 
 def main() -> None:
-    run(build_parser().parse_args(), Console())
+    console = Console()
+    write_artifacts(run(build_parser().parse_args(), console), console)
 
 
 if __name__ == "__main__":

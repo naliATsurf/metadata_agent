@@ -14,6 +14,7 @@ from typing import Any
 import streamlit as st
 
 from demo.components.catalog_view import render_catalog_view
+from demo.components.table_columns import column_chooser
 
 
 # Each bucket names where a field's answer comes from.
@@ -24,6 +25,10 @@ _BUCKET_HELP = {
     "unanswered": "Nothing in the bundle can answer this field.",
 }
 _ASSURANCE_MARK = {"high": "🟢 high", "medium": "🟡 medium", "low": "🟠 low"}
+
+# Always shown: the field and where it routed. The rest qualify that decision, and
+# which of them matter depends on what is being checked.
+OPTIONAL_COLUMNS = ("Assurance", "Source", "Extractor", "Query", "Hit", "Score")
 
 
 def render_router_view(result: Any, *, key: str) -> None:
@@ -75,36 +80,31 @@ def _render_coverage(coverage: dict[str, Any], result: Any) -> None:
 
 def _render_routings(field_plan: Any, key: str) -> None:
     """One row per schema field: where it routed and on what evidence."""
-    rows = [
-        {
-            "Field": path,
-            "Bucket": routing.bucket,
-            "Assurance": _ASSURANCE_MARK.get(routing.assurance, ""),
-            "Source": _source_of(routing),
-            "Extractor": routing.extractor_role or "",
-            "Query": routing.query,
-        }
-        for path, routing in field_plan.routings.items()
-    ]
-
-    buckets = sorted({row["Bucket"] for row in rows})
+    buckets = sorted({r.bucket for r in field_plan.routings.values()})
     with st.container(border=True):
         search_col, bucket_col = st.columns([2, 2], gap="medium")
         query = search_col.text_input(
-            "Search fields", placeholder="field path or query", key=f"{key}.query"
+            "Search fields", placeholder="field path, query, or hit", key=f"{key}.query"
         ).strip().lower()
         chosen = bucket_col.multiselect(
             "Buckets", buckets, default=[], key=f"{key}.buckets",
             placeholder="all buckets",
             help=" · ".join(f"{b}: {_BUCKET_HELP[b]}" for b in buckets if b in _BUCKET_HELP),
         )
+        shown = column_chooser(OPTIONAL_COLUMNS, key=key)
 
+    rows = [
+        _routing_row(path, routing, shown)
+        for path, routing in field_plan.routings.items()
+    ]
     visible = [
         row
         for row in rows
         if (not chosen or row["Bucket"] in chosen)
-        and (not query or query in f"{row['Field']} {row['Query']}".lower())
+        and (not query or query in row["_search"])
     ]
+    for row in visible:
+        row.pop("_search", None)
     if not visible:
         st.caption("No fields match the current filters.")
         return
@@ -118,11 +118,48 @@ def _render_routings(field_plan: Any, key: str) -> None:
         column_config={
             "Field": st.column_config.TextColumn(pinned=True),
             "Query": st.column_config.TextColumn(
-                width="large", help="The field's description, used as the routing query."
+                width="medium", help="The field's description, used as the routing query."
+            ),
+            "Hit": st.column_config.TextColumn(
+                width="large",
+                help="What the winning candidate says — the text the query was "
+                     "actually matched against. Read it beside Query to judge the match.",
+            ),
+            "Score": st.column_config.NumberColumn(
+                width="small", format="%.2f",
+                help="BM25 score of the winning candidate. Comparable within a field, "
+                     "not across fields.",
             ),
             "Source": st.column_config.TextColumn(width="medium"),
         },
     )
+
+
+def _routing_row(path: str, routing: Any, shown: list[str]) -> dict[str, Any]:
+    """One routing as a table row, keeping only the chosen optional columns."""
+    available = {
+        "Assurance": _ASSURANCE_MARK.get(routing.assurance, ""),
+        "Source": _source_of(routing),
+        "Extractor": routing.extractor_role or "",
+        "Query": routing.query,
+        "Hit": _hit_of(routing),
+        "Score": round(routing.candidates[0].score, 2) if routing.candidates else None,
+    }
+    row: dict[str, Any] = {"Field": path, "Bucket": routing.bucket}
+    row.update({name: available[name] for name in OPTIONAL_COLUMNS if name in shown})
+    # Search spans the query and the hit whether or not either column is on screen.
+    row["_search"] = f"{path} {routing.query} {available['Hit']}".lower()
+    return row
+
+
+def _hit_of(routing: Any) -> str:
+    """The winning candidate's own text — the document the query was ranked against.
+
+    Routing is a lexical match between the field's description and this snippet, so
+    putting the two side by side is what makes a match judgeable: a tool's declared
+    purpose, a column's name and resolved meaning, or the retrieved span.
+    """
+    return routing.candidates[0].snippet if routing.candidates else ""
 
 
 def _source_of(routing: Any) -> str:

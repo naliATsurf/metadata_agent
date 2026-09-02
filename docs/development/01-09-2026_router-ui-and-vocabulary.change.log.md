@@ -141,6 +141,20 @@ The rename covers code, tests, the demo, and the two **living** design docs
 (`plan_field_router.md`, `router_buckets.md`). The M1–M4 change logs keep the old
 words: they record what was decided when, and rewriting them would make them lie.
 
+## The compiler now records who will extract each field
+
+`FieldRouting.extractor_role` and `FieldRouting.topology` were declared with the
+comment "populated by the M4 compiler, not the router" — and nothing populated them.
+Both were always `None`, serialized as nulls into every `field_plan.yaml`, and shown
+as an always-empty column in the router page.
+
+The information existed; the compiler just never wrote it back. `_extraction_task`
+picks a player from the bucket and a topology from the routings, puts both on the
+`Task`, and dropped them on the floor for the routing itself. It now assigns them to
+each routing it groups, so the field plan is self-describing: a routing says who will
+extract it without cross-referencing the compiled plan. Fields in the `unanswered`
+bucket keep an empty extractor, correctly — nothing will extract them.
+
 ## Open decision: the assurance grading is asymmetric
 
 `_assurance` gives a `tool` routing `high` unconditionally, while a `column` routing

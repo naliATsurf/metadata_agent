@@ -242,12 +242,23 @@ def _extraction_task(
     index: int,
 ) -> Task:
     fields = [r.field_path for r in routings]
-    # Structural fields are context-level (empty target = all/context); column and
+    # Tool-answered fields are context-level (empty target = all/context); column and
     # span fields target the resource that holds them.
     target = [] if bucket == "tool" or not resource else [resource]
+    player = players.get(bucket, _BUCKET_PLAYER["column"])
+    topology = _topology_for(routings)
+
+    # Record the compiler's choice back onto each routing. FieldRouting declares
+    # extractor_role and topology as "populated by the compiler" and nothing was
+    # populating them, so the persisted field plan carried nulls and could not say
+    # who would extract a field without cross-referencing the compiled plan.
+    for routing in routings:
+        routing.extractor_role = player
+        routing.topology = topology
+
     return Task(
         task=_TASK_NAME[bucket],
-        player=players.get(bucket, _BUCKET_PLAYER["column"]),
+        player=player,
         rationale=(
             f"Field-driven routing sent {len(fields)} field(s) to the {bucket} "
             f"extractor for '{resource or 'context'}'. For each, select the candidate "
@@ -256,7 +267,7 @@ def _extraction_task(
         target_resources=target,
         fields=fields,
         field_bindings=_field_bindings(routings),
-        topology=_topology_for(routings),
+        topology=topology,
         outputs=[_artifact_name(bucket, resource, index)],
     )
 

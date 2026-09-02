@@ -13,6 +13,7 @@ from typing import Any
 
 import streamlit as st
 
+from demo.components.table_columns import column_chooser, remember, remembered
 from src.router import METHOD_LABELS
 from src.router.catalog import Catalog, ResolvedColumn
 
@@ -70,22 +71,6 @@ def _render_summary(columns: list[ResolvedColumn]) -> None:
         st.progress(len(resolved) / len(columns))
 
 
-def _remembered(key: str, fallback: Any) -> Any:
-    """The last value this widget held, surviving a switch away from the page.
-
-    Streamlit drops widget state for anything a run did not render, so a page the
-    user navigates back to would otherwise arrive with its filters reset. The shadow
-    copy is a plain session-state entry, which is not garbage collected.
-    """
-    return st.session_state.get(f"{key}.kept", fallback)
-
-
-def _remember(key: str, value: Any) -> Any:
-    """Record a widget's value for :func:`_remembered`, and pass it through."""
-    st.session_state[f"{key}.kept"] = value
-    return value
-
-
 def _render_filters(
     columns: list[ResolvedColumn], *, key: str
 ) -> list[ResolvedColumn]:
@@ -97,7 +82,7 @@ def _render_filters(
         search_col, resource_col, method_col = st.columns([2, 1.5, 1.5], gap="medium")
         query = search_col.text_input(
             "Search columns", placeholder="column name or meaning",
-            value=_remembered(f"{key}.query", ""), key=f"{key}.query",
+            value=remembered(f"{key}.query", ""), key=f"{key}.query",
         ).strip().lower()
         chosen_resources = resource_col.multiselect(
             "Tables", resources, default=[], key=f"{key}.resources",
@@ -115,14 +100,7 @@ def _render_filters(
         unresolved_only = control_col.checkbox(
             "Unresolved only", value=False, key=f"{key}.unresolved"
         )
-        column_col.multiselect(
-            "Columns shown",
-            OPTIONAL_COLUMNS,
-            default=_remembered(f"{key}.columns", list(OPTIONAL_COLUMNS)),
-            key=f"{key}.columns",
-            help="Hide what you are not reading; the table fits the window instead "
-                 "of scrolling sideways.",
-        )
+        column_chooser(OPTIONAL_COLUMNS, key=key, container=column_col)
 
     def keeps(column: ResolvedColumn) -> bool:
         if chosen_resources and column.resource not in chosen_resources:
@@ -137,8 +115,7 @@ def _render_filters(
                 return False
         return True
 
-    _remember(f"{key}.query", query)
-    _remember(f"{key}.columns", st.session_state.get(f"{key}.columns", list(OPTIONAL_COLUMNS)))
+    remember(f"{key}.query", query)
     return [column for column in columns if keeps(column)]
 
 
