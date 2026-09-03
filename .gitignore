@@ -113,6 +113,7 @@ data/output/
 data/schema/
 data/end2end_test/
 data/sample_output/
+data/eval/
 logs/
 # ...but the development logs in docs/ are documentation, not run output.
 !docs/development/logs/
