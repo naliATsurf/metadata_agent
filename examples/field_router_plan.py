@@ -68,6 +68,7 @@ DEFAULT_STANDARD = "sharetrait_basic"
 def build_plan(
     tables: List[Path], dicts: List[Path], docs: List[Path], standard: str,
     prose_reader: ProseReader | None = None,
+    candidates: int = 5,
 ) -> Tuple[Catalog, FieldPlan, Plan]:
     """The core: resolve the whole bundle → route → compile."""
     schema = get_schema_for_standard(standard)
@@ -82,7 +83,7 @@ def build_plan(
     sources = dict_ctx + doc_ctx
 
     catalog = resolve_bundle(table_ctx, sources=sources, prose_reader=prose_reader)  # layer 3
-    field_plan = route_fields(schema, catalog=catalog, docs=doc_ctx)  # layer 4
+    field_plan = route_fields(schema, catalog=catalog, docs=doc_ctx, k=candidates)  # layer 4
     plan = compile_field_plan(field_plan)                          # layer 5
     return catalog, field_plan, plan
 
@@ -163,6 +164,9 @@ def build_parser() -> argparse.ArgumentParser:
     target = ap.add_argument_group(
         "Metadata standard", "The schema whose fields are routed."
     )
+    routing = ap.add_argument_group(
+        "Routing", "How many candidates the router keeps per field."
+    )
     tier = ap.add_argument_group(
         "Prose tiers", "Which readers run above the codebook and the value prior."
     )
@@ -178,6 +182,10 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--doc", action="append", default=None,
                         help="documents to use, by filename (repeatable). Omit to use every "
                              f"document found in the bundle; pass '{NONE}' to use none")
+    routing.add_argument("--candidates", type=int, default=5,
+                         help="how many ranked candidates to keep per field. The router "
+                              "proposes a set and the executor picks from it, so this is "
+                              "the recall budget, not a display setting")
     tier.add_argument("--prose-reader", action="store_true",
                       help="enable the retrieve-then-read prose tier (localize + read a "
                            "cued definition) above the glossary regex")
@@ -210,7 +218,7 @@ def run(args: argparse.Namespace, console: Console) -> RouterResult:
     console.print(
         f"sources:  dictionaries={[p.name for p in dicts] or 'none'}  "
         f"docs={[p.name for p in docs] or 'none'}  "
-        f"prose-reader={'on' if reader else 'off'}"
+        f"prose-reader={'on' if reader else 'off'}  candidates={args.candidates}"
     )
     excluded = [
         p.name for p in (*bundle.codebooks, *bundle.documents) if p not in (*dicts, *docs)
@@ -219,7 +227,8 @@ def run(args: argparse.Namespace, console: Console) -> RouterResult:
         console.print(f"[dim]discovered but not used: {excluded}[/]")
 
     catalog, field_plan, plan = build_plan(
-        bundle.tables, dicts, docs, args.standard, prose_reader=reader
+        bundle.tables, dicts, docs, args.standard,
+        prose_reader=reader, candidates=args.candidates,
     )
     print_catalog(catalog, console)
     print_routing(field_plan, console)

@@ -26,9 +26,52 @@ _BUCKET_HELP = {
 }
 _ASSURANCE_MARK = {"high": "🟢 high", "medium": "🟡 medium", "low": "🟠 low"}
 
-# Always shown: the field and where it routed. The rest qualify that decision, and
-# which of them matter depends on what is being checked.
-OPTIONAL_COLUMNS = ("Assurance", "Source", "Extractor", "Query", "Hit", "Score")
+CANDIDATE_VIEW, FIELD_VIEW = "Candidates", "Fields"
+
+# One row per ranked candidate — the artifact as the router emits it. Ordered by what
+# each column describes: the rank and strength of the match, then what was matched and
+# where, then the two texts the match was made between.
+CANDIDATE_COLUMNS = ("Score", "Kind", "Source", "Query", "Hit")
+
+# Repeated down a field's candidate rows because they belong to the field, not to any
+# one candidate — printed once per group so the block reads as a block.
+_FIELD_LEVEL = ("Field", "Bucket", "Query")
+# One row per field — the summary, where "top candidate" is explicitly the top of a set.
+FIELD_COLUMNS = ("Assurance", "Candidates", "Top candidate", "Extractor", "Query")
+
+_ROUTING_COLUMNS = {
+    "Field": st.column_config.TextColumn(pinned=True),
+    "#": st.column_config.NumberColumn(
+        width="small", format="%d", help="Rank within this field's candidate set."
+    ),
+    "Query": st.column_config.TextColumn(
+        width="medium", help="The field's description, used as the routing query."
+    ),
+    "Hit": st.column_config.TextColumn(
+        width="large",
+        help="What this candidate says — the text the query was matched against.",
+    ),
+    "Score": st.column_config.NumberColumn(
+        width="small", format="%.2f",
+        help="BM25 score. Comparable within a field, not across fields.",
+    ),
+    "Kind": st.column_config.TextColumn(
+        width="small", help="What sort of location this candidate is.",
+    ),
+    "Source": st.column_config.TextColumn(width="medium"),
+    "Bucket": st.column_config.TextColumn(
+        width="small",
+        help="A property of the *field*, not of any one candidate: which mechanism "
+             "will produce its value. Read off the top candidate's kind, so it is "
+             "shown once per field.",
+    ),
+    "Top candidate": st.column_config.TextColumn(
+        width="medium", help="Rank 1 of the set — a proposal, not a decision.",
+    ),
+    "Candidates": st.column_config.NumberColumn(
+        width="small", help="How many sources the router proposed for this field.",
+    ),
+}
 
 
 def render_router_view(result: Any, *, key: str) -> None:
@@ -79,10 +122,21 @@ def _render_coverage(coverage: dict[str, Any], result: Any) -> None:
 
 
 def _render_routings(field_plan: Any, key: str) -> None:
-    """One row per schema field: where it routed and on what evidence."""
+    """The router's output, either summarised per field or in full per candidate.
+
+    The router proposes a *ranked set* per field and the executor picks from it, so a
+    single "source" column would assert a decision nobody has made. The candidate view
+    is the artifact as it stands; the field view is the summary over it.
+    """
     buckets = sorted({r.bucket for r in field_plan.routings.values()})
     with st.container(border=True):
-        search_col, bucket_col = st.columns([2, 2], gap="medium")
+        view_col, search_col, bucket_col = st.columns([1.4, 2, 2], gap="medium")
+        view = view_col.segmented_control(
+            "View", [CANDIDATE_VIEW, FIELD_VIEW], default=CANDIDATE_VIEW,
+            key=f"{key}.view",
+            help="Candidates shows every ranked proposal; fields summarises one row "
+                 "each.",
+        ) or CANDIDATE_VIEW
         query = search_col.text_input(
             "Search fields", placeholder="field path, query, or hit", key=f"{key}.query"
         ).strip().lower()
@@ -91,65 +145,114 @@ def _render_routings(field_plan: Any, key: str) -> None:
             placeholder="all buckets",
             help=" · ".join(f"{b}: {_BUCKET_HELP[b]}" for b in buckets if b in _BUCKET_HELP),
         )
-        shown = column_chooser(OPTIONAL_COLUMNS, key=key)
+        optional = CANDIDATE_COLUMNS if view == CANDIDATE_VIEW else FIELD_COLUMNS
+        shown = column_chooser(optional, key=f"{key}.{view}")
 
+    build = _candidate_rows if view == CANDIDATE_VIEW else _field_rows
     rows = [
-        _routing_row(path, routing, shown)
+        row
         for path, routing in field_plan.routings.items()
+        for row in build(path, routing, shown)
     ]
     visible = [
         row
         for row in rows
-        if (not chosen or row["Bucket"] in chosen)
-        and (not query or query in row["_search"])
+        if (not chosen or row["Bucket"] in chosen) and (not query or query in row["_search"])
     ]
     for row in visible:
         row.pop("_search", None)
+    if view == CANDIDATE_VIEW:
+        _blank_repeats(visible)
     if not visible:
         st.caption("No fields match the current filters.")
         return
 
+    st.caption(
+        f"{len(visible)} candidates across {len(field_plan.routings)} fields — "
+        "ranked proposals, not decisions. The executor picks one per field."
+        if view == CANDIDATE_VIEW
+        else f"{len(visible)} fields."
+    )
     st.dataframe(
         visible,
         width="stretch",
         hide_index=True,
-        key=f"{key}.routing_table",
+        key=f"{key}.routing_table.{view}",
         height=min(600, 40 + 35 * len(visible)),
-        column_config={
-            "Field": st.column_config.TextColumn(pinned=True),
-            "Query": st.column_config.TextColumn(
-                width="medium", help="The field's description, used as the routing query."
-            ),
-            "Hit": st.column_config.TextColumn(
-                width="large",
-                help="What the winning candidate says — the text the query was "
-                     "actually matched against. Read it beside Query to judge the match.",
-            ),
-            "Score": st.column_config.NumberColumn(
-                width="small", format="%.2f",
-                help="BM25 score of the winning candidate. Comparable within a field, "
-                     "not across fields.",
-            ),
-            "Source": st.column_config.TextColumn(width="medium"),
-        },
+        column_config=_ROUTING_COLUMNS,
     )
 
 
-def _routing_row(path: str, routing: Any, shown: list[str]) -> dict[str, Any]:
-    """One routing as a table row, keeping only the chosen optional columns."""
+def _blank_repeats(rows: list[dict[str, Any]]) -> None:
+    """Print a field's own columns only on the first row of its run of candidates.
+
+    The rows for one field are already adjacent; blanking the repeats is what makes
+    that visible, so a five-candidate field reads as one block rather than five
+    unrelated rows. Sorting the table by another column breaks the runs — the values
+    are still correct per row, they are simply no longer grouped.
+    """
+    previous: tuple[Any, ...] | None = None
+    for row in rows:
+        current = tuple(row.get(name) for name in _FIELD_LEVEL)
+        if current == previous:
+            for name in _FIELD_LEVEL:
+                if name in row:
+                    row[name] = ""
+        previous = current
+
+
+def _candidate_rows(path: str, routing: Any, shown: list[str]) -> list[dict[str, Any]]:
+    """Every ranked candidate for one field, one row each.
+
+    A field with no candidate still gets a row, so an unanswered field is visible
+    here rather than silently absent.
+    """
+    if not routing.candidates:
+        row: dict[str, Any] = {"Field": path, "Bucket": routing.bucket, "#": None}
+        row.update({n: None for n in CANDIDATE_COLUMNS if n in shown})
+        if "Query" in shown:
+            row["Query"] = routing.query
+        row["_search"] = f"{path} {routing.query}".lower()
+        return [row]
+
+    rows = []
+    for rank, candidate in enumerate(routing.candidates, start=1):
+        available = {
+            "Score": round(candidate.score, 2),
+            "Kind": candidate.kind,
+            "Source": _locate(candidate),
+            "Query": routing.query,
+            "Hit": candidate.snippet,
+        }
+        row = {"Field": path, "Bucket": routing.bucket, "#": rank}
+        row.update({n: available[n] for n in CANDIDATE_COLUMNS if n in shown})
+        row["_search"] = f"{path} {routing.query} {candidate.snippet}".lower()
+        rows.append(row)
+    return rows
+
+
+def _field_rows(path: str, routing: Any, shown: list[str]) -> list[dict[str, Any]]:
+    """One row summarising a field's routing."""
     available = {
         "Assurance": _ASSURANCE_MARK.get(routing.assurance, ""),
-        "Source": _source_of(routing),
+        "Candidates": len(routing.candidates),
+        "Top candidate": _source_of(routing),
         "Extractor": routing.extractor_role or "",
         "Query": routing.query,
-        "Hit": _hit_of(routing),
-        "Score": round(routing.candidates[0].score, 2) if routing.candidates else None,
     }
     row: dict[str, Any] = {"Field": path, "Bucket": routing.bucket}
-    row.update({name: available[name] for name in OPTIONAL_COLUMNS if name in shown})
-    # Search spans the query and the hit whether or not either column is on screen.
-    row["_search"] = f"{path} {routing.query} {available['Hit']}".lower()
-    return row
+    row.update({name: available[name] for name in FIELD_COLUMNS if name in shown})
+    row["_search"] = f"{path} {routing.query} {_hit_of(routing)}".lower()
+    return [row]
+
+
+def _locate(candidate: Any) -> str:
+    """One candidate as ``resource:locator``."""
+    return (
+        f"{candidate.resource}:{candidate.locator}"
+        if candidate.resource
+        else str(candidate.locator)
+    )
 
 
 def _hit_of(routing: Any) -> str:
@@ -167,11 +270,7 @@ def _source_of(routing: Any) -> str:
     if not routing.candidates:
         return ""
     candidate = routing.candidates[0]
-    return (
-        f"{candidate.resource}:{candidate.locator}"
-        if candidate.resource
-        else str(candidate.locator)
-    )
+    return _locate(candidate)
 
 
 def _render_plan(plan: Any, key: str) -> None:
