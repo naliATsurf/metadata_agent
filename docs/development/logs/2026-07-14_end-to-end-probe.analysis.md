@@ -100,7 +100,7 @@ about a context*; none emits records.
 
 **The fix is one idea: move the model out of the data path and into the control
 path.** It authors the mapping; code applies it. See
-[the plan](14-07-2026_plan.md).
+[the plan](../plans/free-text-delivery.md).
 
 ## Finding 2 — the CSVs carry the data; the PDFs carry the metadata
 

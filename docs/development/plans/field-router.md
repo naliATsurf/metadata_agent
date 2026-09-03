@@ -3,11 +3,11 @@
 This document plans a planner that fills a metadata standard **field by field**,
 routing each field to the source that can answer it, instead of surveying every
 source and hoping the values fall out. It builds on the capability split in
-[plan_free_text.md](plan_free_text.md), reuses the plan/artifact machinery
-described in [plan_multi_modality.md](plan_multi_modality.md), and extends the
+[the free-text plan](free-text.md), reuses the plan/artifact machinery described
+in [the multi-modality plan](multi-modality.md), and extends the
 evidence-attribution work landed in
-[the 2026-07-22 change log](22-07-2026_change.log.md). It complements
-[Architecture](../architecture.md).
+[the 2026-07-22 change log](../logs/2026-07-22_evidence-caller-attribution.change.md).
+It complements [Architecture](../../architecture.md).
 
 Status legend: ✅ done · 🟡 partial · 🔲 not started · ⛔ blocked on a decision.
 

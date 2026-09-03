@@ -1,11 +1,11 @@
 # Change log 2026-07-22 — Field router M1: schema walker, Searchable capability, BM25 search
 
 **Goal:** Land milestone 1 of the field-driven router
-([plan_field_router.md](plan_field_router.md)) — the two foundation layers that
-are testable with no planner change yet. Layer 1 flattens a metadata standard to
-the leaf fields the router must fill. Layer 2 gives every modality a `search`
-capability that returns *pointers* (a column to compute on, a text span to quote)
-rather than values, exposed as a provenance-captured tool. Neither the
+([the field-router plan](../plans/field-router.md)) — the two foundation layers
+that are testable with no planner change yet. Layer 1 flattens a metadata
+standard to the leaf fields the router must fill. Layer 2 gives every modality a
+`search` capability that returns *pointers* (a column to compute on, a text span
+to quote) rather than values, exposed as a provenance-captured tool. Neither the
 orchestrator nor the players change; this is scaffolding the later milestones
 build on. A follow-up pass then replaced the placeholder ranker and chunker with
 stronger, still-deterministic ones.
@@ -89,10 +89,11 @@ capability. Its tests moved to `TestGrep`.
 ## Test fixture and standard
 
 `data/tests/router_test/` (a bundle: opaque-column CSV, a codebook, a README)
-and the `field_router_test` standard in `src/standards.py` were added earlier this
-session as the bed for exercising all of the above — the semantic gap, cross-file
-resolution, narrative fields, and two planted conflicts. Their expected fills and
-traps live in the [plan doc's Test fixture section](plan_field_router.md#test-fixture),
+and the `field_router_test` standard in `src/standards.py` were added earlier
+this session as the bed for exercising all of the above — the semantic gap,
+cross-file resolution, narrative fields, and two planted conflicts. Their
+expected fills and traps live in the
+[plan doc's Test fixture section](../plans/field-router.md#test-fixture),
 deliberately kept out of the bundle so the router cannot ingest its own answer
 key. (The bundle lives under `data/tests/`, tracked with the repo so the demos
 here are reproducible from a clean checkout.)

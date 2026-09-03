@@ -11,7 +11,8 @@ context, invoking each exactly as `Player.execute_task` does, and separately
 measured `filter_tools_by_context_type` across all four context types.
 
 **Outcome:** Two silent failures, both tracing to one cause. Fixed the same day
-by restructuring the tools module — see `09-07-2026_change.log.md`. This log
+by restructuring the tools module — see
+[the change log](2026-07-09_capability-tool-registry.change.md). This log
 describes the code *as it was before* that change.
 
 ## Inventory
@@ -139,7 +140,8 @@ offered.
 
 ## Follow-ups
 
-All resolved the same day in `09-07-2026_change.log.md`:
+All resolved the same day in
+[the change log](2026-07-09_capability-tool-registry.change.md):
 
 1. ✅ Replace the compatibility table with capability-based gating (finding 1).
 2. ✅ Derive tool dispatch from each tool's signature, and let the model call the

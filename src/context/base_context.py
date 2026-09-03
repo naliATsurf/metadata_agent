@@ -361,7 +361,7 @@ class ExecutionContext(ABC):
 # ---------------------------------------------------------------------------
 # Searchable — the capability the field-driven router routes over
 #
-# See docs/development/plan_field_router.md. Search returns *pointers*, not
+# See docs/development/plans/field-router.md. Search returns *pointers*, not
 # values: a column a computation then runs on (tabular), or a span an extractor
 # then quotes (text). Ranking is BM25 over the candidate documents (columns or
 # chunks) — a strong, deterministic, dependency-free lexical baseline. It is the

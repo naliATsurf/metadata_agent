@@ -1,12 +1,12 @@
 # Change log 2026-07-09 — Capability-based tool registry
 
 **Goal:** Fix the two silent failures found in the tool surface audit (see
-`09-07-2026_analysis.log.md`) and restructure `src/tools/` so the same class of
-bug cannot recur as new modalities are added. Both findings traced to one cause
-— the same knowledge written down in three hand-maintained places — so the fix
-was to make each fact derivable from a single declaration rather than to patch
-each table. No API-compat constraint; prioritized clean design over minimal
-diff. Existing CSV pipeline preserved.
+[the analysis log](2026-07-09_tool-surface-audit.analysis.md)) and restructure
+`src/tools/` so the same class of bug cannot recur as new modalities are added.
+Both findings traced to one cause — the same knowledge written down in three
+hand-maintained places — so the fix was to make each fact derivable from a
+single declaration rather than to patch each table. No API-compat constraint;
+prioritized clean design over minimal diff. Existing CSV pipeline preserved.
 
 ## Capability gating replaces the context-type table
 

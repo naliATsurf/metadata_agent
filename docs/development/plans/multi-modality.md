@@ -2,9 +2,10 @@
 
 This document plans the reshape forced by the end-to-end probe against a real
 deposit (`TRADAT009.zip` against the ShareTrait schema). It assumes the findings
-in the [analysis log](14-07-2026_analysis.log.md) and the layer split in
-`data/schema/`. It supersedes nothing in [plan.md](plan.md) — the free-text work
-there remains valid and is folded in as Phase 1.
+in the [analysis log](../logs/2026-07-14_end-to-end-probe.analysis.md) and the
+layer split in `data/schema/`. It supersedes nothing in
+[the free-text plan](free-text.md) — the free-text work there remains valid and
+is folded in as Phase 1.
 
 Status legend: ✅ done · 🟡 partial · 🔲 not started · ⛔ blocked on a decision.
 
@@ -100,9 +101,10 @@ three. `ContextFactory._create_from_list` types the context from `paths[0]`;
 - Unpack archives at the factory boundary.
 - **PDF reader.** No PDF dependency exists anywhere in the project today.
 - `.R` → `ContextType.TEXT` initially; a `CodeContext` only if it earns its keep.
-- **Phase 3 of [plan.md](plan.md) — the `text.*` toolset — is a hard prerequisite.**
-  `TextContext` exists and exposes `read_text`/`search`/`iter_chunks`, but no tool
-  surfaces any of it, so a text resource sees only the four `universal` tools.
+- **Phase 3 of [the free-text plan](free-text.md) — the `text.*` toolset — is
+  a hard prerequisite.** `TextContext` exists and exposes
+  `read_text`/`search`/`iter_chunks`, but no tool surfaces any of it, so a text
+  resource sees only the four `universal` tools.
 
 Why this is first: **the CSVs supplied 9 of 139 filled attributes; the two PDFs
 supplied 42.** Units, trait definitions, experimental conditions, the collection

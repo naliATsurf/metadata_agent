@@ -3,7 +3,7 @@
 This document plans the extension of the framework to extract metadata from
 free-text sources (plain text, Markdown; images/PDF later), reusing the
 existing orchestrator, player, and standards machinery. It complements
-[Architecture](../architecture.md) and the [Module Guide](../modules.md).
+[Architecture](../../architecture.md) and the [Module Guide](../../modules.md).
 
 Status legend: ✅ done · 🟡 partial · 🔲 not started.
 
@@ -50,8 +50,9 @@ tests`; existing pipeline green).
 
 ## Tool module refactor ✅
 
-Done 2026-07-09 (see the [change log](09-07-2026_change.log.md)); it was not in
-the original plan but was forced by the same tabular assumptions.
+Done 2026-07-09 (see the
+[change log](../logs/2026-07-09_capability-tool-registry.change.md)); it was not
+in the original plan but was forced by the same tabular assumptions.
 
 - **Capability gating.** Tools declare `@context_tool(toolset=...,
   requires=TabularContext)`; `tools_for(context)` is an `isinstance` check.
@@ -153,7 +154,7 @@ already in place (see Context module refactor).
   (chunking, `TextResourceInfo`, factory dispatch, classifier, tool gating),
   mirroring the CSV/SQLite structure.
 - An `examples/` script running the pipeline over a small text corpus.
-- Update the [Module Guide](../modules.md) `src/context/` section and the demo
+- Update the [Module Guide](../../modules.md) `src/context/` section and the demo
   app's accepted file types.
 
 ## Friction points and notes

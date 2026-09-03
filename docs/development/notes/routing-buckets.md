@@ -1,10 +1,11 @@
 # Reference: routing buckets and candidate `kind`s
 
 This note explains the linked concepts at the heart of the field-driven router
-(see [plan_field_router.md](plan_field_router.md)): the **candidate** the router
-ranks, the **`kind`** each candidate carries, and the **bucket** assigned to every
-field. It traces the full lifecycle — what produces these, who assigns them, and
-everyone who reads them — so the routing decision can be reasoned about end to end.
+(see [the field-router plan](../plans/field-router.md)): the **candidate** the
+router ranks, the **`kind`** each candidate carries, and the **bucket** assigned
+to every field. It traces the full lifecycle — what produces these, who assigns
+them, and everyone who reads them — so the routing decision can be reasoned
+about end to end.
 
 ## The three concepts, in one sentence
 

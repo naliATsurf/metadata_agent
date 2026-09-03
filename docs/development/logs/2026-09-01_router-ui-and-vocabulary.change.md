@@ -1,7 +1,7 @@
 # Change log 2026-09-01 — Router UI, bundle discovery, and the routing vocabulary
 
 **Goal:** Give the field router a page of its own, matching the catalog resolver's
-([31-08-2026](31-08-2026_demo-module-pages.change.log.md)). Building it surfaced two
+([2026-08-31](2026-08-31_demo-module-pages.change.md)). Building it surfaced two
 things worth more than the page: the two examples had **two different bundle
 partitioners**, one of them still carrying a known bug, and the routing buckets were
 named so poorly that reading a `FieldPlan` meant re-reading their definitions. Both

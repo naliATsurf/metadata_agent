@@ -1,13 +1,13 @@
 # Change log 2026-08-04 — Field router M4: compile the FieldPlan into a Plan
 
 **Goal:** Land milestone 4 of the field-driven router
-([plan_field_router.md](plan_field_router.md), layer 5) — the step that turns the
-routing *artifact* into the execution *form*. M3 decided **where** each field is
-answered; M4 lays out the work so the existing executor can run it, without
-changing anything downstream. `compile_field_plan(field_plan) -> Plan` emits the
-same `Plan`/`Task` shape the source-driven planner does, so `PlanExecutor` and
-`StepExecutor` run unchanged — the field-driven path is an alternative front-end,
-not a fork.
+([the field-router plan](../plans/field-router.md), layer 5) — the step that
+turns the routing *artifact* into the execution *form*. M3 decided **where**
+each field is answered; M4 lays out the work so the existing executor can run
+it, without changing anything downstream. `compile_field_plan(field_plan) ->
+Plan` emits the same `Plan`/`Task` shape the source-driven planner does, so
+`PlanExecutor` and `StepExecutor` run unchanged — the field-driven path is an
+alternative front-end, not a fork.
 
 ## Linchpin 1 — field identity survives compilation
 
@@ -16,7 +16,7 @@ truth, a `Task` is only its execution form, and the field → task → result
 correspondence must be carried **explicitly** — never reconstructed by heuristics
 afterwards, or we are back to the post-hoc matching the router was built to
 replace. So `Task` gains three additive, optional attributes
-([src/core/schemas.py](../../src/core/schemas.py)):
+([src/core/schemas.py](../../../src/core/schemas.py)):
 
 ```
 Task{ …, fields: [str], field_bindings: [dict], topology: str|None }
@@ -40,8 +40,8 @@ execution path are entirely unaffected — both planners still emit one `Task` s
 
 ## What the compiler does — and only that
 
-[src/router/compile.py](../../src/router/compile.py). Deterministic and LLM-free;
-it lays out execution from the routing artifact:
+[src/router/compile.py](../../../src/router/compile.py). Deterministic and
+LLM-free; it lays out execution from the routing artifact:
 
 - **Groups** routings that share an extractor *and an assurance tier* — the same
   `(bucket, resource, tier)` — into one task, so fields answered from the same place
@@ -164,9 +164,10 @@ without asking it to change.
   Also added `[tool.pytest.ini_options] testpaths = ["tests"]` to `pyproject.toml`,
   so collection no longer walks the gitignored `docs/_build/` (a Sphinx build had
   dropped a downloadable copy of `test_compile.py` there, colliding on basename).
-- New tests: [tests/test_compile.py](../../tests/test_compile.py). Rather than one
-  happy path, they drive the compiler with realistic, messy bundles and assert the
-  *invariants* via a shared `assert_well_formed` check reused across classes:
+- New tests: [tests/test_compile.py](../../../tests/test_compile.py). Rather
+  than one happy path, they drive the compiler with realistic, messy bundles and
+  assert the *invariants* via a shared `assert_well_formed` check reused across
+  classes:
   - **`RealisticCompileTest`** — one data table + a codebook with the `water_temp`
     Kelvin trap, **one long multi-section README** (the usual shape — every narrative
     field in its own section of *one* document, not a file per field), a structural

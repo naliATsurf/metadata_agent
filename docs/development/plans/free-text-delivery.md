@@ -1,10 +1,10 @@
 # Staged Delivery: Free-Text Metadata Extraction
 
 A **delivery-ordered** view of the free-text work. The component-ordered plan in
-[plan_free_text.md](plan_free_text.md) is the source of truth for *what* each piece is and *what is
-already done*; this document reorders the remaining work into shippable stages,
-each demonstrable on its own rather than back-loaded into a single big-bang
-release.
+[the free-text plan](free-text.md) is the source of truth for *what* each piece
+is and *what is already done*; this document reorders the remaining work into
+shippable stages, each demonstrable on its own rather than back-loaded into a
+single big-bang release.
 
 Status legend: ✅ done · 🟡 partial · 🔲 not started.
 
@@ -12,12 +12,12 @@ Status legend: ✅ done · 🟡 partial · 🔲 not started.
 
 Free-text metadata extraction is **study-scale**: one record per document or
 corpus, cardinality 1, every field readable from prose. In the terms of the
-[analysis log](14-07-2026_analysis.log.md), it sits entirely inside the layer *a
-model may write directly*. It needs **none** of the executor reshape (no change to
-`Task.player`, no deterministic transform steps, no mapping artifact). That makes
-it the lowest-risk, most self-contained deliverable available, and it can proceed
-independent of the two open decisions (schema, and deposit count) that gate the
-ShareTrait data-model work.
+[analysis log](../logs/2026-07-14_end-to-end-probe.analysis.md), it sits
+entirely inside the layer *a model may write directly*. It needs **none** of the
+executor reshape (no change to `Task.player`, no deterministic transform steps,
+no mapping artifact). That makes it the lowest-risk, most self-contained
+deliverable available, and it can proceed independent of the two open decisions
+(schema, and deposit count) that gate the ShareTrait data-model work.
 
 It also **double-counts**. The two heaviest stages here — the text toolset and the
 PDF reader — are exactly Phase 1 of the ShareTrait reshape's Milestone 1 (the probe
@@ -27,8 +27,8 @@ product.
 
 ## Foundation already in place ✅
 
-Done and verified (see [plan_free_text.md](plan_free_text.md) for detail and the
-[change log](09-07-2026_change.log.md)):
+Done and verified (see [the free-text plan](free-text.md) for detail and the
+[change log](../logs/2026-07-09_capability-tool-registry.change.md)):
 
 - **Context + tool refactors.** Capability split (base `ExecutionContext` +
   `TabularContext` + `TextContext`); typed `ResourceInfo`; resource-level
@@ -48,10 +48,11 @@ measures how well.
 
 ## Delivery principle
 
-[plan_free_text.md](plan_free_text.md) orders by component: all tools (Phase 3), then players (Phase 4),
-then the standard (Phase 5), then tests (Phase 6). Nothing ships until Phase 5. This
-plan instead ships the thinnest working extractor first and **thickens it**, so each
-stage is independently demoable on a real document.
+[the free-text plan](free-text.md) orders by component: all tools (Phase 3),
+then players (Phase 4), then the standard (Phase 5), then tests (Phase 6).
+Nothing ships until Phase 5. This plan instead ships the thinnest working
+extractor first and **thickens it**, so each stage is independently demoable on
+a real document.
 
 **Measurement is deferred, by decision.** A golden-record auditor — automated
 scoring of coverage and confabulation — is the right eventual discipline (and is
@@ -128,13 +129,14 @@ the ShareTrait reshape.
 
 **Ships:** "we can read PDFs." **Acceptance:** the deposit's `Materials and
 Methods.pdf` yields a `document_general` record; this is literally Milestone 1 Phase
-1 of [the reshape](14-07-2026_analysis.log.md).
+1 of [the reshape](../logs/2026-07-14_end-to-end-probe.analysis.md).
 
 ---
 
 ## Build-order ↔ ship-order
 
-The [plan_free_text.md](plan_free_text.md) phases map onto these stages so the two views cannot drift:
+The [free-text plan](free-text.md) phases map onto these stages so the two views
+cannot drift:
 
 | Stage | plan.md phases consumed | Executor reshape needed? |
 |---|---|---|
@@ -161,7 +163,7 @@ Default: the first, unless the real customer is the deposit.
 
 ## Friction points and notes
 
-Carried from [plan_free_text.md](plan_free_text.md), still live:
+Carried from [the free-text plan](free-text.md), still live:
 
 - **Capability discovery is implicit.** Consumers ask `isinstance(ctx,
   TabularContext)`. Fine for two modalities; when PDF arrives as text-plus-images,

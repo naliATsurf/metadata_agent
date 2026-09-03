@@ -1,18 +1,18 @@
 # Change log 2026-07-22 — Field router M2: catalog resolution (symbol linking)
 
 > **Status:** landed, then **extended by later work** — M3 (routing), M4 (the
-> FieldPlan→Plan compiler), the multi-table follow-up (`resolve_bundle`), and the
-> retrieve-then-read prose reader. The "Scope and limits" section below is the M2
-> snapshot with follow-ups appended inline; items marked *resolved* were closed by
-> that later work. For the whole subsystem's current shape see
-> [plan_field_router.md](plan_field_router.md) and the
-> [M4 change log](04-08-2026_field-router-m4.change.log.md).
+> FieldPlan→Plan compiler), the multi-table follow-up (`resolve_bundle`), and
+> the retrieve-then-read prose reader. The "Scope and limits" section below is
+> the M2 snapshot with follow-ups appended inline; items marked *resolved* were
+> closed by that later work. For the whole subsystem's current shape see
+> [the field-router plan](../plans/field-router.md) and the
+> [M4 change log](2026-08-04_field-router-m4.change.md).
 
 **Goal:** Land milestone 2 of the field-driven router
-([plan_field_router.md](plan_field_router.md), layer 3) — the pre-routing pass
-that closes the semantic gap M1 exposed. `TabularContext.search` cannot reach a
-latitude column named `la`: the signal isn't in the name. But it usually *is*
-elsewhere in the bundle — a codebook row, a README line — so this is a
+([the field-router plan](../plans/field-router.md), layer 3) — the pre-routing
+pass that closes the semantic gap M1 exposed. `TabularContext.search` cannot
+reach a latitude column named `la`: the signal isn't in the name. But it usually
+*is* elsewhere in the bundle — a codebook row, a README line — so this is a
 **missing-context problem, not a retrieval-tuning one**. Catalog resolution
 imports that missing context into the catalog *before* routing, turning each
 opaque column into a described one, and cross-checks every borrowed description

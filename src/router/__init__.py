@@ -1,4 +1,4 @@
-"""Field-driven routing (see docs/development/plan_field_router.md).
+"""Field-driven routing (see docs/development/plans/field-router.md).
 
 Fills a metadata standard field by field: flatten the target schema to leaf
 fields (:mod:`~src.router.schema`), route each to the source that can answer it,

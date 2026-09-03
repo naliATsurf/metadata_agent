@@ -1,14 +1,14 @@
 # Change log 2026-07-22 — Field router M3: the router and the FieldPlan
 
 **Goal:** Land milestone 3 of the field-driven router
-([plan_field_router.md](plan_field_router.md), layer 4) — the piece that finally
-inverts the pipeline. Instead of surveying every source and hoping values fall
-out, the router starts from *what it must fill* (the schema's leaf fields) and
-routes each to the source that can answer it, emitting a `FieldPlan`: the
-persisted routing artifact that M4 will compile into executable `Task`s. This is
-the first milestone that runs schema → route end to end, and the first with a
-coverage report — a field nothing can answer is flagged *before* extraction, not
-discovered as a confabulation afterwards.
+([the field-router plan](../plans/field-router.md), layer 4) — the piece that
+finally inverts the pipeline. Instead of surveying every source and hoping
+values fall out, the router starts from *what it must fill* (the schema's leaf
+fields) and routes each to the source that can answer it, emitting a
+`FieldPlan`: the persisted routing artifact that M4 will compile into executable
+`Task`s. This is the first milestone that runs schema → route end to end, and
+the first with a coverage report — a field nothing can answer is flagged
+*before* extraction, not discovered as a confabulation afterwards.
 
 ## Three buckets, decided standard-agnostically
 
