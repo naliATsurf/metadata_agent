@@ -120,6 +120,8 @@ class ResolvedColumn:
     link_evidence: Optional[str] = None    # citation for the interpretation
     link_quote: Optional[str] = None       # the cited text itself, when there is one
     value_label: Optional[str] = None      # coarse prior: coordinate | temporal | numeric | categorical
+    value_range: Optional[Tuple[float, float]] = None   # (min, max) for a numeric column
+    value_integral: Optional[bool] = None  # numeric column whose values are all whole
     conflicts: List[str] = field(default_factory=list)
     corroborated_by: List[str] = field(default_factory=list)  # citations of agreeing sources
     alternatives: List[Dict[str, Any]] = field(default_factory=list)  # candidates that lost
@@ -141,6 +143,8 @@ class ResolvedColumn:
             "link_evidence": self.link_evidence,
             "link_quote": self.link_quote,
             "value_label": self.value_label,
+            "value_range": list(self.value_range) if self.value_range else None,
+            "value_integral": self.value_integral,
             "conflicts": self.conflicts,
             "corroborated_by": self.corroborated_by,
             "alternatives": self.alternatives,
@@ -791,7 +795,9 @@ def _looks_like_coordinate_name(name: Any) -> bool:
 
 def _value_profile(series: pd.Series) -> Dict[str, Any]:
     """A light, recomputable profile of a column's values."""
-    profile: Dict[str, Any] = {"numeric": False, "min": None, "max": None, "label": None}
+    profile: Dict[str, Any] = {
+        "numeric": False, "min": None, "max": None, "integral": None, "label": None,
+    }
     if detect_temporal_dtype(series):
         profile["label"] = "temporal"
         return profile
@@ -801,6 +807,10 @@ def _value_profile(series: pd.Series) -> Dict[str, Any]:
             profile["numeric"] = True
             profile["min"] = float(sample.min())
             profile["max"] = float(sample.max())
+            # Whether the values are whole numbers, which dtype does not answer:
+            # pandas stores an integer column containing NaN as float64, so a float
+            # dtype is not evidence of a fractional quantity. Only the values are.
+            profile["integral"] = bool((sample % 1 == 0).all())
         # Coordinate requires float values in range *and* a corroborating name
         # (see _looks_like_coordinate_name): integers and generically-named floats
         # (mass, pH) are not coordinates even when they fall in [-90, 90]. Even then a
@@ -1198,12 +1208,31 @@ def _resolve_column(name, dtype, resource, profile, dictionaries, docs, prose_re
     return _decide(name, dtype, resource, label, profile, candidates, ground_conflicts)
 
 
+def _value_range(profile: Dict[str, Any]) -> Optional[Tuple[float, float]]:
+    """The numeric span the profile measured, when there is one.
+
+    Kept on the resolved column because a *reader* judging whether a column answers
+    a field needs the numbers, not just the name: "Fulton's condition factor" and
+    "temperature" are indistinguishable by name and obvious once you see 0.89-1.22.
+    """
+    lo, hi = profile.get("min"), profile.get("max")
+    return (lo, hi) if profile.get("numeric") and lo is not None and hi is not None else None
+
+
+def _value_integral(profile: Dict[str, Any]) -> Optional[bool]:
+    """Whether a numeric column's values are whole numbers, when it has any."""
+    return profile.get("integral") if profile.get("numeric") else None
+
+
 def _decide(name, dtype, resource, label, profile, candidates, ground_conflicts=None) -> ResolvedColumn:
     """Choose among candidates: top tier wins, the value profile referees conflicts."""
     if not candidates:
         # Abstain — nothing describes this column and its values cannot name it.
         # "Unresolved" is a first-class outcome; a fabricated label is worse.
-        return ResolvedColumn(resource=resource, name=name, dtype=dtype, value_label=label)
+        return ResolvedColumn(
+            resource=resource, name=name, dtype=dtype, value_label=label,
+            value_range=_value_range(profile), value_integral=_value_integral(profile),
+        )
 
     top_rank = max(_TIER_RANK[c.method] for c in candidates)
     top = [c for c in candidates if _TIER_RANK[c.method] == top_rank]
@@ -1257,5 +1286,6 @@ def _decide(name, dtype, resource, label, profile, candidates, ground_conflicts=
         description=chosen.description, units=chosen.units,
         link_method=chosen.method, link_confidence=confidence,
         link_evidence=chosen.evidence, link_quote=chosen.quote, value_label=label,
+        value_range=_value_range(profile), value_integral=_value_integral(profile),
         conflicts=conflicts, corroborated_by=corroborated_by, alternatives=alternatives,
     )

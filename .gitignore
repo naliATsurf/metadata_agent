@@ -134,3 +134,6 @@ wandb/
 docs/prompts.md
 # Mlflow
 mlflow.db
+
+# Temporary files
+deleteme/

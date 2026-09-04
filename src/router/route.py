@@ -41,6 +41,8 @@ from src.context.base_context import (
     tokenize,
 )
 from src.router.catalog import Catalog
+from src.router.rerank import FieldReader, Verdict, describe, rerank, weaker
+from src.router.veto import apply_veto
 from src.router.schema import FieldSpec, walk_schema
 
 
@@ -54,6 +56,11 @@ class FieldRouting:
     candidates: List[EvidenceRef] = field(default_factory=list)
     assurance: str = "none"                 # high | medium | low | none
     status: str = "routed"                  # routed | unanswered
+    # Populated when a field reader adjudicated the candidate set (layer 4b):
+    reader_choice: Optional[str] = None     # the ref it picked, None when it abstained
+    reader_note: Optional[str] = None       # why it picked that one, or why none
+    reader_grounded: Optional[bool] = None  # could its quote be found in the material?
+    vetoed: List[str] = field(default_factory=list)   # candidates ruled out, and why
     # Populated by the M4 compiler, not the router:
     extractor_role: Optional[str] = None
     topology: Optional[str] = None
@@ -65,6 +72,10 @@ class FieldRouting:
             "bucket": self.bucket,
             "status": self.status,
             "assurance": self.assurance,
+            "reader_choice": self.reader_choice,
+            "reader_note": self.reader_note,
+            "reader_grounded": self.reader_grounded,
+            "vetoed": self.vetoed,
             "candidates": [c.to_dict() for c in self.candidates],
             "extractor_role": self.extractor_role,
             "topology": self.topology,
@@ -173,33 +184,99 @@ def _structured_candidates(
 
 
 def _route_one(
-    spec: FieldSpec, catalog: Optional[Catalog], docs: List[Searchable], k: int
+    spec: FieldSpec,
+    catalog: Optional[Catalog],
+    docs: List[Searchable],
+    k: int,
+    reader: Optional[FieldReader] = None,
+    veto: bool = True,
 ) -> FieldRouting:
     query = spec.description or spec.path
+    vetoed: List[str] = []
 
     # Structured corpus first (tools + columns, one ranking). Its winner's kind
     # names the bucket. A field whose meaning matches nothing structured — a
     # narrative field — produces no hit here and falls through to the documents.
     structured = _structured_candidates(query, catalog, k)
+    if veto and structured:
+        # Cut what cannot answer the field on type or units before anything reads
+        # it. A ranking cannot tell a genus name from a pH treatment level; a dtype
+        # can (layer 4a).
+        structured, vetoed = apply_veto(spec, structured, catalog)
     if structured:
-        top = structured[0]
-        bucket = "tool" if top.kind == "tool" else "column"
-        return FieldRouting(
-            field_path=spec.path, query=query, bucket=bucket,
-            candidates=structured, assurance=_assurance(bucket, top, catalog),
-        )
+        routing = _routed(spec, query, structured, catalog, reader, vetoed)
+        if routing is not None:
+            return routing
 
+    # Reached either because nothing structured matched, or because the reader
+    # rejected everything structured. Both mean the same thing to the document
+    # tier — the answer, if any, is stated in prose — so a reader that dismissed
+    # a set of lexical coincidences still gets to judge the narrative sources.
     doc_hits = _search_docs(docs, query, k)
     if doc_hits:
-        return FieldRouting(
-            field_path=spec.path, query=query, bucket="document",
-            candidates=doc_hits, assurance="low",
-        )
+        routing = _routed(spec, query, doc_hits, catalog, reader, vetoed)
+        if routing is not None:
+            return routing
 
+    rejected = structured + doc_hits
     return FieldRouting(
         field_path=spec.path, query=query, bucket="unanswered",
-        candidates=[], assurance="none", status="unanswered",
+        candidates=rejected if reader is not None else [],
+        assurance="none", status="unanswered",
+        reader_choice=None,
+        reader_note="reader found no candidate that answers this field"
+        if reader is not None and rejected
+        else None,
+        vetoed=vetoed,
     )
+
+
+def _routed(
+    spec: FieldSpec,
+    query: str,
+    candidates: List[EvidenceRef],
+    catalog: Optional[Catalog],
+    reader: Optional[FieldReader],
+    vetoed: List[str],
+) -> Optional[FieldRouting]:
+    """Build the routing for a non-empty candidate set, or None if the reader rejects it.
+
+    Without a reader this is the historical behaviour: rank 1 wins, and the bucket,
+    the assurance, and (downstream) the task's resource are all read off it. With
+    one, rank 1 is the reader's pick rather than BM25's, so those same commitments
+    follow a judgment — the ordering is the seam, which is why no consumer changes.
+    """
+    verdict = Verdict(choice=None)
+    if reader is not None:
+        verdict = reader.choose(
+            field=spec, cards=[describe(c, catalog) for c in candidates]
+        )
+        if verdict.abstained:
+            return None
+        candidates = rerank(candidates, verdict)
+
+    top = candidates[0]
+    bucket = _bucket_of(top)
+    assurance = _assurance(bucket, top, catalog)
+    if reader is not None:
+        # Two hops again: the reader's confidence in the *match*, and the catalog's
+        # in the column's *meaning*. The routing is only as strong as the weaker.
+        assurance = weaker(verdict.confidence, assurance)
+    return FieldRouting(
+        field_path=spec.path, query=query, bucket=bucket,
+        candidates=candidates, assurance=assurance,
+        reader_choice=verdict.choice,
+        reader_note=verdict.because or None,
+        reader_grounded=verdict.grounded if reader is not None else None,
+        vetoed=vetoed,
+    )
+
+
+def _bucket_of(top: EvidenceRef) -> str:
+    """Which mechanism the rank-1 candidate implies."""
+    if top.kind == "tool":
+        return "tool"
+    return "document" if top.kind == "quoted_span" else "column"
 
 
 def _assurance(bucket: str, top: EvidenceRef, catalog: Optional[Catalog]) -> str:
@@ -225,16 +302,24 @@ def route_fields(
     catalog: Optional[Catalog] = None,
     docs: Optional[List[Searchable]] = None,
     k: int = 3,
+    reader: Optional[FieldReader] = None,
+    veto: bool = True,
 ) -> FieldPlan:
     """Route every leaf field of ``schema`` to a source, producing a FieldPlan.
 
     ``catalog`` is the enriched column catalog (layer 3) for structural fields;
     ``docs`` are the document sources for narrative fields. A field that neither
-    can answer is left ``unresolved`` — coverage, computed before any extraction.
+    can answer is left ``unanswered`` — coverage, computed before any extraction.
+
+    ``veto`` applies the deterministic type/unit filter (layer 4a) before anything
+    reads the candidates; ``reader`` is the optional field reader (layer 4b). Without
+    either, rank 1 wins on BM25 score alone, which over-answers badly when the schema
+    and the data were authored independently. See :mod:`src.router.veto` and
+    :mod:`src.router.rerank`.
     """
     docs = docs or []
     routings = {
-        spec.path: _route_one(spec, catalog, docs, k)
+        spec.path: _route_one(spec, catalog, docs, k, reader, veto)
         for spec in walk_schema(schema)
     }
     return FieldPlan(schema_name=schema.__name__, routings=routings)

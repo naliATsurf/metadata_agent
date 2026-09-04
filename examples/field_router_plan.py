@@ -56,6 +56,8 @@ from src.router import (
     route_fields,
     select,
 )
+from src.config import llm_settings, PROVIDER_CONFIGS
+from src.router.rerank import FieldReader, LLMFieldReader
 from src.standards import METADATA_STANDARDS, get_schema_for_standard
 
 REPO = Path(__file__).resolve().parents[1]
@@ -64,11 +66,17 @@ OUT = REPO / "data" / "sample_output"
 DEFAULT_BUNDLE = REPO / "data/sample/sharetrait_preprocessed/TRADAT031"
 DEFAULT_STANDARD = "sharetrait_basic"
 
+#: Which per-module LLM configuration the field reader draws from. Set
+#: LLM_PROVIDER_FIELD_READER / LLM_MODEL_FIELD_READER / LLM_TEMPERATURE_FIELD_READER
+#: in .env to point it somewhere other than the global default.
+LLM_MODULE = "FIELD_READER"
+
 
 def build_plan(
     tables: List[Path], dicts: List[Path], docs: List[Path], standard: str,
     prose_reader: ProseReader | None = None,
     candidates: int = 5,
+    field_reader: FieldReader | None = None,
 ) -> Tuple[Catalog, FieldPlan, Plan]:
     """The core: resolve the whole bundle → route → compile."""
     schema = get_schema_for_standard(standard)
@@ -83,7 +91,9 @@ def build_plan(
     sources = dict_ctx + doc_ctx
 
     catalog = resolve_bundle(table_ctx, sources=sources, prose_reader=prose_reader)  # layer 3
-    field_plan = route_fields(schema, catalog=catalog, docs=doc_ctx, k=candidates)  # layer 4
+    field_plan = route_fields(                                     # layer 4 (+ 4b)
+        schema, catalog=catalog, docs=doc_ctx, k=candidates, reader=field_reader
+    )
     plan = compile_field_plan(field_plan)                          # layer 5
     return catalog, field_plan, plan
 
@@ -170,6 +180,9 @@ def build_parser() -> argparse.ArgumentParser:
     tier = ap.add_argument_group(
         "Prose tiers", "Which readers run above the codebook and the value prior."
     )
+    model = ap.add_argument_group(
+        "Model", "Backing --field-reader; each defaults to this module's configuration."
+    )
 
     source.add_argument("--bundle", type=Path, default=DEFAULT_BUNDLE,
                         help="bundle directory")
@@ -186,10 +199,43 @@ def build_parser() -> argparse.ArgumentParser:
                          help="how many ranked candidates to keep per field. The router "
                               "proposes a set and the executor picks from it, so this is "
                               "the recall budget, not a display setting")
+    routing.add_argument("--field-reader", action="store_true",
+                         help="let an LLM decide which candidate answers each field, or "
+                              "none of them. Without it rank 1 wins on BM25 score, which "
+                              "over-answers when schema and data were authored apart")
     tier.add_argument("--prose-reader", action="store_true",
                       help="enable the retrieve-then-read prose tier (localize + read a "
                            "cued definition) above the glossary regex")
+
+    configured = llm_settings(LLM_MODULE)
+    model.add_argument("--provider", choices=list(PROVIDER_CONFIGS),
+                       default=configured.provider,
+                       help=f"provider backing --field-reader (default: {configured.provider})")
+    model.add_argument("--model", default=configured.model,
+                       help=f"model backing --field-reader (default: {configured.model})")
+    model.add_argument("--temperature", type=float, default=configured.temperature,
+                       help="sampling temperature for --field-reader (default: "
+                            f"{configured.temperature})")
     return ap
+
+
+def build_field_reader(args: argparse.Namespace) -> Tuple[FieldReader | None, str]:
+    """Build the field reader from the flags, and a label naming what will read.
+
+    The model is constructed lazily — importing a provider SDK is only worth it when
+    a reader is actually asked for, and the whole deterministic path must stay
+    runnable with no credentials configured.
+    """
+    if not args.field_reader:
+        return None, "off"
+    from src.config import create_llm_for   # lazy: pulls provider SDKs when used
+
+    settings = llm_settings(
+        LLM_MODULE, provider=args.provider, model=args.model,
+        temperature=args.temperature,
+    )
+    reader = LLMFieldReader.from_chat_model(create_llm_for(LLM_MODULE, **vars(settings)))
+    return reader, settings.describe()
 
 
 def run(args: argparse.Namespace, console: Console) -> RouterResult:
@@ -211,6 +257,7 @@ def run(args: argparse.Namespace, console: Console) -> RouterResult:
     dicts = select(bundle.codebooks, args.dictionary)
     docs = select(bundle.documents, args.doc)
     reader = DeterministicProseReader() if args.prose_reader else None
+    field_reader, field_reader_label = build_field_reader(args)
 
     console.print(f"[bold]bundle:[/] {args.bundle}")
     console.print(f"standard: {args.standard}")
@@ -218,7 +265,8 @@ def run(args: argparse.Namespace, console: Console) -> RouterResult:
     console.print(
         f"sources:  dictionaries={[p.name for p in dicts] or 'none'}  "
         f"docs={[p.name for p in docs] or 'none'}  "
-        f"prose-reader={'on' if reader else 'off'}  candidates={args.candidates}"
+        f"prose-reader={'on' if reader else 'off'}  candidates={args.candidates}\n"
+        f"          field-reader={field_reader_label}"
     )
     excluded = [
         p.name for p in (*bundle.codebooks, *bundle.documents) if p not in (*dicts, *docs)
@@ -228,7 +276,7 @@ def run(args: argparse.Namespace, console: Console) -> RouterResult:
 
     catalog, field_plan, plan = build_plan(
         bundle.tables, dicts, docs, args.standard,
-        prose_reader=reader, candidates=args.candidates,
+        prose_reader=reader, candidates=args.candidates, field_reader=field_reader,
     )
     print_catalog(catalog, console)
     print_routing(field_plan, console)

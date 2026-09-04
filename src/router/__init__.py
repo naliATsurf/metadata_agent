@@ -28,6 +28,12 @@ from src.router.display import (
     catalog_summary,
     render_catalog,
 )
+from src.router.rerank import (
+    FieldReader,
+    LLMFieldReader,
+    Verdict,
+    candidate_ref,
+)
 from src.router.route import FieldPlan, FieldRouting, route_fields
 from src.router.schema import FieldSpec, walk_schema
 
@@ -42,11 +48,15 @@ __all__ = [
     "DeterministicProseReader",
     "FieldPlan",
     "FieldRouting",
+    "FieldReader",
     "FieldSpec",
+    "LLMFieldReader",
     "LLMProseReader",
     "ProseReader",
     "ReadResult",
     "ResolvedColumn",
+    "Verdict",
+    "candidate_ref",
     "catalog_conflicts",
     "catalog_overview",
     "catalog_summary",

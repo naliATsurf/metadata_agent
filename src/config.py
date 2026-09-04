@@ -122,6 +122,7 @@ LLM_MODULES = {
     "PLANNING": 0.0,           # orchestrator plan generation — deterministic
     "PLAYER": 0.3,             # extraction players — a little latitude
     "CATALOG_RESOLVER": 0.0,   # prose reader — copies stated definitions
+    "FIELD_READER": 0.0,       # router's candidate reader — a judgement, not a draft
 }
 
 

@@ -15,10 +15,18 @@ that and we are back to post-hoc matching and the FieldPlan was theatre.
 What the compiler does, and only that:
 
 - **Groups** routings that share an extractor *and an assurance tier* — the same
-  (bucket, resource, tier) — into one task, so fields answered from the same place
-  are extracted together instead of one survey per field. The tier is part of the
-  key so a high-assurance field is never dragged into a debate just because a
-  contested field happens to share its resource.
+  (bucket, resource set, tier) — into one task, so fields answered from the same
+  place are extracted together instead of one survey per field. The tier is part of
+  the key so a high-assurance field is never dragged into a debate just because a
+  contested field happens to share its resources.
+- **Opens every resource its candidates live in.** A task's ``target_resources`` is
+  the union across the field's whole candidate set, not the resource of rank 1.
+  Taking it from rank 1 quietly made the choice the executor is supposed to make:
+  the *column* stayed open while the *table* was fixed, so a candidate ranked second
+  in another table was carried in ``field_bindings`` and could never be reached,
+  because the task never opened the table it lived in. On a real six-table bundle
+  41% of routed fields had candidates in more than one table, and rank 1 among them
+  was frequently an exact score tie — decided by which table was globbed first.
 - **Caps each group by a token budget.** Grouping risks re-introducing the flood at
   the group level, so a group whose seeded candidates exceed the budget is split
   into several tasks.
@@ -123,16 +131,16 @@ def compile_field_plan(
     # Flatten to budget-capped chunks, then number them *globally*: two groups can
     # share a (bucket, resource) but differ in tier, so a per-group index would
     # collide on the output-artifact name. A single running index keeps them unique.
-    chunks: List[Tuple[str, str, List[FieldRouting]]] = []
-    for (bucket, resource, _topology), routings in groups.items():
+    chunks: List[Tuple[str, Tuple[str, ...], List[FieldRouting]]] = []
+    for (bucket, resources, _topology), routings in groups.items():
         routings = sorted(routings, key=lambda r: r.field_path)
         for chunk in _split_by_budget(routings, budget):
-            chunks.append((bucket, resource, chunk))
+            chunks.append((bucket, resources, chunk))
 
     steps: List[Task] = []
     extraction_outputs: List[str] = []
-    for index, (bucket, resource, chunk) in enumerate(chunks):
-        task = _extraction_task(bucket, resource, chunk, players, index)
+    for index, (bucket, resources, chunk) in enumerate(chunks):
+        task = _extraction_task(bucket, resources, chunk, players, index)
         steps.append(task)
         extraction_outputs.extend(task.outputs)
 
@@ -145,17 +153,30 @@ def compile_field_plan(
 # ---------------------------------------------------------------------------
 
 
-def _group_key(routing: FieldRouting) -> Tuple[str, str, str]:
-    """The extractor *and tier* a field shares: bucket, resource, and topology tier.
+def _resources(routing: FieldRouting) -> Tuple[str, ...]:
+    """Every resource this field's candidates live in, best-ranked first, deduped.
 
-    Structural fields bind to a whole-resource tool (candidate ``resource`` is
-    empty), so they all share one group; column and span fields group by the
-    resource that holds the column or document. The topology tier (from
-    :func:`_topology_for`) splits a mixed group so a high-assurance field is not
-    pulled into a contested sibling's debate.
+    The unit of grouping *and* of what a task opens. A tool candidate carries an
+    empty resource — it is context-level, not tied to a table — so it contributes
+    nothing here and is handled by the empty-target convention instead.
     """
-    resource = routing.candidates[0].resource if routing.candidates else ""
-    return (routing.bucket, resource, _topology_for([routing]))
+    seen: List[str] = []
+    for candidate in routing.candidates:
+        if candidate.resource and candidate.resource not in seen:
+            seen.append(candidate.resource)
+    return tuple(seen)
+
+
+def _group_key(routing: FieldRouting) -> Tuple[str, Tuple[str, ...], str]:
+    """The extractor *and tier* a field shares: bucket, resource set, topology tier.
+
+    Fields group together when they are answered from the same *set* of places, so
+    two fields whose candidates span the same two tables are extracted together and
+    both tables are opened for both. The topology tier (from :func:`_topology_for`)
+    splits a mixed group so a high-assurance field is not pulled into a contested
+    sibling's debate.
+    """
+    return (routing.bucket, _resources(routing), _topology_for([routing]))
 
 
 def _candidate_cost(routing: FieldRouting) -> int:
@@ -228,23 +249,30 @@ def _field_bindings(routings: List[FieldRouting]) -> List[Dict[str, Any]]:
     ]
 
 
-def _artifact_name(bucket: str, resource: str, index: int) -> str:
-    """A stable, unique output-artifact name for one extraction task."""
-    slug = re.sub(r"[^a-z0-9]+", "_", (resource or "context").lower()).strip("_")
+def _artifact_name(bucket: str, resources: Tuple[str, ...], index: int) -> str:
+    """A stable, unique output-artifact name for one extraction task.
+
+    Named for the best-ranked resource; the globally running ``index`` is what makes
+    it unique, so a task spanning several tables does not need all of them in a name.
+    """
+    head = resources[0] if resources else "context"
+    slug = re.sub(r"[^a-z0-9]+", "_", head.lower()).strip("_")
     return f"{bucket}__{slug}__{index}_findings"
 
 
 def _extraction_task(
     bucket: str,
-    resource: str,
+    resources: Tuple[str, ...],
     routings: List[FieldRouting],
     players: Dict[str, str],
     index: int,
 ) -> Task:
     fields = [r.field_path for r in routings]
-    # Tool-answered fields are context-level (empty target = all/context); column and
-    # span fields target the resource that holds them.
-    target = [] if bucket == "tool" or not resource else [resource]
+    # Tool-answered fields are context-level, and an empty target already means
+    # all-of-context — the widest scope there is, so nothing is closed off. Every
+    # other task opens each resource its candidates live in, so the executor can
+    # actually reach the candidates `field_bindings` offers it.
+    target = [] if bucket == "tool" else list(resources)
     player = players.get(bucket, _BUCKET_PLAYER["column"])
     topology = _topology_for(routings)
 
@@ -261,14 +289,15 @@ def _extraction_task(
         player=player,
         rationale=(
             f"Field-driven routing sent {len(fields)} field(s) to the {bucket} "
-            f"extractor for '{resource or 'context'}'. For each, select the candidate "
-            "that answers it from its ranked options and extract, or report none."
+            f"extractor for {', '.join(resources) if resources else 'context'}. For "
+            "each, select the candidate that answers it from its ranked options and "
+            "extract, or report none."
         ),
         target_resources=target,
         fields=fields,
         field_bindings=_field_bindings(routings),
         topology=topology,
-        outputs=[_artifact_name(bucket, resource, index)],
+        outputs=[_artifact_name(bucket, resources, index)],
     )
 
 

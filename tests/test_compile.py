@@ -83,6 +83,23 @@ class CompilerCase(unittest.TestCase):
         self.assertEqual(sorted(carried), sorted(routed))
         self.assertEqual(len(carried), len(set(carried)), "a field is on two tasks")
 
+        # Every candidate a task offers must be *reachable* from that task. The
+        # router proposes a set and the executor picks from it, so a task scoped to
+        # fewer resources than its candidates span would carry options it cannot
+        # open — recall preserved in the artifact and spent before execution.
+        for task in extraction:
+            if not task.target_resources:
+                continue                    # empty target = whole context, opens all
+            for binding in task.field_bindings:
+                for candidate in binding["candidates"]:
+                    resource = candidate.get("resource")
+                    if resource:
+                        self.assertIn(
+                            resource, task.target_resources,
+                            f"{binding['field']} offers a candidate in {resource!r}, "
+                            f"which task {task.task!r} never opens",
+                        )
+
         # Assembly names *every* schema field (incl. unresolved), in schema order.
         self.assertEqual(assembly.fields, schema_fields)
 

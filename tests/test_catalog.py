@@ -552,12 +552,24 @@ class MultiTableBundleTest(unittest.TestCase):
         temp = fp.routings["water_temperature"].candidates[0]
         self.assertEqual((doi.resource, doi.locator), ("dataset", "a"))
         self.assertEqual((temp.resource, temp.locator), ("measure", "t"))
-        # The compiler groups the two fields into separate per-table tasks.
+        # A task opens every table its candidates live in, not just rank 1's. The
+        # router proposes a set; scoping to rank 1's table would make the lower-ranked
+        # candidates unreachable and quietly turn the proposal into a decision.
         plan = compile_field_plan(fp)
         col_tasks = [t for t in plan.steps if t.fields and t.player == "data_analyst"]
-        scopes = {tuple(t.target_resources) for t in col_tasks}
-        self.assertIn(("dataset",), scopes)
-        self.assertIn(("measure",), scopes)
+        by_field = {
+            binding["field"]: task
+            for task in col_tasks for binding in task.field_bindings
+        }
+        for name in ("doi", "water_temperature"):
+            spanned = {
+                c.resource for c in fp.routings[name].candidates if c.resource
+            }
+            self.assertTrue(spanned <= set(by_field[name].target_resources))
+        # doi's candidates reach into both tables, so its task opens both.
+        self.assertEqual(
+            sorted(by_field["doi"].target_resources), ["dataset", "measure"]
+        )
 
 
 class ProseReaderTierTest(unittest.TestCase):
