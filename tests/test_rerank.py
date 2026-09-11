@@ -129,6 +129,95 @@ class RefereeTest(unittest.TestCase):
         self.assertEqual(len(reader.prompts), 1)
 
 
+class BatchingTest(unittest.TestCase):
+    """Grouping fields that share a candidate list into one round-trip."""
+
+    cards_a = [{"ref": "t::a", "kind": "column", "meaning": "fish mass"},
+               {"ref": "t::b", "kind": "column", "meaning": "tank id"}]
+    cards_b = [{"ref": "t::c", "kind": "column", "meaning": "pH level"}]
+
+    def _requests(self):
+        def spec(path):
+            return FieldSpec(path=path, description=f"the {path}", type="str",
+                             required=False)
+        return [
+            (spec("one"), self.cards_a),
+            (spec("two"), self.cards_a),     # identical set -> groups with "one"
+            (spec("three"), self.cards_b),   # different set -> its own call
+        ]
+
+    def test_identical_candidate_sets_share_one_call(self):
+        reader = StubReader(_reply(one={"choice": None}, two={"choice": "t::a"}))
+        reader.choose_many(requests=self._requests())
+        # two calls: one for the {a,b} pair, one for the lone {c} field.
+        self.assertEqual(len(reader.prompts), 2)
+
+    def test_batching_off_is_one_call_per_field(self):
+        reader = StubReader(_reply(choice=None))
+        reader._batch = False
+        reader.choose_many(requests=self._requests())
+        self.assertEqual(len(reader.prompts), 3)
+
+    def test_a_grouped_answer_maps_back_to_each_field(self):
+        reader = StubReader(
+            lambda prompt: _reply(
+                one={"choice": "t::a", "quote": "fish mass", "confidence": "high"},
+                two={"choice": None, "because": "not a mass"},
+            )
+            if "one" in prompt
+            else _reply(three={"choice": None})
+        )
+        verdicts = reader.choose_many(requests=self._requests())
+        self.assertEqual(verdicts["one"].choice, "t::a")
+        self.assertEqual(verdicts["one"].confidence, "high")
+        self.assertTrue(verdicts["two"].abstained)
+        self.assertEqual(verdicts["two"].because, "not a mass")
+        self.assertTrue(verdicts["three"].abstained)
+
+    def test_a_field_missing_from_the_reply_abstains(self):
+        """Silence about a field is not a pick — the group's other answers stand."""
+        reader = StubReader(_reply(one={"choice": "t::a", "quote": "fish mass"}))
+        verdicts = reader.choose_many(requests=self._requests())
+        self.assertEqual(verdicts["one"].choice, "t::a")
+        self.assertTrue(verdicts["two"].abstained)
+
+    def test_a_garbled_group_reply_abstains_every_field_in_it(self):
+        reader = StubReader("sorry, I can't tell")
+        verdicts = reader.choose_many(requests=self._requests())
+        self.assertTrue(all(v.abstained for v in verdicts.values()))
+
+    def test_the_referee_still_applies_inside_a_group(self):
+        reader = StubReader(
+            _reply(one={"choice": "t::invented", "confidence": "high"},
+                   two={"choice": "t::a", "confidence": "high", "quote": "nowhere"})
+        )
+        verdicts = reader.choose_many(requests=self._requests())
+        self.assertTrue(verdicts["one"].abstained)          # ref never offered
+        self.assertEqual(verdicts["two"].confidence, "low")  # quote not locatable
+
+    def test_concurrent_dispatch_returns_every_verdict(self):
+        reader = StubReader(_reply(one={"choice": None}, two={"choice": None},
+                                   three={"choice": None}))
+        reader._max_workers = 4
+        verdicts = reader.choose_many(requests=self._requests())
+        self.assertEqual(set(verdicts), {"one", "two", "three"})
+
+    def test_the_default_batched_entrypoint_loops_choose(self):
+        """A reader that implements only `choose` still works as a batched one."""
+        from src.router.rerank import FieldReader
+
+        class Single(FieldReader):
+            def __init__(self): self.seen = []
+            def choose(self, *, field, cards):
+                self.seen.append(field.path)
+                return Verdict(choice=None)
+
+        reader = Single()
+        verdicts = reader.choose_many(requests=self._requests())
+        self.assertEqual(reader.seen, ["one", "two", "three"])
+        self.assertEqual(len(verdicts), 3)
+
+
 class WeakerTest(unittest.TestCase):
     def test_two_hop_assurance_takes_the_weaker_grade(self):
         self.assertEqual(weaker("high", "low"), "low")

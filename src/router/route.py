@@ -29,7 +29,7 @@ becomes provenance-captured evidence; that wiring is deliberately not here yet.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 from pydantic import BaseModel
 
@@ -183,77 +183,54 @@ def _structured_candidates(
     return ranked[:k]
 
 
-def _route_one(
-    spec: FieldSpec,
+def _adjudicate(
+    reader: Optional[FieldReader],
+    items: List[Tuple[FieldSpec, List[EvidenceRef]]],
     catalog: Optional[Catalog],
-    docs: List[Searchable],
-    k: int,
-    reader: Optional[FieldReader] = None,
-    veto: bool = True,
-) -> FieldRouting:
-    query = spec.description or spec.path
-    vetoed: List[str] = []
+) -> Dict[str, Verdict]:
+    """Put one whole tier's candidate sets to the reader, in a single pass.
 
-    # Structured corpus first (tools + columns, one ranking). Its winner's kind
-    # names the bucket. A field whose meaning matches nothing structured — a
-    # narrative field — produces no hit here and falls through to the documents.
-    structured = _structured_candidates(query, catalog, k)
-    if veto and structured:
-        # Cut what cannot answer the field on type or units before anything reads
-        # it. A ranking cannot tell a genus name from a pH treatment level; a dtype
-        # can (layer 4a).
-        structured, vetoed = apply_veto(spec, structured, catalog)
-    if structured:
-        routing = _routed(spec, query, structured, catalog, reader, vetoed)
-        if routing is not None:
-            return routing
-
-    # Reached either because nothing structured matched, or because the reader
-    # rejected everything structured. Both mean the same thing to the document
-    # tier — the answer, if any, is stated in prose — so a reader that dismissed
-    # a set of lexical coincidences still gets to judge the narrative sources.
-    doc_hits = _search_docs(docs, query, k)
-    if doc_hits:
-        routing = _routed(spec, query, doc_hits, catalog, reader, vetoed)
-        if routing is not None:
-            return routing
-
-    rejected = structured + doc_hits
-    return FieldRouting(
-        field_path=spec.path, query=query, bucket="unanswered",
-        candidates=rejected if reader is not None else [],
-        assurance="none", status="unanswered",
-        reader_choice=None,
-        reader_note="reader found no candidate that answers this field"
-        if reader is not None and rejected
-        else None,
-        vetoed=vetoed,
-    )
+    Batched rather than field-by-field because a reader is a network call and a
+    routing pass is dozens of them: handing the reader the whole tier lets it group
+    fields offered identical candidates and issue the calls concurrently. Fields the
+    retrieval left empty are not asked about at all.
+    """
+    if reader is None:
+        return {}
+    requests = [
+        (spec, [describe(c, catalog) for c in candidates])
+        for spec, candidates in items
+        if candidates
+    ]
+    return reader.choose_many(requests=requests) if requests else {}
 
 
-def _routed(
+def _settle(
     spec: FieldSpec,
-    query: str,
     candidates: List[EvidenceRef],
+    verdict: Optional[Verdict],
     catalog: Optional[Catalog],
     reader: Optional[FieldReader],
     vetoed: List[str],
 ) -> Optional[FieldRouting]:
-    """Build the routing for a non-empty candidate set, or None if the reader rejects it.
+    """Build the routing for one tier's candidates, or None if it cannot answer.
 
     Without a reader this is the historical behaviour: rank 1 wins, and the bucket,
-    the assurance, and (downstream) the task's resource are all read off it. With
+    the assurance, and (downstream) the task's resources are all read off it. With
     one, rank 1 is the reader's pick rather than BM25's, so those same commitments
-    follow a judgment — the ordering is the seam, which is why no consumer changes.
+    follow a judgement — the ordering is the seam, which is why no consumer changes.
     """
-    verdict = Verdict(choice=None)
+    if not candidates:
+        return None
+
+    decision = Verdict(choice=None)
     if reader is not None:
-        verdict = reader.choose(
-            field=spec, cards=[describe(c, catalog) for c in candidates]
+        decision = verdict or Verdict(
+            choice=None, because="the reader returned no verdict for this field"
         )
-        if verdict.abstained:
+        if decision.abstained:
             return None
-        candidates = rerank(candidates, verdict)
+        candidates = rerank(candidates, decision)
 
     top = candidates[0]
     bucket = _bucket_of(top)
@@ -261,13 +238,34 @@ def _routed(
     if reader is not None:
         # Two hops again: the reader's confidence in the *match*, and the catalog's
         # in the column's *meaning*. The routing is only as strong as the weaker.
-        assurance = weaker(verdict.confidence, assurance)
+        assurance = weaker(decision.confidence, assurance)
     return FieldRouting(
-        field_path=spec.path, query=query, bucket=bucket,
+        field_path=spec.path, query=spec.description or spec.path, bucket=bucket,
         candidates=candidates, assurance=assurance,
-        reader_choice=verdict.choice,
-        reader_note=verdict.because or None,
-        reader_grounded=verdict.grounded if reader is not None else None,
+        reader_choice=decision.choice,
+        reader_note=decision.because or None,
+        reader_grounded=decision.grounded if reader is not None else None,
+        vetoed=vetoed,
+    )
+
+
+def _unanswered(
+    spec: FieldSpec,
+    rejected: List[EvidenceRef],
+    reader: Optional[FieldReader],
+    vetoed: List[str],
+) -> FieldRouting:
+    """A field no tier could answer — coverage, computed before extraction runs."""
+    return FieldRouting(
+        field_path=spec.path, query=spec.description or spec.path,
+        bucket="unanswered",
+        # With a reader the rejected set is the record of what was considered and
+        # refused; without one an empty list keeps the historical shape.
+        candidates=rejected if reader is not None else [],
+        assurance="none", status="unanswered",
+        reader_note="reader found no candidate that answers this field"
+        if reader is not None and rejected
+        else None,
         vetoed=vetoed,
     )
 
@@ -318,8 +316,54 @@ def route_fields(
     :mod:`src.router.rerank`.
     """
     docs = docs or []
-    routings = {
-        spec.path: _route_one(spec, catalog, docs, k, reader, veto)
-        for spec in walk_schema(schema)
+    specs = list(walk_schema(schema))
+
+    # Tier 1 — the structured corpus (tools + columns, one ranking), vetoed on type
+    # and units before anything reads it. A ranking cannot tell a genus name from a
+    # pH treatment level; a dtype can (layer 4a).
+    structured: Dict[str, List[EvidenceRef]] = {}
+    vetoes: Dict[str, List[str]] = {}
+    for spec in specs:
+        candidates = _structured_candidates(spec.description or spec.path, catalog, k)
+        reasons: List[str] = []
+        if veto and candidates:
+            candidates, reasons = apply_veto(spec, candidates, catalog)
+        structured[spec.path], vetoes[spec.path] = candidates, reasons
+
+    verdicts = _adjudicate(reader, [(s, structured[s.path]) for s in specs], catalog)
+
+    routings: Dict[str, FieldRouting] = {}
+    pending: List[FieldSpec] = []
+    for spec in specs:
+        settled = _settle(
+            spec, structured[spec.path], verdicts.get(spec.path),
+            catalog, reader, vetoes[spec.path],
+        )
+        if settled is None:
+            pending.append(spec)
+        else:
+            routings[spec.path] = settled
+
+    # Tier 2 — the documents, for whatever tier 1 could not answer. A field reaches
+    # here either because nothing structured matched or because the reader rejected
+    # what did; both mean the same thing to the document tier — the answer, if any,
+    # is stated in prose — so a reader that dismissed a set of lexical coincidences
+    # still gets to judge the narrative sources.
+    spans = {
+        spec.path: _search_docs(docs, spec.description or spec.path, k)
+        for spec in pending
     }
-    return FieldPlan(schema_name=schema.__name__, routings=routings)
+    span_verdicts = _adjudicate(reader, [(s, spans[s.path]) for s in pending], catalog)
+    for spec in pending:
+        routings[spec.path] = _settle(
+            spec, spans[spec.path], span_verdicts.get(spec.path),
+            catalog, reader, vetoes[spec.path],
+        ) or _unanswered(
+            spec, structured[spec.path] + spans[spec.path], reader, vetoes[spec.path]
+        )
+
+    # Emit in schema order, which the two-tier pass does not preserve on its own.
+    return FieldPlan(
+        schema_name=schema.__name__,
+        routings={spec.path: routings[spec.path] for spec in specs},
+    )

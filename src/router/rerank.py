@@ -30,8 +30,9 @@ can only be believed as far as it can cite.
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from src.context.base_context import EvidenceRef
 from src.router.schema import FieldSpec
@@ -114,16 +115,32 @@ def describe(candidate: EvidenceRef, catalog: Any = None) -> Dict[str, Any]:
     return {key: value for key, value in card.items() if value not in (None, "")}
 
 
+#: One field and the candidate cards offered for it.
+Request = Tuple[FieldSpec, Sequence[Dict[str, Any]]]
+
+
 class FieldReader:
     """The seam: choose which candidate answers a field, or none of them.
 
     Implementations receive the field and the candidate cards and nothing else, so a
     reader never touches a catalog, a context, or an SDK. Return a :class:`Verdict`;
     abstention is a first-class answer, not a failure.
+
+    Two entrypoints, the same shape as :class:`~src.router.catalog.ProseReader`.
+    :meth:`choose` handles one field; :meth:`choose_many` handles a whole routing
+    pass and is what the router actually calls. Implement ``choose`` and inherit the
+    default ``choose_many`` that loops it, or override ``choose_many`` for a backend
+    where round-trips are the expensive part.
     """
 
     def choose(self, *, field: FieldSpec, cards: Sequence[Dict[str, Any]]) -> Verdict:
         raise NotImplementedError
+
+    def choose_many(self, *, requests: Sequence[Request]) -> Dict[str, Verdict]:
+        """Adjudicate many fields, keyed by field path. Default: loop :meth:`choose`."""
+        return {
+            spec.path: self.choose(field=spec, cards=cards) for spec, cards in requests
+        }
 
 
 _INSTRUCTION = (
@@ -150,8 +167,36 @@ _INSTRUCTION = (
 )
 
 
+_BATCH_INSTRUCTION = (
+    "You decide, for each of several metadata fields, which data source answers it "
+    "— if any. Every field below was matched against the SAME candidates.\n\n"
+    "CANDIDATES (retrieved by keyword search, so most are coincidences):\n"
+    "{cards}\n\n"
+    "FIELDS:\n{fields}\n\n"
+    "A candidate answers a field only if it holds *the quantity that field asks "
+    "for*. Sharing a word is not enough. Check the units and the value range: a "
+    "field wanting a duration in days is not answered by a column of minutes, and a "
+    "field wanting a temperature is not answered by a unitless index ranging 0.9 to "
+    "1.2. A column measuring the subject's response is not the experimental "
+    "condition it was measured under.\n\n"
+    "Most fields in a typical dataset have NO answer, because the schema and the "
+    "data were written by different people for different purposes. Answering with "
+    "null is the normal, expected outcome — a wrong source is far worse than none.\n\n"
+    "The fields are INDEPENDENT. Judge each one on its own against the candidates. "
+    "The same candidate may answer several fields, or none at all. Do not assume a "
+    "candidate must answer something, and do not spread answers across fields to "
+    "use the candidates up — it is entirely normal for every field here to be "
+    "null.\n\n"
+    'Return ONE JSON object mapping each field name to {{"choice": <the ref of the '
+    'candidate that answers it, or null>, "because": <why>, "quote": <text copied '
+    'verbatim from the chosen candidate\'s card; "" when choice is null>, '
+    '"confidence": "high"|"medium"|"low"}}\n'
+    "No prose outside the JSON, no code fence."
+)
+
+
 class LLMFieldReader(FieldReader):
-    """LLM-backed field reader — one call per field, abstention first-class.
+    """LLM-backed field reader — abstention first-class.
 
     ``invoke`` is the only dependency: a callable ``prompt -> model text``, which
     keeps this free of any SDK and testable with a stub. Adapt a chat model with
@@ -162,16 +207,98 @@ class LLMFieldReader(FieldReader):
     visible to the model at the moment it matters. It is also told the base rate —
     most fields have no answer — because the default failure mode of a model handed
     five options is to pick one.
+
+    **Round-trips.** ``choose_many`` groups fields that were offered an *identical*
+    candidate set into one call, so a slow endpoint is asked fewer times. Grouping
+    only identical sets keeps the prompt unambiguous — there is one candidate list,
+    not a per-field mapping the model has to track. ``max_workers`` then issues those
+    calls concurrently, which is usually the larger win: a self-hosted server batches
+    concurrent requests internally, so latency falls without bundling more fields
+    into one prompt.
+
+    The trade-off in grouping is real and worth naming: judged together, fields stop
+    being independent, and a model shown one passage and nine fields tends to
+    *distribute* answers among them — the same accept-bias the design fights. The
+    prompt says so explicitly, and ``batch=False`` turns grouping off so the two can
+    be compared on a labeled sheet.
     """
 
-    def __init__(self, invoke: Callable[[str], str]) -> None:
+    def __init__(
+        self,
+        invoke: Callable[[str], str],
+        *,
+        batch: bool = True,
+        max_workers: int = 1,
+    ) -> None:
         self._invoke = invoke
-        self._cache: Dict[str, Verdict] = {}
+        self._cache: Dict[str, Verdict] = {}          # single-field verdicts
+        self._group_cache: Dict[str, Dict[str, Verdict]] = {}   # grouped verdicts
+        self._batch = batch
+        self._max_workers = max(1, max_workers)
 
     @classmethod
-    def from_chat_model(cls, model: Any) -> "LLMFieldReader":
+    def from_chat_model(
+        cls, model: Any, *, batch: bool = True, max_workers: int = 1
+    ) -> "LLMFieldReader":
         """Adapt a chat model exposing ``.invoke(prompt) -> message.content``."""
-        return cls(lambda prompt: model.invoke(prompt).content)
+        return cls(
+            lambda prompt: model.invoke(prompt).content,
+            batch=batch, max_workers=max_workers,
+        )
+
+    # -- batched entrypoint --------------------------------------------------
+
+    def choose_many(self, *, requests: Sequence[Request]) -> Dict[str, Verdict]:
+        """Adjudicate every field in one pass, grouping and parallelising the calls."""
+        groups = _group_by_candidates(requests) if self._batch else [
+            [item] for item in requests
+        ]
+        if not groups:
+            return {}
+        if self._max_workers == 1 or len(groups) == 1:
+            results = [self._run_group(group) for group in groups]
+        else:
+            with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
+                results = list(pool.map(self._run_group, groups))
+        merged: Dict[str, Verdict] = {}
+        for result in results:
+            merged.update(result)
+        return merged
+
+    def _run_group(self, group: Sequence[Request]) -> Dict[str, Verdict]:
+        """One call for a set of fields that share a candidate list."""
+        if len(group) == 1:
+            spec, cards = group[0]
+            return {spec.path: self.choose(field=spec, cards=cards)}
+
+        cards = group[0][1]
+        specs = [spec for spec, _ in group]
+        key = json.dumps(
+            [[s.path for s in specs], [c["ref"] for c in cards]], sort_keys=True
+        )
+        if key in self._group_cache:
+            return dict(self._group_cache[key])
+
+        prompt = _BATCH_INSTRUCTION.format(
+            cards=json.dumps(list(cards), indent=2, default=str),
+            fields="\n".join(
+                f"- {s.path} ({s.type}) — {s.description or s.path}" for s in specs
+            ),
+        )
+        try:
+            data = _json_object(self._invoke(prompt)) or {}
+        except Exception:
+            data = {}                      # a failed call abstains every field in it
+        verdicts = {
+            spec.path: _referee(
+                data.get(spec.path) if isinstance(data.get(spec.path), dict) else None,
+                cards,
+            )
+            for spec in specs
+        }
+        self._group_cache[key] = verdicts
+        return dict(verdicts)
+
 
     def choose(self, *, field: FieldSpec, cards: Sequence[Dict[str, Any]]) -> Verdict:
         if not cards:
@@ -194,6 +321,19 @@ class LLMFieldReader(FieldReader):
         verdict = _referee(data, cards)
         self._cache[key] = verdict
         return verdict
+
+
+def _group_by_candidates(requests: Sequence[Request]) -> List[List[Request]]:
+    """Bucket requests whose candidate lists are identical, preserving input order.
+
+    Only *identical* sets group. Two fields offered overlapping-but-different
+    candidates would need a per-field mapping inside the prompt, which is exactly
+    the ambiguity that makes a bundled answer worse than several small ones.
+    """
+    buckets: Dict[Tuple[str, ...], List[Request]] = {}
+    for spec, cards in requests:
+        buckets.setdefault(tuple(c["ref"] for c in cards), []).append((spec, cards))
+    return list(buckets.values())
 
 
 def _json_object(text: Any) -> Optional[dict]:

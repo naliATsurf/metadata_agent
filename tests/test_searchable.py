@@ -10,7 +10,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.context import EvidenceRef, Searchable, create_context
+from src.context import Searchable, create_context
 from src.provenance import clear_evidence, get_evidence
 from src.tools import search as search_module  # noqa: F401 (registers search_context)
 from src.tools.base import (

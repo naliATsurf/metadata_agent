@@ -6,7 +6,7 @@ PYTHON-VERSION := 3.11
 PYTHON := $(VENV)/bin/python
 RUFF := $(VENV)/bin/ruff
 
-.PHONY: help uv-setup uv-clean activate docs-install docs docs-rebuild docs-update docs-clean demo-install demo docker-install-demo docker-run-demo docker-build docker-up docker-down docker-logs lint compile test ci tui tracking-install ci-install
+.PHONY: help uv-setup uv-clean activate docs-install docs docs-rebuild docs-update docs-clean demo-install demo docker-install-demo docker-run-demo docker-build docker-up docker-down docker-logs lint compile test eval ci tui tracking-install ci-install
 
 help:
 	@printf '%s\n' \
@@ -99,10 +99,13 @@ lint:
 	$(UV) run ruff check .
 
 compile:
-	$(UV) run python -m compileall src demo tests demo_app.py
+	$(UV) run python -m compileall src demo eval tests demo_app.py
 
 test:
 	$(UV) run python -m unittest discover -s tests -p 'test*.py'
+
+eval:  # grade the router against the hand-labeled sheet in eval/data
+	$(UV) run python -m eval score
 
 ci-install:
 	$(UV) sync --locked --no-default-groups

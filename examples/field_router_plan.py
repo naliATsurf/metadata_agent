@@ -77,6 +77,7 @@ def build_plan(
     prose_reader: ProseReader | None = None,
     candidates: int = 5,
     field_reader: FieldReader | None = None,
+    veto: bool = True,
 ) -> Tuple[Catalog, FieldPlan, Plan]:
     """The core: resolve the whole bundle → route → compile."""
     schema = get_schema_for_standard(standard)
@@ -92,7 +93,8 @@ def build_plan(
 
     catalog = resolve_bundle(table_ctx, sources=sources, prose_reader=prose_reader)  # layer 3
     field_plan = route_fields(                                     # layer 4 (+ 4b)
-        schema, catalog=catalog, docs=doc_ctx, k=candidates, reader=field_reader
+        schema, catalog=catalog, docs=doc_ctx, k=candidates, reader=field_reader,
+        veto=veto,
     )
     plan = compile_field_plan(field_plan)                          # layer 5
     return catalog, field_plan, plan
@@ -216,6 +218,14 @@ def build_parser() -> argparse.ArgumentParser:
     model.add_argument("--temperature", type=float, default=configured.temperature,
                        help="sampling temperature for --field-reader (default: "
                             f"{configured.temperature})")
+    model.add_argument("--reader-workers", type=int, default=1, metavar="N",
+                       help="issue the reader's calls N at a time. A self-hosted "
+                            "endpoint batches concurrent requests internally, so this "
+                            "is usually the largest win on a slow model (default: 1)")
+    model.add_argument("--no-reader-batch", action="store_true",
+                       help="ask about every field separately instead of grouping "
+                            "fields offered identical candidates. Slower, but each "
+                            "field is judged independently")
     return ap
 
 
@@ -234,8 +244,15 @@ def build_field_reader(args: argparse.Namespace) -> Tuple[FieldReader | None, st
         LLM_MODULE, provider=args.provider, model=args.model,
         temperature=args.temperature,
     )
-    reader = LLMFieldReader.from_chat_model(create_llm_for(LLM_MODULE, **vars(settings)))
-    return reader, settings.describe()
+    reader = LLMFieldReader.from_chat_model(
+        create_llm_for(LLM_MODULE, **vars(settings)),
+        batch=not args.no_reader_batch,
+        max_workers=args.reader_workers,
+    )
+    detail = "per-field" if args.no_reader_batch else "grouped"
+    if args.reader_workers > 1:
+        detail += f", {args.reader_workers} at a time"
+    return reader, f"{settings.describe()} ({detail})"
 
 
 def run(args: argparse.Namespace, console: Console) -> RouterResult:

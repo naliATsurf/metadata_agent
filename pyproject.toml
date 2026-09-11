@@ -46,6 +46,7 @@ include = [
   "demo_app.py",
   "demo/**/*.py",
   "examples/**/*.py",
+  "eval/**/*.py",
   "tests/**/*.py",
 ]
 
