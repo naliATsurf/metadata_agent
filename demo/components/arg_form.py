@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import argparse
 import shlex
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import streamlit as st
 
@@ -25,6 +26,37 @@ import streamlit as st
 # with the action and a session-state key prefix and returns the value. Used for
 # arguments a generic text box serves badly (a bundle directory, say).
 WidgetOverride = Callable[[argparse.Action, str], Any]
+
+
+@dataclass(frozen=True)
+class Defaults:
+    """Values that stand in for the parser's own defaults, and a note about why.
+
+    An example's default is what someone typing the command would get. A page shown
+    inside the app has a second answer available — what the app is currently
+    configured to do — and that is the better starting point for its form.
+
+    ``token`` is what makes a *change* of those values visible. Streamlit remembers a
+    widget by its key, so a widget whose default changed after it was first drawn
+    keeps showing the old value. The keys of overridden arguments therefore carry the
+    token: when the configuration behind them changes, those widgets are new widgets
+    and pick the new value up, while everything else on the page keeps its state.
+    """
+
+    values: Mapping[str, Any] = field(default_factory=dict)
+    token: str = ""
+    note: str | None = None
+
+    def key(self, key_prefix: str, dest: str) -> str:
+        """The session-state key for ``dest``, versioned if this overrides it."""
+        if dest in self.values:
+            return f"{key_prefix}.{self.token}.{dest}"
+        return f"{key_prefix}.{dest}"
+
+    def default_for(self, action: argparse.Action) -> Any:
+        """What ``action``'s widget should start at."""
+        return self.values.get(action.dest, action.default)
+
 
 _IGNORED_ACTIONS = (argparse._HelpAction, argparse._VersionAction)
 
@@ -37,6 +69,7 @@ def render_form(
     *,
     key_prefix: str,
     overrides: dict[str, WidgetOverride] | None = None,
+    defaults: Defaults | None = None,
 ) -> argparse.Namespace:
     """Render one widget per parser argument and collect the results.
 
@@ -45,20 +78,24 @@ def render_form(
         key_prefix: Namespace for the widgets' session-state keys, so two pages
             showing similar arguments do not collide.
         overrides: Optional per-``dest`` widget replacements.
+        defaults: Optional starting values, replacing the parser's own.
 
     Returns:
         A namespace holding a value for every argument the parser defines.
     """
     overrides = overrides or {}
+    defaults = defaults or Defaults()
     values: dict[str, Any] = {}
 
     for action in parser._actions:
         if isinstance(action, _IGNORED_ACTIONS):
             continue
-        key = f"{key_prefix}.{action.dest}"
+        key = defaults.key(key_prefix, action.dest)
         override = overrides.get(action.dest)
         values[action.dest] = (
-            override(action, key) if override else _render_action(action, key)
+            override(action, key)
+            if override
+            else _render_action(action, key, defaults.default_for(action))
         )
     return argparse.Namespace(**values)
 
@@ -117,40 +154,38 @@ def _render_value(value: Any) -> str:
     return shlex.quote(str(value))
 
 
-def _render_action(action: argparse.Action, key: str) -> Any:
+def _render_action(action: argparse.Action, key: str, default: Any) -> Any:
     """Render the widget that matches ``action``'s kind and return its value."""
     label = _label(action)
     help_text = action.help or None
 
     if _is_flag_action(action):
-        return st.checkbox(
-            label, value=bool(action.default), help=help_text, key=key
-        )
+        return st.checkbox(label, value=bool(default), help=help_text, key=key)
 
     if isinstance(action, argparse._CountAction):
         return int(
             st.number_input(
-                label, min_value=0, value=int(action.default or 0),
+                label, min_value=0, value=int(default or 0),
                 step=1, help=help_text, key=key,
             )
         )
 
     if isinstance(action, argparse._AppendAction) or action.nargs in ("*", "+"):
-        return _render_multi(action, key, label, help_text)
+        return _render_multi(action, key, label, help_text, default)
 
     if action.choices:
         options = list(action.choices)
-        index = options.index(action.default) if action.default in options else 0
+        index = options.index(default) if default in options else 0
         return st.selectbox(label, options, index=index, help=help_text, key=key)
 
-    return _render_scalar(action, key, label, help_text)
+    return _render_scalar(action, key, label, help_text, default)
 
 
 def _render_multi(
-    action: argparse.Action, key: str, label: str, help_text: str | None
+    action: argparse.Action, key: str, label: str, help_text: str | None, default: Any
 ) -> list[Any]:
     """Render a repeatable argument as one value per line."""
-    default = action.default or []
+    default = default or []
     raw = st.text_area(
         f"{label} (one per line)",
         value="\n".join(str(item) for item in default),
@@ -163,13 +198,13 @@ def _render_multi(
 
 
 def _render_scalar(
-    action: argparse.Action, key: str, label: str, help_text: str | None
+    action: argparse.Action, key: str, label: str, help_text: str | None, default: Any
 ) -> Any:
     """Render a single-value argument, honouring its declared ``type``."""
     if action.type in (int, float):
         value = st.number_input(
             label,
-            value=action.type(action.default if action.default is not None else 0),
+            value=action.type(default if default is not None else 0),
             help=help_text,
             key=key,
         )
@@ -177,12 +212,12 @@ def _render_scalar(
 
     raw = st.text_input(
         label,
-        value="" if action.default is None else str(action.default),
+        value="" if default is None else str(default),
         help=help_text,
         key=key,
     ).strip()
     if not raw:
-        return action.default
+        return default
     return _coerce(action, raw)
 
 

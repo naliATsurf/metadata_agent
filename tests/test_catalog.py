@@ -572,6 +572,100 @@ class MultiTableBundleTest(unittest.TestCase):
         )
 
 
+class MixedDocumentLengthTest(unittest.TestCase):
+    """The read path is chosen per file, so one long document cannot drag the rest down.
+
+    A bundle is routinely a short README beside a long manuscript. Deciding the path on
+    the bundle *total* meant the manuscript pushed every file onto the localized path,
+    and localization is lexical — so a column defined in the README in plain narrative,
+    without its own token, silently stopped resolving. Nothing errored; recall just fell.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        pd.DataFrame({"bm": [180.5, 184.0, 187.5], "epoc": [42.0, 43.0, 44.0]}).to_csv(
+            os.path.join(self.dir, "obs.csv"), index=False
+        )
+        self.tab = create_context(os.path.join(self.dir, "obs.csv"), name="obs")
+        # Short: defines `bm` without ever writing "bm", so BM25 cannot place it.
+        self.short = self._doc(
+            "readme.md",
+            "# Trial\n\nWet body mass was recorded to the nearest 0.1 g at the "
+            "start of each trial.\n",
+        )
+        # Long: comfortably past the threshold, and names `epoc` so retrieval can.
+        self.long = self._doc(
+            "manuscript.txt",
+            "# Methods\n\n"
+            + ("Fish were held under a constant photoperiod and fed once daily. " * 400)
+            + "\n\nExcess post-exercise oxygen consumption (epoc) was integrated "
+            "from the recovery trace.\n",
+        )
+
+    def tearDown(self):
+        clear_registry()
+
+    def _doc(self, name, text):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as handle:
+            handle.write(text)
+        return create_context(path, name=name.split(".")[0])
+
+    def _reader(self):
+        """A model that reads whatever passage it is handed, and nothing else."""
+        def invoke(prompt):
+            out = {}
+            if "Wet body mass" in prompt:
+                out["bm"] = {
+                    "description": "wet body mass", "units": "g",
+                    "quote": "Wet body mass was recorded to the nearest 0.1 g",
+                }
+            if "Excess post-exercise" in prompt:
+                out["epoc"] = {
+                    "description": "excess post-exercise oxygen consumption",
+                    "units": "mg O2 kg-1 h-1",
+                    "quote": "Excess post-exercise oxygen consumption (epoc) was "
+                             "integrated",
+                }
+            return json.dumps(out)
+        return LLMProseReader(invoke)
+
+    def test_each_file_takes_its_own_path(self):
+        from src.router.catalog import _doc_resources, _split_by_length
+
+        short, long = _split_by_length(_doc_resources([self.short, self.long]))
+        self.assertEqual([s.resource for s in short], ["readme"])
+        self.assertEqual([s.resource for s in long], ["manuscript"])
+
+    def test_a_long_neighbour_does_not_cost_the_short_file_its_whole_doc_read(self):
+        """The regression: `bm` has no token in the README, so only a whole read finds it."""
+        catalog = resolve_catalog(
+            self.tab, sources=[self.short, self.long], prose_reader=self._reader()
+        )
+        bm = catalog.get("bm")
+        self.assertEqual(bm.link_method, "prose_read")
+        self.assertEqual(bm.description, "wet body mass")
+        self.assertIn("readme", bm.link_evidence)
+
+    def test_the_long_file_is_still_localized_and_still_resolves(self):
+        catalog = resolve_catalog(
+            self.tab, sources=[self.short, self.long], prose_reader=self._reader()
+        )
+        epoc = catalog.get("epoc")
+        self.assertEqual(epoc.link_method, "prose_read")
+        self.assertIn("manuscript", epoc.link_evidence)
+
+    def test_both_paths_contribute_to_one_resolution(self):
+        catalog = resolve_catalog(
+            self.tab, sources=[self.short, self.long], prose_reader=self._reader()
+        )
+        cited = {
+            c.name: c.link_evidence.split("#")[0]
+            for c in catalog.columns if c.link_evidence
+        }
+        self.assertEqual(cited, {"bm": "readme", "epoc": "manuscript"})
+
+
 class ProseReaderTierTest(unittest.TestCase):
     """The retrieve-then-read tier: localize a chunk, then read a *cued* definition.
 

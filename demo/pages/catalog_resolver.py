@@ -7,6 +7,8 @@ and its resolved catalog as a table.
 
 from __future__ import annotations
 
+from demo import settings as pipeline_settings
+from demo.components.arg_form import Defaults
 from demo.components.bundle_controls import (
     CODEBOOKS,
     DOCUMENTS,
@@ -25,6 +27,7 @@ KEY = "catalog_resolver"
 def main() -> None:
     """Render the catalog resolver page."""
     render_tree(KEY)
+    settings = pipeline_settings.current()
     run_example(
         resolve_catalog,
         key=KEY,
@@ -40,6 +43,11 @@ def main() -> None:
             "dictionary": source_picker(CODEBOOKS),
             "doc": source_picker(DOCUMENTS),
         },
+        defaults=Defaults(
+            settings.catalog_arguments(),
+            token=settings.token(),
+            note=pipeline_settings.FORM_NOTE,
+        ),
         render=lambda catalog: render_catalog_view(catalog, key=KEY),
     )
 

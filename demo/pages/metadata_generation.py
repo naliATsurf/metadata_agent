@@ -18,6 +18,7 @@ import streamlit as st
 from streamlit.runtime.uploaded_file_manager import UploadedFile
 import yaml
 
+from demo import settings as pipeline_settings
 from demo.workflows.metadata_generation import (
     SUPPORTED_FILE_TYPES,
     available_metadata_standards,
@@ -217,14 +218,20 @@ def run_generation(
     file_name: str,
     file_bytes: bytes,
     standard_name: str,
+    settings: pipeline_settings.PipelineSettings,
     messages: multiprocessing.Queue,
 ) -> None:
     """Run metadata generation in a child process and publish its output.
+
+    The settings travel with the job rather than being read from the environment
+    at the far end: the child is spawned, not forked, so it starts from whatever
+    ``.env`` says and would otherwise ignore every choice made in the browser.
 
     Args:
         file_name: Name of the uploaded file.
         file_bytes: Raw uploaded file bytes.
         standard_name: Selected metadata standard name.
+        settings: The configuration this run should use.
         messages: Queue used to publish progress and the final result.
     """
     started_at = perf_counter()
@@ -240,12 +247,17 @@ def run_generation(
             file_name,
             file_bytes,
             standard_name,
+            topology_name=settings.topology,
+            environment=settings.environment(),
             progress_callback=show_progress,
         )
         total_seconds = perf_counter() - started_at
         result["generation_timing"] = build_generation_timing(
             event_times, total_seconds
         )
+        # What produced this result, alongside it — so a result kept while the
+        # settings move on still says what it was run with.
+        result["pipeline_settings"] = settings.to_dict()
         messages.put(("result", result))
     except Exception as exc:
         messages.put(("error", repr(exc)))
@@ -341,6 +353,10 @@ def render_result(result: dict[str, Any]) -> None:
                 hide_index=True,
             )
 
+        if result.get("pipeline_settings"):
+            with st.expander("Settings this run used"):
+                st.json(result["pipeline_settings"])
+
         with st.expander("Raw execution data"):
             st.json(execution_details(result))
 
@@ -365,10 +381,14 @@ def main() -> None:
         with standard_preview_col:
             render_standard_preview(standard_name)
 
+    # Above the run button and below the inputs, because that is the order the
+    # questions are asked in: what to describe, how to describe it, then go.
+    settings = pipeline_settings.render()
+
     if uploaded_file is None or file_bytes is None:
         st.stop()
 
-    file_key = uploaded_file_key(file_bytes, standard_name)
+    file_key = uploaded_file_key(file_bytes, standard_name, settings.token())
 
     if "metadata_generation_results" not in st.session_state:
         st.session_state.metadata_generation_results = {}
@@ -438,7 +458,13 @@ def main() -> None:
             messages = context.Queue()
             process = context.Process(
                 target=run_generation,
-                args=(uploaded_file.name, file_bytes, standard_name, messages),
+                args=(
+                    uploaded_file.name,
+                    file_bytes,
+                    standard_name,
+                    settings,
+                    messages,
+                ),
                 daemon=True,
             )
             process.start()

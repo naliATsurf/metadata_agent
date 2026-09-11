@@ -22,10 +22,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 from src.config import (
-    PLAYER_MAX_TOOL_ITERATIONS,
-    PLAYER_TOOL_EXECUTION_MODE,
     create_llm,
     llm_settings,
+    player_max_tool_iterations,
+    player_tool_execution_mode,
 )
 from src.context.base_context import ExecutionContext
 from src.provenance import Caller, attributed_to
@@ -228,7 +228,7 @@ class Player:
         ]
 
         results: Dict[str, Any] = {}
-        for _ in range(PLAYER_MAX_TOOL_ITERATIONS):
+        for _ in range(player_max_tool_iterations()):
             response = llm_with_tools.invoke(messages)
             messages.append(response)
 
@@ -309,7 +309,7 @@ class Player:
             tool_results = self._survey(context_key, resources_to_analyze)
 
         investigable = [t for t in self.tools if not is_auto_fireable(t)]
-        if investigable and PLAYER_TOOL_EXECUTION_MODE == "investigate":
+        if investigable and player_tool_execution_mode() == "investigate":
             with attributed_to(_as("investigate")):
                 tool_results.update(
                     self._investigate(task, context_key, tool_results, investigable)

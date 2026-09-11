@@ -2,9 +2,10 @@ import hashlib
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator, Mapping
 
 import numpy as np
 import pandas as pd
@@ -39,18 +40,25 @@ def available_topologies() -> list[str]:
     return list(EXECUTION_TOPOLOGIES)
 
 
-def uploaded_file_key(file_bytes: bytes, standard_name: str) -> str:
-    """Build a stable cache key for an uploaded file and selected standard.
+def uploaded_file_key(
+    file_bytes: bytes, standard_name: str, configuration: str = ""
+) -> str:
+    """Build a stable cache key for one run's inputs.
+
+    A cached result belongs to everything that produced it, configuration included:
+    the same file under a different model is a different run, and showing the old
+    result for it would be a lie.
 
     Args:
         file_bytes: Raw bytes from the uploaded file.
         standard_name: Name of the selected metadata standard.
+        configuration: Digest of the settings the run would use.
 
     Returns:
-        A cache key combining the file hash and metadata standard name.
+        A cache key combining the file hash, the standard, and the configuration.
     """
     digest = hashlib.sha256(file_bytes).hexdigest()
-    return f"{digest}:{standard_name}"
+    return f"{digest}:{standard_name}:{configuration}"
 
 
 def load_preview(file_name: str, file_bytes: bytes, rows: int = 5) -> pd.DataFrame:
@@ -73,6 +81,7 @@ def generate_metadata(
     file_bytes: bytes,
     standard_name: str,
     topology_name: str = DEFAULT_TOPOLOGY,
+    environment: Mapping[str, str] | None = None,
     progress_callback: Callable[[str, Any | None], None] | None = None,
 ) -> dict[str, Any]:
     """Run metadata extraction for an uploaded file and return JSON-friendly output.
@@ -86,6 +95,9 @@ def generate_metadata(
         file_bytes: Raw bytes from the uploaded file.
         standard_name: Name of the metadata standard to use.
         topology_name: Name of the execution topology to use.
+        environment: Configuration variables for this run, as :mod:`src.config`
+            spells them. They are in force for the call and restored afterwards,
+            so choosing a model in a UI does not reconfigure the whole process.
         progress_callback: Optional callback that receives intermediate stage
             names and JSON-friendly payloads for UI display.
 
@@ -104,45 +116,47 @@ def generate_metadata(
 
     temp_path = _write_upload_to_temp(file_name, file_bytes)
     try:
-        dataset_name = Path(file_name).stem
-        metadata_standard = load_metadata_standard(standard_name)
-        _publish_progress(progress_callback, "creating_context")
-        context = create_context({"data": temp_path}, name=dataset_name)
-        _publish_progress(progress_callback, "context_created", context.to_dict())
+        with _configured(environment):
+            dataset_name = Path(file_name).stem
+            metadata_standard = load_metadata_standard(standard_name)
+            _publish_progress(progress_callback, "creating_context")
+            context = create_context({"data": temp_path}, name=dataset_name)
+            _publish_progress(progress_callback, "context_created", context.to_dict())
 
-        _publish_progress(progress_callback, "initializing_orchestrator")
-        # Provider, model, and temperature come from the PLANNING module's
-        # configuration; re-passing the globals here would mask it.
-        orchestrator = Orchestrator(topology_name=topology_name)
+            _publish_progress(progress_callback, "initializing_orchestrator")
+            # Provider, model, and temperature come from the PLANNING module's
+            # configuration — which ``environment`` has already set, if the caller
+            # chose one. Re-passing them here would mask that.
+            orchestrator = Orchestrator(topology_name=topology_name)
 
-        _publish_progress(progress_callback, "generating_plan")
-        plan = orchestrator.generate_plan(
-            context=context,
-            metadata_standard=metadata_standard,
-        )
-        if plan is None:
-            raise RuntimeError("Metadata agent did not return a plan.")
+            _publish_progress(progress_callback, "generating_plan")
+            plan = orchestrator.generate_plan(
+                context=context,
+                metadata_standard=metadata_standard,
+            )
+            if plan is None:
+                raise RuntimeError("Metadata agent did not return a plan.")
 
-        plan_steps = plan.to_dict_list()
-        _publish_progress(progress_callback, "plan_generated", plan_steps)
+            plan_steps = plan.to_dict_list()
+            _publish_progress(progress_callback, "plan_generated", plan_steps)
 
-        if not orchestrator._validate_plan(plan, context):
-            raise RuntimeError("Generated metadata plan failed validation.")
+            if not orchestrator._validate_plan(plan, context):
+                raise RuntimeError("Generated metadata plan failed validation.")
 
-        _publish_progress(progress_callback, "executing_plan")
-        result = orchestrator.execute_plan(
-            plan=plan,
-            context=context,
-            metadata_standard=metadata_standard,
-            metadata_standard_name=standard_name,
-        )
-        if result is None:
-            raise RuntimeError("Metadata agent did not return a result.")
+            _publish_progress(progress_callback, "executing_plan")
+            result = orchestrator.execute_plan(
+                plan=plan,
+                context=context,
+                metadata_standard=metadata_standard,
+                metadata_standard_name=standard_name,
+            )
+            if result is None:
+                raise RuntimeError("Metadata agent did not return a result.")
 
-        displayable_result = _to_displayable(result)
-        displayable_result["generated_plan"] = plan_steps
-        _publish_progress(progress_callback, "execution_complete", displayable_result)
-        return displayable_result
+            displayable_result = _to_displayable(result)
+            displayable_result["generated_plan"] = plan_steps
+            _publish_progress(progress_callback, "execution_complete", displayable_result)
+            return displayable_result
     finally:
         try:
             os.unlink(temp_path)
@@ -179,6 +193,31 @@ def execution_details(result: dict[str, Any]) -> dict[str, Any]:
         "resource_metadata": result.get("resource_metadata"),
         "relationships": result.get("relationships"),
     }
+
+
+@contextmanager
+def _configured(environment: Mapping[str, str] | None) -> Iterator[None]:
+    """Run the block with ``environment`` in force, then put it back as it was.
+
+    :mod:`src.config` reads each value when it is asked for, so setting the variables
+    around the call is enough to configure everything the run touches — the planner,
+    the players, and whatever they construct — without any of them growing a
+    parameter for it. Restoring afterwards keeps one run's choices out of the next.
+    """
+    if not environment:
+        yield
+        return
+
+    previous = {name: os.environ.get(name) for name in environment}
+    os.environ.update(environment)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def _publish_progress(

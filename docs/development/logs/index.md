@@ -8,6 +8,10 @@ records findings from an investigation that changed no code.
 ## 2026-09
 
 - -
+  **[2026-09-11 — One settings panel for the whole pipeline](2026-09-11_pipeline-settings.change.md)**
+  — every stage's parameters on the landing page; configuration read when it is
+  asked for rather than at import; the field router gained the LLM prose reader.
+- -
   **[2026-09-03 — The FieldPlan defers a choice its consumers make anyway](2026-09-03_premature-commitment.analysis.md)**
   *(analysis)* — the bucket, the task's resource, and the assurance are all read
   off rank 1, while the artifact presents the choice as the executor's. Findings

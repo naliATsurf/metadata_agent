@@ -21,6 +21,10 @@ Usage:
     python examples/field_router_plan.py --bundle data/tests/router_test \\
         --standard field_router_test --dictionary codebook.csv
 
+    # read the columns the codebook does not define out of narrative prose (layer 3),
+    # then let a model adjudicate which candidate answers each field (layer 4b)
+    python examples/field_router_plan.py --llm-reader --field-reader
+
 Every CSV in the bundle is treated as a data table unless named with --dictionary;
 .md / .txt files are documents (prose definitions + a narrative surface).
 """
@@ -46,9 +50,11 @@ from src.context import create_context
 from src.core.schemas import Plan
 from src.router import (
     NONE,
+    CachedProseReader,
     Catalog,
     DeterministicProseReader,
     FieldPlan,
+    LLMProseReader,
     ProseReader,
     compile_field_plan,
     discover_bundle,
@@ -70,6 +76,12 @@ DEFAULT_STANDARD = "sharetrait_basic"
 #: LLM_PROVIDER_FIELD_READER / LLM_MODEL_FIELD_READER / LLM_TEMPERATURE_FIELD_READER
 #: in .env to point it somewhere other than the global default.
 LLM_MODULE = "FIELD_READER"
+
+#: The catalog's prose reader is the *same* stage this example's layer 3 runs as
+#: examples/resolve_catalog.py, so it draws on the same configuration rather than
+#: a router-specific one: a model good enough to read a README there is good
+#: enough here.
+CATALOG_MODULE = "CATALOG_RESOLVER"
 
 
 def build_plan(
@@ -183,7 +195,12 @@ def build_parser() -> argparse.ArgumentParser:
         "Prose tiers", "Which readers run above the codebook and the value prior."
     )
     model = ap.add_argument_group(
-        "Model", "Backing --field-reader; each defaults to this module's configuration."
+        "Field reader model",
+        "Backing --field-reader; each defaults to that module's configuration.",
+    )
+    catalog_model = ap.add_argument_group(
+        "Catalog reader model",
+        "Backing --llm-reader; each defaults to the catalog resolver's configuration.",
     )
 
     source.add_argument("--bundle", type=Path, default=DEFAULT_BUNDLE,
@@ -208,6 +225,10 @@ def build_parser() -> argparse.ArgumentParser:
     tier.add_argument("--prose-reader", action="store_true",
                       help="enable the retrieve-then-read prose tier (localize + read a "
                            "cued definition) above the glossary regex")
+    tier.add_argument("--llm-reader", action="store_true",
+                      help="read free narrative with the catalog reader's model, for "
+                           "columns the deterministic tiers cannot resolve; wins over "
+                           "--prose-reader")
 
     configured = llm_settings(LLM_MODULE)
     model.add_argument("--provider", choices=list(PROVIDER_CONFIGS),
@@ -226,7 +247,41 @@ def build_parser() -> argparse.ArgumentParser:
                        help="ask about every field separately instead of grouping "
                             "fields offered identical candidates. Slower, but each "
                             "field is judged independently")
+
+    catalog_configured = llm_settings(CATALOG_MODULE)
+    catalog_model.add_argument(
+        "--catalog-provider", choices=list(PROVIDER_CONFIGS),
+        default=catalog_configured.provider,
+        help=f"provider backing --llm-reader (default: {catalog_configured.provider})")
+    catalog_model.add_argument(
+        "--catalog-model", default=catalog_configured.model,
+        help=f"model backing --llm-reader (default: {catalog_configured.model})")
+    catalog_model.add_argument(
+        "--catalog-temperature", type=float, default=catalog_configured.temperature,
+        help="sampling temperature for --llm-reader (default: "
+             f"{catalog_configured.temperature})")
     return ap
+
+
+def build_prose_reader(args: argparse.Namespace) -> Tuple[ProseReader | None, str]:
+    """Build layer 3's prose reader from the flags, and a label naming what reads.
+
+    ``--llm-reader`` wins over ``--prose-reader``: it subsumes the deterministic tier,
+    reading narrative the cued reader cannot. The reader is cached, so a document is
+    read once no matter how many of the bundle's tables are resolved against it.
+    """
+    if args.llm_reader:
+        from src.config import create_llm_for   # lazy: pulls provider SDKs when used
+
+        settings = llm_settings(
+            CATALOG_MODULE, provider=args.catalog_provider, model=args.catalog_model,
+            temperature=args.catalog_temperature,
+        )
+        reader = LLMProseReader.from_chat_model(create_llm_for(CATALOG_MODULE, **vars(settings)))
+        return CachedProseReader(reader), f"llm {settings.describe()}"
+    if args.prose_reader:
+        return DeterministicProseReader(), "deterministic"
+    return None, "off"
 
 
 def build_field_reader(args: argparse.Namespace) -> Tuple[FieldReader | None, str]:
@@ -273,7 +328,7 @@ def run(args: argparse.Namespace, console: Console) -> RouterResult:
 
     dicts = select(bundle.codebooks, args.dictionary)
     docs = select(bundle.documents, args.doc)
-    reader = DeterministicProseReader() if args.prose_reader else None
+    reader, reader_label = build_prose_reader(args)
     field_reader, field_reader_label = build_field_reader(args)
 
     console.print(f"[bold]bundle:[/] {args.bundle}")
@@ -282,7 +337,7 @@ def run(args: argparse.Namespace, console: Console) -> RouterResult:
     console.print(
         f"sources:  dictionaries={[p.name for p in dicts] or 'none'}  "
         f"docs={[p.name for p in docs] or 'none'}  "
-        f"prose-reader={'on' if reader else 'off'}  candidates={args.candidates}\n"
+        f"prose-reader={reader_label}  candidates={args.candidates}\n"
         f"          field-reader={field_reader_label}"
     )
     excluded = [

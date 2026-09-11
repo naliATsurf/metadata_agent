@@ -58,6 +58,44 @@ condition factor" and "temperature" are indistinguishable by name and obvious by
 value. The profile still cannot *name* a column — that is the abstention above —
 but what shape its values are is a fact worth carrying forward.
 
+**Choosing a reader.** The prose tiers are opt-in, and which to pass depends on how
+the bundle *states* its meanings, not on how large it is:
+
+- **none** — a codebook keyed by column name resolves everything it covers, and the
+  glossary regex plus the value prior handle what it does not. There is nothing for
+  a reader to do in a bundle with no explanatory prose.
+- :class:`DeterministicProseReader` — the document defines columns in a *cued* shape
+  (``mass - fish mass``, ``fish mass (mass)``). High precision, no model, and it
+  abstains rather than guess when the cue is absent.
+- :class:`LLMProseReader` — the meanings are stated in plain narrative ("Mass records
+  its mass in grams"), where there is no cue to match. The only tier that reads those,
+  and the only one that costs a model call.
+
+A reader only ever sees columns the deterministic tiers left unresolved (residual
+gating), so adding one cannot overturn a resolution a codebook already made — it can
+only fill gaps. Wrap it in :class:`CachedProseReader` and a passage is read once
+across the whole bundle.
+
+**Document length changes the pipeline shape**, at ``_WHOLE_DOC_MAX_CHARS``, and the
+decision is made **per file** — a bundle is routinely a short README beside a long
+manuscript, and they take different paths in the same run:
+
+- **short enough** — the whole-doc path (:func:`_whole_doc_reads`): no retrieval at
+  all. The file goes to the reader entire, with every residual column in one call.
+  One call per file, and a column whose name never appears verbatim is still read.
+- **too long** — the localized path (:func:`_localized_reads`): BM25 retrieval first
+  places each column in the top ``_PROSE_READ_K`` chunks, and only those spans are
+  read. One call per retrieved chunk.
+
+The localized path degrades the reader *silently*, for a reason worth stating
+plainly: **localization is lexical, and the whole reason to reach for a reader is
+that the prose is not.** There a column is read only if token overlap found its
+passage, so precisely the narrative an LLM reader exists for ("oxygen debt" for
+``EPOC``, "the fish's mass" for ``mass``) is what localization misses. Recall falls
+and nothing errors. Splitting per file contains the damage to the files that
+actually earn it; the stronger localizer the long path wants — embedding retrieval,
+heading-aware sectioning — is sketched in :func:`_localized_reads` and not built.
+
 Scale note: this is **doc-scale, not row-scale**. Value profiles are computed from
 a *sample* of the data (never a full scan), and only the small description sources
 are read in whole. A million-row data table is sampled, never indexed.
@@ -76,7 +114,6 @@ import pandas as pd
 from src.context.base_context import (
     EvidenceRef,
     ExecutionContext,
-    Searchable,
     TabularContext,
     bm25_scores,
     content_terms,
@@ -737,7 +774,7 @@ _PROSE_READ_K = 3
 
 def _batch_prose_reads(
     fields: List[Tuple[str, str]],
-    docs: List[TextContext],
+    sources: List[_DocResource],
     reader: ProseReader,
     *,
     k: int = _PROSE_READ_K,
@@ -753,7 +790,7 @@ def _batch_prose_reads(
     ``prose_read`` candidates, so ordering and content match the per-column path.
     """
     # Chunk once per document and reuse the tokenization across every column's query.
-    chunks: List[TextChunk] = [c for doc in docs for res in doc.resources for c in doc.iter_chunks(res)]
+    chunks: List[TextChunk] = [c for source in sources for c in source.chunks()]
     if not chunks:
         return {}
     tokenized = [tokenize(c.text) for c in chunks]
@@ -961,43 +998,75 @@ def _resolve_table_deterministic(
 _WHOLE_DOC_MAX_CHARS = 20_000
 
 
-def _docs_total_chars(docs: List[TextContext]) -> int:
-    return sum(len(doc.read_text(r)) for doc in docs for r in doc.resources)
+@dataclass(frozen=True)
+class _DocResource:
+    """One document *file* — the unit the read-path decision is made on.
+
+    A :class:`TextContext` can hold several resources, and the choice between
+    reading whole and localizing belongs to each file on its own: a bundle is
+    routinely a short README next to a long manuscript, and the README should not
+    be localized just because the manuscript is in the same folder.
+    """
+
+    doc: TextContext
+    resource: str
+
+    def text(self) -> str:
+        return self.doc.read_text(self.resource)
+
+    def chunks(self) -> List[TextChunk]:
+        return list(self.doc.iter_chunks(self.resource))
+
+
+def _doc_resources(docs: List[TextContext]) -> List[_DocResource]:
+    return [_DocResource(doc, r) for doc in docs for r in doc.resources]
+
+
+def _split_by_length(
+    sources: List[_DocResource],
+) -> Tuple[List[_DocResource], List[_DocResource]]:
+    """Partition into (short enough to read whole, long enough to need localizing)."""
+    short, long = [], []
+    for source in sources:
+        (short if len(source.text()) <= _WHOLE_DOC_MAX_CHARS else long).append(source)
+    return short, long
 
 
 def _whole_doc_reads(
-    residual: List[Tuple[str, str]], docs: List[TextContext], reader: ProseReader
+    residual: List[Tuple[str, str]], sources: List[_DocResource], reader: ProseReader
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Short-doc path: **skip retrieval**, hand each whole document plus *all* residual
-    columns to the reader in one call.
+    """Short-doc path: **skip retrieval**, hand one whole file plus *all* residual
+    columns to the reader, one call per file.
 
     Retrieval by column token fails on narrative that never uses the literal name
-    ("oxygen debt" for ``EPOC``, "the fish's mass" for ``mass``). When the docs are small
-    this is unnecessary and harmful: give the reader the whole text and the full column
-    list at once, so a column is read even if its name never appears verbatim — one call
-    per document, all columns at once.
+    ("oxygen debt" for ``EPOC``, "the fish's mass" for ``mass``). For a file small
+    enough to pass whole this is unnecessary and harmful: give the reader the full
+    text and the full column list at once, and a column is read even if its name
+    never appears verbatim.
+
+    ``sources`` are the files that individually fit (:func:`_split_by_length`), so a
+    long neighbour in the same bundle does not drag them onto the localized path.
     """
     out: Dict[str, List[Dict[str, Any]]] = {}
-    for doc in docs:
-        for resource in doc.resources:
-            text = doc.read_text(resource)
-            results = reader.read_many(columns=residual, chunk=text)
-            for name, result in results.items():
-                evidence, confidence, conflict, quote = _ground_read(
-                    result, name, resource, 0, text
-                )
-                candidate = {
-                    "description": result.description, "units": result.units,
-                    "confidence": confidence, "evidence": evidence, "quote": quote,
-                }
-                if conflict:
-                    candidate["conflict"] = conflict
-                out.setdefault(name, []).append(candidate)
+    for source in sources:
+        text = source.text()
+        results = reader.read_many(columns=residual, chunk=text)
+        for name, result in results.items():
+            evidence, confidence, conflict, quote = _ground_read(
+                result, name, source.resource, 0, text
+            )
+            candidate = {
+                "description": result.description, "units": result.units,
+                "confidence": confidence, "evidence": evidence, "quote": quote,
+            }
+            if conflict:
+                candidate["conflict"] = conflict
+            out.setdefault(name, []).append(candidate)
     return out
 
 
 def _localized_reads(
-    residual: List[Tuple[str, str]], docs: List[TextContext], reader: ProseReader
+    residual: List[Tuple[str, str]], sources: List[_DocResource], reader: ProseReader
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Long-doc path: **localize** each column's definition, then read only those spans.
 
@@ -1016,7 +1085,7 @@ def _localized_reads(
     Until then the token retriever is the honest, limited stand-in.
     """
     # TODO(long-doc): embedding/heading localization + query expansion; see docstring.
-    return _batch_prose_reads(residual, docs, reader)
+    return _batch_prose_reads(residual, sources, reader)
 
 
 def _read_residuals(
@@ -1028,10 +1097,14 @@ def _read_residuals(
     Residual gating keeps an expensive reader off columns a codebook or glossary already
     resolved. The bundle-level hoist unions every table's residual columns (deduped by
     name — a prose read depends on the name and the docs, not the table) into a single
-    pass, so a document is read once for the whole bundle. The read path is chosen by
-    document size: small docs are read **whole** (:func:`_whole_doc_reads`, no retrieval,
-    so a column whose name never appears verbatim is still read); a manuscript is
-    **localized** first (:func:`_localized_reads`). Each residual column is re-decided
+    pass, so a document is read once for the whole bundle.
+
+    The read path is chosen **per file**, not per bundle: each file short enough is read
+    **whole** (:func:`_whole_doc_reads`, no retrieval, so a column whose name never
+    appears verbatim is still read), and only the files that are genuinely long are
+    **localized** (:func:`_localized_reads`). Both sets contribute, so a README sitting
+    beside a manuscript keeps the high-recall path it qualifies for. Each residual
+    column is re-decided
     with an *empty* dictionary/doc set (it had no deterministic candidate, by definition)
     plus its reads, its value profile still refereeing the claim.
     """
@@ -1049,11 +1122,15 @@ def _read_residuals(
                 residual.append((_match_key(col.name), t.dtypes[col.name]))
     if not residual:
         return
-    reads = (
-        _whole_doc_reads(residual, docs, reader)
-        if _docs_total_chars(docs) <= _WHOLE_DOC_MAX_CHARS
-        else _localized_reads(residual, docs, reader)
-    )
+    short, long = _split_by_length(_doc_resources(docs))
+    reads: Dict[str, List[Dict[str, Any]]] = {}
+    # Whole-doc reads first: same tier as localized ones, and source order breaks a
+    # remaining tie in _decide, so the higher-recall path is preferred on equal terms.
+    for name, candidates in (
+        *_whole_doc_reads(residual, short, reader).items(),
+        *_localized_reads(residual, long, reader).items(),
+    ):
+        reads.setdefault(name, []).extend(candidates)
     if not reads:
         return
     # Fold back on the same normalized key, so a read reaches every spelling.

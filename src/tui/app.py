@@ -33,8 +33,6 @@ from src.standards import METADATA_STANDARDS
 from src.standards import get_schema_for_standard
 from src.config import (
     DEFAULT_TOPOLOGY,
-    LLM_PROVIDER,
-    PLANNING_TEMPERATURE,
     TUI_LOG_LEVEL,
     TUI_LOG_SUPPRESSED_LOGGERS,
     TUI_UI_VERBOSITY,

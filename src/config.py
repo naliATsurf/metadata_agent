@@ -14,10 +14,15 @@ Configuration Options
 ``LLM_MODEL``
     Optional explicit model name. If unset, the selected provider's default
     model from :data:`PROVIDER_CONFIGS` is used.
-``LLM_TEMPERATURE_PLANNING``
-    Temperature used by planning steps. Defaults to ``0.0``.
-``LLM_TEMPERATURE_PLAYER``
-    Temperature used by player/creative steps. Defaults to ``0.3``.
+``LLM_<FIELD>_<MODULE>``
+    Per-module overrides, for every module named in :data:`LLM_MODULES` and every
+    field of :class:`LLMSettings` — ``LLM_MODEL_PLANNING``,
+    ``LLM_TEMPERATURE_CATALOG_RESOLVER``, ``LLM_PROVIDER_FIELD_READER``, and so on.
+    A module with none set follows the global settings above.
+``PLAYER_TOOL_EXECUTION_MODE``
+    ``"investigate"`` (default) or ``"survey"``; see :data:`PLAYER_TOOL_MODES`.
+``PLAYER_MAX_TOOL_ITERATIONS``
+    Max model↔tool rounds per task while investigating. Defaults to ``8``.
 ``DEFAULT_TOPOLOGY``
     Default execution topology name. Defaults to ``"default"``.
 ``DEFAULT_METADATA_STANDARD``
@@ -43,7 +48,11 @@ Runtime Overrides
 * Pass ``model_name`` to :func:`create_llm` or :func:`get_model_name` to
   override ``LLM_MODEL`` for one call.
 * Pass ``temperature`` to :func:`create_llm` to override the module's default
-  temperature constants for one model instance.
+  temperature for one model instance.
+
+Every value here is read from the environment when it is asked for, so setting a
+variable at runtime — a UI offering a model picker, a test fixing a temperature —
+takes effect on the next call rather than needing a fresh process.
 
 Example ``.env`` file::
 
@@ -68,9 +77,15 @@ load_dotenv()
 # LLM PROVIDER CONFIGURATION
 # =============================================================================
 
-# LLM Provider: "google", "surf", "openai"
-# Can be overridden by environment variable: LLM_PROVIDER
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "google")
+# Every environment-backed value below is read when it is *asked for*, not when
+# this module is imported. A front end that lets someone choose a model can then
+# set the variable and have the next call honour it; a constant captured at import
+# would freeze whatever the process started with.
+
+def default_provider() -> str:
+    """The provider a module falls back to: ``LLM_PROVIDER``, else Google."""
+    return os.getenv("LLM_PROVIDER", "google")
+
 
 # Provider-specific configurations
 PROVIDER_CONFIGS = {
@@ -96,9 +111,9 @@ PROVIDER_CONFIGS = {
 # LLM MODEL CONFIGURATION
 # =============================================================================
 
-# Default model - uses provider's default if not specified
-# Can be overridden by environment variable: LLM_MODEL
-DEFAULT_MODEL = os.getenv("LLM_MODEL", None)  # None means use provider default
+def default_model() -> Optional[str]:
+    """``LLM_MODEL``, or None to fall back to the provider's own default model."""
+    return os.getenv("LLM_MODEL") or None
 
 
 # =============================================================================
@@ -117,12 +132,40 @@ DEFAULT_MODEL = os.getenv("LLM_MODEL", None)  # None means use provider default
 # So an unconfigured module behaves exactly as it did before this existed, and
 # pointing one module at another model is one line in .env.
 
-#: Modules that select a model, and the temperature each wants by default.
+@dataclass(frozen=True)
+class LLMModule:
+    """One model-selecting module: what it is, and the temperature it wants.
+
+    The label and the blurb are here rather than in the UI that shows them because
+    they describe the module, not a rendering of it: ``--help``, a settings panel,
+    and a configuration summary all want the same two sentences.
+    """
+
+    label: str
+    temperature: float
+    description: str
+
+
+#: Modules that select a model, keyed by the name their env vars are spelled with.
 LLM_MODULES = {
-    "PLANNING": 0.0,           # orchestrator plan generation — deterministic
-    "PLAYER": 0.3,             # extraction players — a little latitude
-    "CATALOG_RESOLVER": 0.0,   # prose reader — copies stated definitions
-    "FIELD_READER": 0.0,       # router's candidate reader — a judgement, not a draft
+    "PLANNING": LLMModule(
+        "Planning", 0.0,
+        "Writes the execution plan. Deterministic, and wants the strongest reasoner.",
+    ),
+    "PLAYER": LLMModule(
+        "Players", 0.3,
+        "Extract and synthesize metadata for each plan step. A little latitude helps.",
+    ),
+    "CATALOG_RESOLVER": LLMModule(
+        "Catalog prose reader", 0.0,
+        "Reads a column's meaning out of free narrative. Copies stated definitions, "
+        "so it can be a cheaper model.",
+    ),
+    "FIELD_READER": LLMModule(
+        "Field reader", 0.0,
+        "Decides which routed candidate answers a schema field, or that none does. "
+        "A judgement, not a draft.",
+    ),
 }
 
 
@@ -137,6 +180,12 @@ class LLMSettings:
     def describe(self) -> str:
         """A short label naming the model, for output that records what ran."""
         return f"{self.provider}:{self.model} @ T={self.temperature}"
+
+
+def module_default_temperature(module: Optional[str]) -> float:
+    """The temperature ``module`` declares in :data:`LLM_MODULES`, else 0.0."""
+    spec = LLM_MODULES.get((module or "").upper())
+    return spec.temperature if spec else 0.0
 
 
 def _module_env(field: str, module: Optional[str]) -> Optional[str]:
@@ -165,14 +214,16 @@ def llm_settings(
     model rather than the global ``LLM_MODEL``, which belongs to whichever
     provider ``LLM_PROVIDER`` names.
     """
-    resolved_provider = provider or _module_env("PROVIDER", module) or LLM_PROVIDER
+    global_provider = default_provider()
+    resolved_provider = provider or _module_env("PROVIDER", module) or global_provider
 
     resolved_model = model or _module_env("MODEL", module)
     if not resolved_model:
-        # DEFAULT_MODEL is stated for the global provider; it does not transfer
-        # to a module that switched providers.
-        if resolved_provider == LLM_PROVIDER and DEFAULT_MODEL:
-            resolved_model = DEFAULT_MODEL
+        # LLM_MODEL is stated for the global provider; it does not transfer to a
+        # module that switched providers.
+        global_model = default_model()
+        if resolved_provider == global_provider and global_model:
+            resolved_model = global_model
         else:
             resolved_model = PROVIDER_CONFIGS.get(resolved_provider, {}).get(
                 "default_model", "gpt-4o-mini"
@@ -183,7 +234,7 @@ def llm_settings(
         temperature = (
             float(from_env)
             if from_env is not None
-            else LLM_MODULES.get((module or "").upper(), 0.0)
+            else module_default_temperature(module)
         )
 
     return LLMSettings(
@@ -213,20 +264,22 @@ def create_llm_for(module: Optional[str] = None, **overrides: Any) -> Any:
     )
 
 
-# Temperatures the planner and the players run at, kept as names because they
-# are read directly in a few places. Both are LLM_MODULES entries, so they honour
-# LLM_TEMPERATURE_PLANNING / LLM_TEMPERATURE_PLAYER exactly as they always did.
-PLANNING_TEMPERATURE = llm_settings("PLANNING").temperature
-PLAYER_TEMPERATURE = llm_settings("PLAYER").temperature
+#: How a player may use the tools it was given.
+#:
+#:   ``"investigate"`` — after the deterministic survey, let the model call the
+#:   tools whose arguments only it can supply (column names, and so on).
+#:   ``"survey"`` — survey only; tools needing model-chosen arguments never run.
+PLAYER_TOOL_MODES = ("investigate", "survey")
 
-# Player tool execution.
-#   "investigate" — after the deterministic survey, let the model call the tools
-#                   whose arguments only it can supply (column names, and so on).
-#   "survey"      — survey only; tools needing model-chosen arguments never run.
-PLAYER_TOOL_EXECUTION_MODE = os.getenv("PLAYER_TOOL_EXECUTION_MODE", "investigate")
 
-# Max model↔tool rounds per task during the investigation phase.
-PLAYER_MAX_TOOL_ITERATIONS = int(os.getenv("PLAYER_MAX_TOOL_ITERATIONS", "8"))
+def player_tool_execution_mode() -> str:
+    """``PLAYER_TOOL_EXECUTION_MODE``, one of :data:`PLAYER_TOOL_MODES`."""
+    return os.getenv("PLAYER_TOOL_EXECUTION_MODE", "investigate")
+
+
+def player_max_tool_iterations() -> int:
+    """Max model↔tool rounds per task during the investigation phase."""
+    return int(os.getenv("PLAYER_MAX_TOOL_ITERATIONS", "8"))
 
 
 # =============================================================================
@@ -294,9 +347,12 @@ def get_model_name(override: Optional[str] = None) -> str:
     """
     if override:
         return override
-    if DEFAULT_MODEL:
-        return DEFAULT_MODEL
-    return PROVIDER_CONFIGS.get(LLM_PROVIDER, {}).get("default_model", "gpt-4o-mini")
+    configured = default_model()
+    if configured:
+        return configured
+    return PROVIDER_CONFIGS.get(default_provider(), {}).get(
+        "default_model", "gpt-4o-mini"
+    )
 
 
 def create_llm(
@@ -316,7 +372,7 @@ def create_llm(
     :raises ValueError: If the provider is unsupported or required
         configuration is missing.
     """
-    provider = provider or LLM_PROVIDER
+    provider = provider or default_provider()
     model = get_model_name(model_name)
     
     if provider == "google":
@@ -394,7 +450,8 @@ def create_llm(
 
 def get_config_summary() -> str:
     """Return a summary of current configuration."""
-    provider_config = PROVIDER_CONFIGS.get(LLM_PROVIDER, {})
+    llm_provider = default_provider()
+    provider_config = PROVIDER_CONFIGS.get(llm_provider, {})
     model = get_model_name()
     
     # Check API key status
@@ -404,10 +461,10 @@ def get_config_summary() -> str:
     return f"""
         Agent Configuration:
         ----------------------
-        LLM Provider: {LLM_PROVIDER} ({provider_config.get('description', 'Unknown')})
+        LLM Provider: {llm_provider} ({provider_config.get('description', 'Unknown')})
         LLM Model: {model}
-        Planning Temperature: {PLANNING_TEMPERATURE}
-        Player Temperature: {PLAYER_TEMPERATURE}
+        Planning Temperature: {llm_settings("PLANNING").temperature}
+        Player Temperature: {llm_settings("PLAYER").temperature}
         Default Topology: {DEFAULT_TOPOLOGY}
         Default Metadata Standard: {DEFAULT_METADATA_STANDARD}
         API Key ({api_key_env}): {'Set' if api_key_set else 'Not Set'}

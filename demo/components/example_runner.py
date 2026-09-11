@@ -18,6 +18,7 @@ from typing import Any, Callable
 import streamlit as st
 
 from demo.components.arg_form import (
+    Defaults,
     WidgetOverride,
     command_line,
     render_form,
@@ -39,6 +40,7 @@ def run_example(
     title: str,
     intro: str | None = None,
     overrides: dict[str, WidgetOverride] | None = None,
+    defaults: Defaults | None = None,
     columns: int = 2,
     render: Callable[[Any], None] | None = None,
 ) -> None:
@@ -52,6 +54,8 @@ def run_example(
         intro: Optional paragraph under the heading. Defaults to the parser's
             own description.
         overrides: Per-argument widget replacements, keyed by ``dest``.
+        defaults: Starting values for arguments the app already has an answer
+            for, replacing the parser's own defaults.
         columns: How many columns to lay the argument widgets out in.
         render: Optional renderer for whatever ``run()`` returned. Given one,
             the page shows it and keeps the printed output as a fallback;
@@ -62,9 +66,13 @@ def run_example(
     st.title(title)
     st.caption(intro or parser.description or "")
 
-    args = _render_arguments(parser, key=key, overrides=overrides, columns=columns)
+    args = _render_arguments(
+        parser, key=key, overrides=overrides, defaults=defaults, columns=columns
+    )
 
     st.code(command_line(parser, args, script=script), language="bash")
+    if defaults is not None and defaults.note:
+        st.caption(defaults.note)
 
     if render is None:
         # With no native renderer the printed output is the whole result, so the
@@ -89,11 +97,17 @@ def run_example(
     _render_output(st.session_state.get(f"{key}.output"), key=key, render=render)
 
 
+#: Most groups to put side by side before wrapping to another row. Past this the
+#: columns are too narrow for a label and its help icon to share a line.
+_GROUPS_PER_ROW = 3
+
+
 def _render_arguments(
     parser: argparse.ArgumentParser,
     *,
     key: str,
     overrides: dict[str, WidgetOverride] | None,
+    defaults: Defaults | None,
     columns: int,
 ) -> argparse.Namespace:
     """Render the form, one bordered section per argument group.
@@ -110,22 +124,39 @@ def _render_arguments(
     values: dict[str, Any] = {}
 
     # Groups side by side, each one's arguments stacked under its title: the form
-    # stays one screen tall instead of scrolling. A parser with no groups of its own
-    # falls back to spreading its arguments across `columns`.
+    # stays short instead of scrolling. Rows of at most `_GROUPS_PER_ROW`, because a
+    # parser with many groups would otherwise squeeze them all into one row. A parser
+    # with no groups of its own falls back to spreading its arguments across `columns`.
     if len(populated) > 1:
-        for (group, actions), column in zip(
-            populated, st.columns(len(populated), gap="medium")
-        ):
-            with column, st.container(border=True):
-                _render_group_heading(group)
-                values.update(vars(_render_actions(actions, key, overrides, 1)))
+        for row in _rows(populated, _GROUPS_PER_ROW):
+            for (group, actions), column in zip(row, st.columns(len(row), gap="medium")):
+                with column, st.container(border=True):
+                    _render_group_heading(group)
+                    values.update(
+                        vars(_render_actions(actions, key, overrides, defaults, 1))
+                    )
         return argparse.Namespace(**values)
 
     for group, actions in populated:
         with st.container(border=True):
             _render_group_heading(group)
-            values.update(vars(_render_actions(actions, key, overrides, columns)))
+            values.update(
+                vars(_render_actions(actions, key, overrides, defaults, columns))
+            )
     return argparse.Namespace(**values)
+
+
+def _rows(items: list[Any], per_row: int) -> list[list[Any]]:
+    """Split ``items`` into rows of at most ``per_row``, keeping their order.
+
+    The last row is balanced against the one before it, so four groups lay out as
+    2 + 2 rather than 3 + 1 and no section ends up alone at full width.
+    """
+    if len(items) <= per_row:
+        return [items]
+    rows = -(-len(items) // per_row)
+    width = -(-len(items) // rows)
+    return [items[start:start + width] for start in range(0, len(items), width)]
 
 
 def _render_group_heading(group: Any) -> None:
@@ -158,12 +189,14 @@ def _render_actions(
     actions: list[argparse.Action],
     key: str,
     overrides: dict[str, WidgetOverride] | None,
+    defaults: Defaults | None,
     columns: int,
 ) -> argparse.Namespace:
     """Lay one group's arguments out across ``columns`` and collect their values."""
     if columns <= 1 or len(actions) == 1:
         return render_form(
-            _parser_over(actions), key_prefix=key, overrides=overrides
+            _parser_over(actions), key_prefix=key, overrides=overrides,
+            defaults=defaults,
         )
 
     groups: list[list[argparse.Action]] = [[] for _ in range(columns)]
@@ -176,7 +209,8 @@ def _render_actions(
             continue
         with column:
             namespace = render_form(
-                _parser_over(subset), key_prefix=key, overrides=overrides
+                _parser_over(subset), key_prefix=key, overrides=overrides,
+                defaults=defaults,
             )
             values.update(vars(namespace))
     return argparse.Namespace(**values)

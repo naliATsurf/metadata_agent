@@ -170,6 +170,27 @@ workflow wrappers
 UI components
 ```
 
+### `demo/settings.py`
+
+The pipeline's configurable parameters, as one value: a provider, model, and
+temperature for each stage that calls a model, the execution topology, the players'
+tool budget, the catalog resolver's prose tier, and the field router's candidate
+budget and reader.
+
+The landing page renders them in the **Pipeline settings** panel; the module pages
+read the same value and start their forms from it, so the answer is given once and
+changing a control on a module page is visibly an override for that run.
+
+Nothing is applied process-wide. A generation run is spawned with the settings as
+environment variables (`LLM_MODEL_PLANNING`, `LLM_TEMPERATURE_CATALOG_RESOLVER`, and
+so on — the same names `.env` uses), and an example run is given them as command-line
+arguments, which is why the command printed beside each form reproduces the run
+exactly.
+
+`.env` still decides where the panel starts. Setting `LLM_PROVIDER`,
+`LLM_MODEL`, or any `LLM_<FIELD>_<STAGE>` variable changes the defaults every session
+opens with; the panel's **Reset** button returns to them.
+
 ### `demo/workflows`
 Main workflows used for the apps. 
 ```text

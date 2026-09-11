@@ -7,6 +7,8 @@ that exercises that path and renders what it produced.
 
 from __future__ import annotations
 
+from demo import settings as pipeline_settings
+from demo.components.arg_form import Defaults
 from demo.components.bundle_controls import (
     CODEBOOKS,
     DOCUMENTS,
@@ -25,6 +27,7 @@ KEY = "field_router"
 def main() -> None:
     """Render the field router page."""
     render_tree(KEY)
+    settings = pipeline_settings.current()
     run_example(
         field_router_plan,
         key=KEY,
@@ -41,6 +44,11 @@ def main() -> None:
             "dictionary": source_picker(CODEBOOKS),
             "doc": source_picker(DOCUMENTS),
         },
+        defaults=Defaults(
+            settings.router_arguments(),
+            token=settings.token(),
+            note=pipeline_settings.FORM_NOTE,
+        ),
         render=lambda result: render_router_view(result, key=KEY),
     )
 
