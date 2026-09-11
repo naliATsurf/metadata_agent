@@ -15,6 +15,27 @@ that can answer it. A field falls into one of three buckets:
 Each bucket names **where the answer comes from**, so a routing can be read
 without recalling a definition. A field nothing answers is ``unanswered``.
 
+**Ranking alone over-answers, so two adjudicators sit above it.** BM25's only
+reject rule is a non-empty score, which on a labeled bundle answered 88% of a
+schema whose true answerable rate was 24% — schema and data are written by
+different people, so lexical overlap is coincidence in both directions. Above the
+ranking, therefore:
+
+- :mod:`src.router.veto` (4a, deterministic) drops candidates that *cannot* answer
+  the field on declared type or units — a name field against an integer column, a
+  whole-number field against fractional values. Permanent, so deliberately narrow.
+- :mod:`src.router.rerank` (4b, optional, a model) adjudicates what survives and
+  may reject all of it. Its most valuable answer is *none*.
+
+With a reader, ``candidates[0]`` is the reader's pick rather than BM25's, so the
+bucket and (downstream) the task's resources follow a judgement instead of corpus
+iteration order. The ordering is the whole seam; no consumer changes.
+
+Routing runs as **two passes, not field by field**: the structured tier for every
+field, adjudicated in one batch, then the document tier for whatever tier 1 could
+not answer, adjudicated in a second. A reader is a network call, and a schema is
+dozens of fields, so the batch boundary is what keeps a routing pass affordable.
+
 The output is a :class:`FieldPlan` — the persisted routing artifact and the
 source of truth the M4 compiler turns into executable `Task`s. Coverage falls
 straight out of it: a field the router cannot route is flagged **before**

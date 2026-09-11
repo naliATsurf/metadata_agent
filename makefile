@@ -56,7 +56,7 @@ docs-install:
 	$(UV) pip install -e .
 	$(UV) sync --no-default-groups --group docs  # install dependencies for docs group
 
-docs:
+docs:docs-install
 	$(UV) run sphinx-build -b html docs docs/_build/html
 	open docs/_build/html/index.html
 

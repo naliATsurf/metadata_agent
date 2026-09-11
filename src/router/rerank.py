@@ -14,7 +14,7 @@ layer 3 resolved about it: meaning, units, dtype, value range, the citation it c
 from — and answers with **one candidate or none**. Its most valuable answer is
 *none*: over-answering, not mis-ranking, is where the accuracy goes.
 
-Two boundaries worth keeping in mind.
+Three boundaries worth keeping in mind.
 
 **It re-ranks; it cannot retrieve.** A field whose true answer never entered the
 candidate set is unreachable here no matter how good the reader is. Recall stays a
@@ -25,6 +25,14 @@ candidate that was not offered is discarded, a quote that cannot be located in t
 candidate's own material caps confidence at ``low``, and a failed or garbled call
 abstains rather than crashes. The reader can only pick from what it was shown, and
 can only be believed as far as it can cite.
+
+**One field is the unit of judgement, not the unit of round-trip.** Fields offered
+an identical candidate list can share a call, and the calls can be issued
+concurrently (see :class:`LLMFieldReader`), because a schema is dozens of fields and
+a reader is a network hop. Judged together, though, fields stop being independent —
+a model shown one passage and nine fields tends to *distribute* answers among them —
+so grouping is defeasible and worth measuring against a labeled sheet rather than
+assumed free.
 """
 
 from __future__ import annotations

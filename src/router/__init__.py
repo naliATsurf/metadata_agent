@@ -5,6 +5,21 @@ fields (:mod:`~src.router.schema`), route each to the source that can answer it,
 then extract from those candidates only. This package holds the modality-agnostic
 router machinery; the sources it routes over are :class:`~src.context.Searchable`
 contexts.
+
+The layers, in the order a field passes through them:
+
+=========================  ====================================================
+:mod:`~src.router.schema`  flatten the target schema to leaf fields
+:mod:`~src.router.catalog` resolve each column's meaning from the bundle (3)
+:mod:`~src.router.route`   rank sources per field, lexically (4)
+:mod:`~src.router.veto`    drop candidates that cannot answer, on type/units (4a)
+:mod:`~src.router.rerank`  adjudicate what survives, or reject it all (4b)
+:mod:`~src.router.compile` lay the routing out as executable tasks (5)
+=========================  ====================================================
+
+Layers 4a and 4b exist because ranking alone over-answers: BM25's only reject rule
+is a non-empty score. 4a is deterministic and permanent, so it is narrow; 4b is a
+model and may be wrong, so its every answer is refereed by code.
 """
 
 from src.router.catalog import (
@@ -35,6 +50,7 @@ from src.router.rerank import (
     candidate_ref,
 )
 from src.router.route import FieldPlan, FieldRouting, route_fields
+from src.router.veto import apply_veto, veto_reason
 from src.router.schema import FieldSpec, walk_schema
 
 __all__ = [
@@ -56,6 +72,7 @@ __all__ = [
     "ReadResult",
     "ResolvedColumn",
     "Verdict",
+    "apply_veto",
     "candidate_ref",
     "catalog_conflicts",
     "catalog_overview",
@@ -66,5 +83,6 @@ __all__ = [
     "resolve_bundle",
     "resolve_catalog",
     "route_fields",
+    "veto_reason",
     "walk_schema",
 ]

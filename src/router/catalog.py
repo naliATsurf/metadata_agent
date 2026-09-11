@@ -10,13 +10,26 @@ the missing context into the catalog *before* routing.
 :func:`resolve_catalog` turns each opaque column into a *described* column by
 harvesting explanations from the other resources. It does **not** stop at the
 first hit: it gathers *every* candidate resolution for a column — from every
-dictionary, every prose definition, and the value prior — then chooses among them
-by assurance tier, with the value profile as referee for conflicts:
+dictionary, every prose definition, every prose *read*, and the value prior — then
+chooses among them by assurance tier, with the value profile as referee for
+conflicts:
 
-1. **structured dictionary** — a data-dictionary table keyed by column name;
-2. **lexical prose** — a definition like ``la = latitude`` in a document;
-3. **self-evident value type** — the *only* thing values can identify on their
-   own: a coordinate range, a parseable date. Not a general identifier.
+1. **structured dictionary** (``structured_dictionary``) — a data-dictionary table
+   keyed by column name;
+2. **prose**, in two forms at the *same* tier, because both are a document's claim
+   about a column and differ only in how it was extracted:
+
+   - ``lexical_prose`` — a cued definition like ``la = latitude``, found by regex;
+   - ``prose_read`` — a meaning read out of narrative by an optional pluggable
+     :class:`ProseReader` (deterministic, or LLM-backed via
+     :class:`LLMProseReader`). Opt-in: pass ``prose_reader=``, or the tier simply
+     does not run. It sees only columns the deterministic tiers left unresolved
+     (residual gating), so it fills gaps rather than re-reading a codebook line
+     the regex already caught;
+
+3. **self-evident value type** (``value_prior``) — the *only* thing values can
+   identify on their own: a coordinate range, a parseable date. Not a general
+   identifier.
 
 Sources that **agree** raise confidence and are recorded in ``corroborated_by``
 (the citations that confirm the resolution — the positive counterpart of a
@@ -35,6 +48,15 @@ is **refutation**: a codebook that says ``tmp`` is Kelvin while the values are
 4–22 is flagged — the profile need not know what ``tmp`` is to know it is not
 Kelvin. That is the two-hop grounding (the *value* is computed; the
 *interpretation* is a cited claim the values then discipline).
+
+The profile is also **published**, not merely consumed here. ``value_range`` and
+``value_integral`` survive onto the resolved column because the layer above needs
+them to judge a *candidate*: the routing veto (:mod:`src.router.veto`) rejects a
+field wanting whole days from a column running 0.89-1.22, and the field reader
+(:mod:`src.router.rerank`) puts the numbers in front of a model because "Fulton's
+condition factor" and "temperature" are indistinguishable by name and obvious by
+value. The profile still cannot *name* a column — that is the abstention above —
+but what shape its values are is a fact worth carrying forward.
 
 Scale note: this is **doc-scale, not row-scale**. Value profiles are computed from
 a *sample* of the data (never a full scan), and only the small description sources
@@ -108,14 +130,21 @@ def _read_key(name: Any) -> str:
 
 @dataclass(frozen=True)
 class ResolvedColumn:
-    """One column after symbol linking: what it means, and on what evidence."""
+    """One column after symbol linking: what it means, on what evidence, and what
+    shape its values are.
+
+    The last of those resolves nothing — ``value_range`` and ``value_integral`` are
+    published for the layers above, which judge whether a column answers a *field*
+    rather than describe what the column is.
+    """
 
     resource: str
     name: str
     dtype: str
     description: Optional[str] = None       # resolved human meaning
     units: Optional[str] = None
-    link_method: str = "none"              # structured_dictionary | lexical_prose | value_prior | none
+    # structured_dictionary | lexical_prose | prose_read | value_prior | none
+    link_method: str = "none"
     link_confidence: str = "none"          # high | medium | low | none
     link_evidence: Optional[str] = None    # citation for the interpretation
     link_quote: Optional[str] = None       # the cited text itself, when there is one
@@ -794,7 +823,12 @@ def _looks_like_coordinate_name(name: Any) -> bool:
 
 
 def _value_profile(series: pd.Series) -> Dict[str, Any]:
-    """A light, recomputable profile of a column's values."""
+    """A light, recomputable profile of a column's values.
+
+    ``min`` / ``max`` / ``integral`` are not scratch: they survive onto the resolved
+    column (:func:`_value_range`, :func:`_value_integral`), so what is measured here
+    bounds what the routing veto and the field reader are able to judge on.
+    """
     profile: Dict[str, Any] = {
         "numeric": False, "min": None, "max": None, "integral": None, "label": None,
     }
