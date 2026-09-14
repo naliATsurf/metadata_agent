@@ -34,22 +34,11 @@ CODEBOOKS, DOCUMENTS = 0, 1
 _LABELS = {CODEBOOKS: "Codebooks", DOCUMENTS: "Documents"}
 
 
-REPO = Path(__file__).resolve().parents[2]
-DEFAULT_BUNDLE = REPO / 'data/sample/sharetrait_preprocessed/TRADAT031'
-
-# Where to look for bundles to offer in the picker.
-BUNDLE_ROOTS = (
-    REPO / "data/sample/sharetrait_preprocessed",
-    REPO / "data/sample",
-    REPO / "data/tests",
-)
-
-CUSTOM_PATH = "Custom path…"
-
-
-@st.cache_data(show_spinner=False)
 def discover_bundles() -> list[str]:
     """Directories under ``data/`` that hold at least one CSV.
+
+    Not cached: it is a directory listing, and a cached one would hide a bundle
+    created while the app is running.
 
     Returns:
         Repository-relative paths, sorted, for the bundle picker.
@@ -109,13 +98,29 @@ def render_tree(key: str) -> None:
     render_bundle_tree(bundle, found.tables, found.codebooks, found.documents)
 
 
-@st.cache_data(show_spinner=False)
 def bundle_sources(bundle: str) -> tuple[list[str], list[str]]:
     """The codebooks and documents auto-discovery finds in ``bundle``.
 
-    Cached because the page re-runs on every widget change and classification reads
-    each CSV's header.
+    Classification reads each CSV's header, so it is cached — but on what the
+    directory holds, not just its path. Keyed on the path alone, a file added to or
+    edited in the bundle while the app runs would never be offered.
     """
+    return _classified_sources(bundle, _listing(bundle))
+
+
+def _listing(bundle: str) -> tuple[tuple[str, int], ...]:
+    """Each file in ``bundle`` with its modification time: what the cache keys on."""
+    root = Path(bundle)
+    if not root.is_dir():
+        return ()
+    return tuple(sorted((p.name, p.stat().st_mtime_ns) for p in root.iterdir() if p.is_file()))
+
+
+@st.cache_data(show_spinner=False)
+def _classified_sources(
+    bundle: str, listing: tuple[tuple[str, int], ...]
+) -> tuple[list[str], list[str]]:
+    """Classify ``bundle``; ``listing`` only keys the cache."""
     try:
         found = discover_bundle(Path(bundle))
     except ValueError:
@@ -139,19 +144,19 @@ def source_picker(kind: int):
     selected by default, which is the production behaviour.
     """
     def picker(action: argparse.Action, key: str) -> list[str] | None:
-        options = bundle_sources(selected_bundle(key.rsplit(".", 1)[0]))[kind]
+        bundle = selected_bundle(key.rsplit(".", 1)[0])
+        options = bundle_sources(bundle)[kind]
         if not options:
-            st.caption(f"No {action.dest}s found in this bundle.")
+            st.caption(f"No {_LABELS[kind].lower()} found in this bundle.")
             return [NONE]
         chosen = st.multiselect(
-            _LABELS[kind], options, default=options, help=action.help, key=key
+            _LABELS[kind], options, default=options, help=action.help,
+            # A selection belongs to its bundle. Under one key for every bundle, the
+            # widget kept a selection whose files the next bundle does not have, and
+            # came back empty — silently resolving with none of them.
+            key=f"{key}@{bundle}",
         )
         # An empty pick means "use none", which the CLI spells as the NONE token —
         # so the command line shown beside the form reproduces this run exactly.
         return chosen or [NONE]
     return picker
-
-
-_LABELS = {0: "Codebooks", 1: "Documents"}
-
-
