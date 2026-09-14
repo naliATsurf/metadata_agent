@@ -2,7 +2,7 @@
 
 Two subcommands because they are used at different rates: ``sheet`` runs once per
 bundle, ``score`` runs every time the router changes. Both share the bundle, standard
-and reader flags, so a scored run names exactly the configuration that produced it.
+and judge flags, so a scored run names exactly the configuration that produced it.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from eval.sheet import write_sheet, write_sources
 from examples.field_router_plan import (
     DEFAULT_STANDARD,
     LLM_MODULE,
-    build_field_reader,
+    build_candidate_judge,
     build_plan,
 )
 from examples.resolve_catalog import DEFAULT_BUNDLE, resolve
@@ -54,18 +54,18 @@ def build_parser() -> argparse.ArgumentParser:
     router = ap.add_argument_group("Router", "The configuration being graded.")
     router.add_argument("--no-veto", action="store_true",
                         help="disable the deterministic type/unit filter (layer 4a)")
-    router.add_argument("--field-reader", action="store_true",
-                        help="adjudicate each candidate set with the LLM field reader")
+    router.add_argument("--llm-candidate-judge", action="store_true",
+                        help="adjudicate each candidate set with the LLM candidate judge")
 
     configured = llm_settings(LLM_MODULE)
-    model = ap.add_argument_group("Model", "Backing --field-reader.")
+    model = ap.add_argument_group("LLM candidate judge model", "Backing --llm-candidate-judge.")
     model.add_argument("--provider", choices=list(PROVIDER_CONFIGS),
                        default=configured.provider)
     model.add_argument("--model", default=configured.model)
     model.add_argument("--temperature", type=float, default=configured.temperature)
-    model.add_argument("--reader-workers", type=int, default=1, metavar="N",
-                       help="issue the reader's calls N at a time")
-    model.add_argument("--no-reader-batch", action="store_true",
+    model.add_argument("--judge-workers", type=int, default=1, metavar="N",
+                       help="issue the judge's calls N at a time")
+    model.add_argument("--no-judge-batch", action="store_true",
                        help="judge every field separately instead of grouping fields "
                             "offered identical candidates — the comparison worth "
                             "running against a labeled sheet")
@@ -74,7 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run(args: argparse.Namespace, console: Console) -> Path:
     bundle = discover_bundle(args.bundle)
-    reader, label = build_field_reader(args)
+    judge, label = build_candidate_judge(args)
     resolved = resolve(
         bundle,
         select(bundle.codebooks, args.dictionary),
@@ -84,7 +84,7 @@ def run(args: argparse.Namespace, console: Console) -> Path:
         resolved,
         args.standard,
         candidates=args.candidates,
-        field_reader=reader,
+        judge=judge,
         veto=not args.no_veto,
     )
 
@@ -93,7 +93,7 @@ def run(args: argparse.Namespace, console: Console) -> Path:
 
     if args.command == "score":
         console.print(
-            f"[dim]veto: {'off' if args.no_veto else 'on'}   field reader: {label}[/]"
+            f"[dim]veto: {'off' if args.no_veto else 'on'}   candidate judge: {label}[/]"
         )
         report(score(field_plan, load_labels(sheet)), console, args.candidates)
         return sheet

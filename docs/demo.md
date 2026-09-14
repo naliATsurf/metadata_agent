@@ -177,7 +177,13 @@ temperature for each stage that calls a model, the execution topology, the playe
 tool budget, the catalog resolver's prose tier, and the field router's candidate
 budget and reader.
 
-The landing page renders them in the **Pipeline settings** panel; the module pages
+The landing page renders them in the **Pipeline settings** panel, one tab per module —
+**Planning**, **Players**, **Catalog resolver**, **Field router** — each holding that
+module's own parameters and the model it calls, and saying where the settings apply.
+An **Overview** tab gathers every module's settings on one page; it and the module tabs
+are views of the same values, so a change made in either shows in both. A
+model a module is not currently using (the prose reader with the `off` tier, the
+candidate judge switched off) is shown greyed out. The module pages
 read the same value and start their forms from it, so the answer is given once and
 changing a control on a module page is visibly an override for that run.
 

@@ -71,9 +71,9 @@ class PipelineSettings:
             :data:`PROSE_TIERS`.
         catalog_debug: Log every prompt and raw response of the prose reader.
         router_candidates: How many ranked candidates the router keeps per field.
-        router_field_reader: Let a model adjudicate the candidates (layer 4b).
-        router_reader_workers: How many of the reader's calls to issue at once.
-        router_reader_batch: Ask once about fields offered identical candidates,
+        router_candidate_judge: Let a model adjudicate the candidates (layer 4b).
+        router_judge_workers: How many of the judge's calls to issue at once.
+        router_judge_batch: Ask once about fields offered identical candidates,
             rather than once per field.
     """
 
@@ -84,9 +84,9 @@ class PipelineSettings:
     catalog_prose_tier: str = "off"
     catalog_debug: bool = False
     router_candidates: int = 5
-    router_field_reader: bool = False
-    router_reader_workers: int = 1
-    router_reader_batch: bool = True
+    router_candidate_judge: bool = False
+    router_judge_workers: int = 1
+    router_judge_batch: bool = True
 
     # -- what a run is given ------------------------------------------------
 
@@ -123,18 +123,18 @@ class PipelineSettings:
         """Starting values for ``examples/field_router_plan.py``'s form, by ``dest``.
 
         The router routes a catalog the resolver page already resolved, so it takes
-        only its own settings: the candidate budget, and the field reader and its
+        only its own settings: the candidate budget, and the candidate judge and its
         model for layer 4b.
         """
-        reader = self.model_for("FIELD_READER")
+        judge = self.model_for("CANDIDATE_JUDGE")
         return {
             "candidates": self.router_candidates,
-            "field_reader": self.router_field_reader,
-            "reader_workers": self.router_reader_workers,
-            "no_reader_batch": not self.router_reader_batch,
-            "provider": reader.provider,
-            "model": reader.model,
-            "temperature": reader.temperature,
+            "llm_candidate_judge": self.router_candidate_judge,
+            "judge_workers": self.router_judge_workers,
+            "no_judge_batch": not self.router_judge_batch,
+            "provider": judge.provider,
+            "model": judge.model,
+            "temperature": judge.temperature,
         }
 
     # -- identity -----------------------------------------------------------
@@ -155,9 +155,9 @@ class PipelineSettings:
             "catalog_prose_tier": self.catalog_prose_tier,
             "catalog_debug": self.catalog_debug,
             "router_candidates": self.router_candidates,
-            "router_field_reader": self.router_field_reader,
-            "router_reader_workers": self.router_reader_workers,
-            "router_reader_batch": self.router_reader_batch,
+            "router_candidate_judge": self.router_candidate_judge,
+            "router_judge_workers": self.router_judge_workers,
+            "router_judge_batch": self.router_judge_batch,
         }
 
     def token(self) -> str:
@@ -172,15 +172,15 @@ class PipelineSettings:
 
     def summary(self) -> str:
         """One line naming what is configured, for a collapsed panel's header."""
-        readers = []
+        llm_stages = []
         if self.catalog_prose_tier != "off":
-            readers.append(f"catalog prose: {self.catalog_prose_tier}")
-        if self.router_field_reader:
-            readers.append("field reader: on")
+            llm_stages.append(f"catalog prose: {self.catalog_prose_tier}")
+        if self.router_candidate_judge:
+            llm_stages.append("candidate judge: on")
         parts = [
             f"planning {self.model_for('PLANNING').model}",
             f"topology {self.topology}",
-            *readers,
+            *llm_stages,
         ]
         return " · ".join(parts)
 
@@ -208,192 +208,266 @@ def current() -> PipelineSettings:
 def render() -> PipelineSettings:
     """Render the settings panel, publish the result, and return it.
 
+    One tab per module, named as the module is named elsewhere in the app, holding
+    everything that module takes — its own parameters and the model it calls — plus
+    an **Overview** tab gathering every module's settings on one page. The overview
+    and the module tabs are two views of the same values: a change made in either is
+    what the other shows (see :class:`_View`).
+
     Returns:
         The settings every stage should run with.
     """
     settings = current()
     with st.expander(f"⚙️ Pipeline settings — {settings.summary()}", expanded=False):
-        model_tab, execution_tab, catalog_tab, routing_tab = st.tabs(
-            ["Models", "Planning & execution", "Catalog resolution", "Field routing"]
-        )
-        with model_tab:
-            models = _render_models()
-        with execution_tab:
-            topology, tool_mode, tool_iterations = _render_execution()
-        with catalog_tab:
-            prose_tier, catalog_debug = _render_catalog()
-        with routing_tab:
-            candidates, field_reader, workers, batch = _render_routing()
+        overview_tab, *module_tabs = st.tabs(["Overview", *(title for title, _ in _MODULES)])
+        with overview_tab:
+            st.caption(
+                "Every module's settings on one page. The tabs beside this one show "
+                "the same settings a module at a time; a change in either place is a "
+                "change in both."
+            )
+            chosen = {}
+            for title, render_module in _MODULES:
+                with st.container(border=True):
+                    st.markdown(f"#### {title}")
+                    chosen[title] = render_module(_View("overview"))
+        for (title, render_module), tab in zip(_MODULES, module_tabs):
+            with tab:
+                render_module(_View("module"))
 
         if st.button("Reset to the configured defaults", key=f"{_WIDGET_PREFIX}.reset"):
             _clear_widgets()
             st.rerun()
 
+    planning_model = chosen["Planning"]
+    topology, tool_mode, tool_iterations, player_model = chosen["Players"]
+    prose_tier, catalog_debug, catalog_model = chosen["Catalog resolver"]
+    candidates, candidate_judge, workers, batch, judge_model = chosen["Field router"]
     settings = PipelineSettings(
-        models=models,
+        # A module added to LLM_MODULES without a place here still runs, on its
+        # configured model; it just is not adjustable until it is given one.
+        models={
+            **{module: llm_settings(module) for module in LLM_MODULES},
+            "PLANNING": planning_model,
+            "PLAYER": player_model,
+            "CATALOG_RESOLVER": catalog_model,
+            "CANDIDATE_JUDGE": judge_model,
+        },
         topology=topology,
         player_tool_mode=tool_mode,
         player_tool_iterations=tool_iterations,
         catalog_prose_tier=prose_tier,
         catalog_debug=catalog_debug,
         router_candidates=candidates,
-        router_field_reader=field_reader,
-        router_reader_workers=workers,
-        router_reader_batch=batch,
+        router_candidate_judge=candidate_judge,
+        router_judge_workers=workers,
+        router_judge_batch=batch,
     )
     st.session_state[_SESSION_KEY] = settings
     return settings
 
 
-def _render_models() -> dict[str, LLMSettings]:
-    """One row per module that calls a model: who, which model, how hot."""
+class _View:
+    """One place the panel draws its controls: the overview, or a module's own tab.
+
+    Streamlit ties a widget's value to its key, and no two widgets may share one, so a
+    setting shown in two places is two widgets. Each setting therefore keeps one
+    *stored* value, and every widget showing it is a view of that value: before a
+    widget is drawn its state is set from the stored value, and when it is changed it
+    writes back. The next rerun draws every view from the new value, so the overview
+    and the module tab never disagree.
+
+    Widgets are given no ``value=``/``index=`` of their own — their state comes from
+    the stored value alone, which is what keeps Streamlit from warning that a widget
+    has a default and a session-state value at once.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def bind(self, section: str, setting: str, default: Any) -> dict[str, Any]:
+        """Widget arguments that tie this view's widget to the stored value."""
+        stored = _key(section, setting)
+        widget = f"{stored}@{self.name}"
+        if stored not in st.session_state:
+            st.session_state[stored] = default
+        st.session_state[widget] = st.session_state[stored]
+        return {"key": widget, "on_change": _store, "args": (widget, stored)}
+
+
+def _store(widget: str, stored: str) -> None:
+    """Write a changed widget's value back to the setting it shows."""
+    st.session_state[stored] = st.session_state[widget]
+
+
+def _applies_to(where: str) -> None:
+    """Say which part of the app a module's settings reach."""
+    st.caption(f"Applies to: {where}")
+
+
+def _render_model(
+    view: _View, module: str, *, disabled: bool = False, off_note: str = ""
+) -> LLMSettings:
+    """The model one module calls: provider, model name, and temperature.
+
+    ``disabled`` greys the row out while the module is not calling a model; the
+    values are kept, so turning the module back on restores them.
+    """
+    spec = LLM_MODULES[module]
+    configured = llm_settings(module)
+    providers = list(PROVIDER_CONFIGS)
+    st.markdown(f"**{spec.label} model**")
     st.caption(
-        "Each stage picks its own model. A stage left alone follows "
-        "`LLM_PROVIDER` / `LLM_MODEL`; naming one here is the same override as "
-        "setting `LLM_MODEL_<STAGE>` in `.env`."
+        f"{spec.description} Same as `LLM_MODEL_{module}` (and its provider and "
+        "temperature) in `.env`; left alone, it follows `LLM_PROVIDER` / `LLM_MODEL`."
+        + (f" {off_note}" if disabled and off_note else "")
     )
-    models: dict[str, LLMSettings] = {}
-    for module, spec in LLM_MODULES.items():
-        configured = llm_settings(module)
-        st.markdown(f"**{spec.label}**")
-        st.caption(spec.description)
-        provider_column, model_column, temperature_column = st.columns(
-            [1, 2, 1], gap="medium"
+    provider_column, model_column, temperature_column = st.columns(
+        [1, 2, 1], gap="medium"
+    )
+    with provider_column:
+        provider = st.selectbox(
+            "Provider",
+            options=providers,
+            help=PROVIDER_CONFIGS.get(configured.provider, {}).get("description"),
+            disabled=disabled,
+            **view.bind(module, "provider", providers[_index_of(providers, configured.provider)]),
         )
-        with provider_column:
-            provider = st.selectbox(
-                "Provider",
-                options=list(PROVIDER_CONFIGS),
-                index=_index_of(list(PROVIDER_CONFIGS), configured.provider),
-                key=_key(module, "provider"),
-                help=PROVIDER_CONFIGS.get(configured.provider, {}).get("description"),
-            )
-        with model_column:
-            model = st.text_input(
-                "Model",
-                value=configured.model,
-                key=_key(module, "model"),
-                help=(
-                    "Model name as the provider spells it. Its default is "
-                    f"{PROVIDER_CONFIGS.get(provider, {}).get('default_model', '—')}."
-                ),
-            ).strip()
-        with temperature_column:
-            temperature = st.slider(
-                "Temperature",
-                min_value=0.0,
-                max_value=2.0,
-                value=float(configured.temperature),
-                step=0.05,
-                key=_key(module, "temperature"),
-                help=f"This stage wants {spec.temperature} by default.",
-            )
-        models[module] = LLMSettings(
-            provider=provider,
-            model=model or configured.model,
-            temperature=float(temperature),
+    with model_column:
+        model = st.text_input(
+            "Model",
+            help=(
+                "Model name as the provider spells it. Its default is "
+                f"{PROVIDER_CONFIGS.get(provider, {}).get('default_model', '—')}."
+            ),
+            disabled=disabled,
+            **view.bind(module, "model", configured.model),
+        ).strip()
+    with temperature_column:
+        temperature = st.slider(
+            "Temperature",
+            min_value=0.0,
+            max_value=2.0,
+            step=0.05,
+            help=f"This module wants {spec.temperature} by default.",
+            disabled=disabled,
+            **view.bind(module, "temperature", float(configured.temperature)),
         )
-    return models
+    return LLMSettings(
+        provider=provider,
+        model=model or configured.model,
+        temperature=float(temperature),
+    )
 
 
-def _render_execution() -> tuple[str, str, int]:
-    """How the generated plan is executed, and how freely players may use tools."""
+def _render_planning(view: _View) -> LLMSettings:
+    """The planner: the model that writes the execution plan."""
+    _applies_to("**Metadata generation** — the plan written before any step runs.")
+    return _render_model(view, "PLANNING")
+
+
+def _render_players(view: _View) -> tuple[str, str, int, LLMSettings]:
+    """The players: how the plan is executed, how freely they use tools, their model."""
+    _applies_to("**Metadata generation** — every step of the plan.")
+    topologies = list(EXECUTION_TOPOLOGIES)
+    modes = list(PLAYER_TOOL_MODES)
     topology_column, mode_column, iterations_column = st.columns(3, gap="medium")
     with topology_column:
-        topologies = list(EXECUTION_TOPOLOGIES)
         topology = st.selectbox(
             "Topology",
             options=topologies,
-            index=_index_of(topologies, DEFAULT_TOPOLOGY),
-            key=_key("execution", "topology"),
             help="How many players work each step, and how many debate rounds they run.",
+            **view.bind("execution", "topology", topologies[_index_of(topologies, DEFAULT_TOPOLOGY)]),
         )
         st.caption(EXECUTION_TOPOLOGIES[topology].get("description", ""))
     with mode_column:
         mode = st.selectbox(
             "Player tool use",
-            options=list(PLAYER_TOOL_MODES),
-            index=_index_of(list(PLAYER_TOOL_MODES), player_tool_execution_mode()),
-            key=_key("execution", "tool_mode"),
+            options=modes,
             help=(
                 "`investigate` lets a player call the tools whose arguments only the "
                 "model can supply; `survey` runs the deterministic survey alone."
             ),
+            **view.bind("execution", "tool_mode", modes[_index_of(modes, player_tool_execution_mode())]),
         )
     with iterations_column:
         iterations = st.number_input(
             "Max tool rounds",
             min_value=1,
             max_value=32,
-            value=player_max_tool_iterations(),
             step=1,
-            key=_key("execution", "tool_iterations"),
             help="Model↔tool rounds a player may take per task while investigating.",
+            **view.bind("execution", "tool_iterations", int(player_max_tool_iterations())),
         )
-    return topology, mode, int(iterations)
+    return topology, mode, int(iterations), _render_model(view, "PLAYER")
 
 
-def _render_catalog() -> tuple[str, bool]:
-    """Layer 3: how hard the resolver works to find what a column means."""
+def _render_catalog(view: _View) -> tuple[str, bool, LLMSettings]:
+    """Layer 3: how hard the resolver works to find what a column means, and its model."""
+    _applies_to(
+        "the **Catalog resolver** module's starting values — and so the catalog the "
+        "Field router routes."
+    )
     st.caption(
         "Columns are resolved from the bundle's codebooks first, then from its prose. "
         "The tier chosen here is the highest one that runs."
     )
+    tiers = list(PROSE_TIERS)
     tier_column, debug_column = st.columns([2, 1], gap="medium")
     with tier_column:
-        tiers = list(PROSE_TIERS)
         tier = st.radio(
             "Prose tier",
             options=tiers,
-            index=_index_of(tiers, "off"),
-            key=_key("catalog", "prose_tier"),
             horizontal=True,
             format_func=str.capitalize,
+            **view.bind("catalog", "prose_tier", "off"),
         )
         st.caption(PROSE_TIERS[tier])
     with debug_column:
         debug = st.checkbox(
             "Log prompts and responses",
-            value=False,
-            key=_key("catalog", "debug"),
             help=(
                 "Show every prompt and raw response the prose reader exchanges, and "
                 "surface errors it would otherwise swallow into a silent abstention."
             ),
             disabled=tier != "llm",
+            **view.bind("catalog", "debug", False),
         )
-    return tier, bool(debug)
+    model = _render_model(
+        view, "CATALOG_RESOLVER", disabled=tier != "llm",
+        off_note="Used only with the `llm` prose tier.",
+    )
+    return tier, bool(debug), model
 
 
-def _render_routing() -> tuple[int, bool, int, bool]:
-    """Layer 4: how many sources a field keeps, and who adjudicates them."""
+def _render_router(view: _View) -> tuple[int, bool, int, bool, LLMSettings]:
+    """Layer 4: how many sources a field keeps, who judges them, and the judge's model."""
+    _applies_to("the **Field router** module's starting values.")
     st.caption(
         "Ranking alone over-answers — BM25's only reject rule is a non-empty score — "
-        "so the reader exists to say that *none* of the candidates answers a field."
+        "so the judge exists to say that *none* of the candidates answers a field."
     )
-    candidates_column, reader_column = st.columns([1, 2], gap="medium")
+    candidates_column, judge_column = st.columns([1, 2], gap="medium")
     with candidates_column:
         candidates = st.number_input(
             "Candidates per field",
             min_value=1,
             max_value=20,
-            value=5,
             step=1,
-            key=_key("routing", "candidates"),
             help=(
                 "The recall budget, not a display setting: the router proposes this "
                 "many and the executor picks from them."
             ),
+            **view.bind("routing", "candidates", 5),
         )
-    with reader_column:
-        field_reader = st.checkbox(
-            "Adjudicate candidates with the field reader",
-            value=False,
-            key=_key("routing", "field_reader"),
+    with judge_column:
+        candidate_judge = st.checkbox(
+            "LLM candidate judge",
             help=(
                 "Let the model decide which candidate answers each field, or that "
                 "none does. Without it rank 1 wins on lexical score alone."
             ),
+            **view.bind("routing", "candidate_judge", False),
         )
         workers_column, batch_column = st.columns(2, gap="medium")
         with workers_column:
@@ -401,31 +475,42 @@ def _render_routing() -> tuple[int, bool, int, bool]:
                 "Concurrent calls",
                 min_value=1,
                 max_value=32,
-                value=1,
                 step=1,
-                key=_key("routing", "reader_workers"),
-                disabled=not field_reader,
+                disabled=not candidate_judge,
                 help=(
                     "A self-hosted endpoint batches concurrent requests internally, "
                     "so this is usually the largest win on a slow model."
                 ),
+                **view.bind("routing", "judge_workers", 1),
             )
         with batch_column:
             batch = st.checkbox(
                 "Group identical candidate sets",
-                value=True,
-                key=_key("routing", "reader_batch"),
-                disabled=not field_reader,
+                disabled=not candidate_judge,
                 help=(
                     "Ask once about fields offered the same candidates. Turning it "
                     "off judges every field independently, and costs a call each."
                 ),
+                **view.bind("routing", "judge_batch", True),
             )
-    return int(candidates), bool(field_reader), int(workers), bool(batch)
+    model = _render_model(
+        view, "CANDIDATE_JUDGE", disabled=not candidate_judge,
+        off_note="Used only with the LLM candidate judge on.",
+    )
+    return int(candidates), bool(candidate_judge), int(workers), bool(batch), model
+
+
+#: The modules the panel gives a tab, in tab order, with what renders each.
+_MODULES = (
+    ("Planning", _render_planning),
+    ("Players", _render_players),
+    ("Catalog resolver", _render_catalog),
+    ("Field router", _render_router),
+)
 
 
 def _key(section: str, name: str) -> str:
-    """The session-state key one control keeps its value under."""
+    """The session-state key one setting keeps its stored value under."""
     return f"{_WIDGET_PREFIX}.{section}.{name}".lower()
 
 
@@ -435,6 +520,6 @@ def _index_of(options: list[str], value: str) -> int:
 
 
 def _clear_widgets() -> None:
-    """Forget every control's value, so each falls back to its configured default."""
+    """Forget every setting and widget value, so each falls back to its configured default."""
     for key in [k for k in st.session_state if k.startswith(f"{_WIDGET_PREFIX}.")]:
         del st.session_state[key]

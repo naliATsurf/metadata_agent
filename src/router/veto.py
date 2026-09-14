@@ -13,12 +13,12 @@ wanting a genus name is not answered by a column of integers; a field wanting wh
 days is not answered by values running 0.89 to 1.22. Neither judgement needs a model,
 and neither depends on what anything is *called*.
 
-This runs **before** the field reader (:mod:`src.router.rerank`), so the reader
+This runs **before** the candidate judge (:mod:`src.router.judge`), so the judge
 spends its calls on candidates that are at least dimensionally possible.
 
 **A veto is permanent, so it must be conservative.** A vetoed candidate never reaches
-the reader and can never be recovered, which makes a false veto a silent recall loss —
-strictly worse than a false accept, which the reader still gets a chance to reject.
+the judge and can never be recovered, which makes a false veto a silent recall loss —
+strictly worse than a false accept, which the judge still gets a chance to reject.
 Every rule here therefore fires only on evidence both sides actually declared:
 unknown types, missing units, tools, and document spans are all left alone.
 

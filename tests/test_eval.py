@@ -49,7 +49,7 @@ class ScoringTest(unittest.TestCase):
     def test_an_abstained_field_is_credited_with_no_pick(self):
         plan = _plan(f=self._routing(
             "f", [_ref("t", "a")], status="unanswered",
-            reader_note="nothing answers this",
+            judge_note="nothing answers this",
         ))
         [scored] = score(plan, {"f": ["t::a"]})
         self.assertFalse(scored.routed)
@@ -62,15 +62,15 @@ class ScoringTest(unittest.TestCase):
         [scored] = score(plan, {"f": ["t::a"]})
         self.assertIn("t::a", scored.ranked)
 
-    def test_abstention_is_attributed_to_the_veto_or_the_reader(self):
+    def test_abstention_is_attributed_to_the_veto_or_the_judge(self):
         plan = _plan(
             byveto=self._routing("byveto", [], status="unanswered",
                                  vetoed=["t::a — wrong type"]),
-            byreader=self._routing("byreader", [_ref("t", "a")], status="unanswered",
-                                   reader_note="none of these"),
+            byjudge=self._routing("byjudge", [_ref("t", "a")], status="unanswered",
+                                   judge_note="none of these"),
         )
-        got = {s.field: s.abstained_by for s in score(plan, {"byveto": [], "byreader": []})}
-        self.assertEqual(got, {"byveto": "veto", "byreader": "reader"})
+        got = {s.field: s.abstained_by for s in score(plan, {"byveto": [], "byjudge": []})}
+        self.assertEqual(got, {"byveto": "veto", "byjudge": "judge"})
 
     def test_answering_an_unanswerable_field_counts_as_wrong(self):
         plan = _plan(f=self._routing("f", [_ref("t", "a")]))

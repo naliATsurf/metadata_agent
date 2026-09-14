@@ -13,7 +13,7 @@ The layers, in the order a field passes through them:
 :mod:`~src.router.catalog` resolve each column's meaning from the bundle (3)
 :mod:`~src.router.route`   rank sources per field, lexically (4)
 :mod:`~src.router.veto`    drop candidates that cannot answer, on type/units (4a)
-:mod:`~src.router.rerank`  adjudicate what survives, or reject it all (4b)
+:mod:`~src.router.judge`  adjudicate what survives, or reject it all (4b)
 :mod:`~src.router.compile` lay the routing out as executable tasks (5)
 =========================  ====================================================
 
@@ -42,9 +42,9 @@ from src.router.display import (
     catalog_summary,
     render_catalog,
 )
-from src.router.rerank import (
-    FieldReader,
-    LLMFieldReader,
+from src.router.judge import (
+    CandidateJudge,
+    LLMCandidateJudge,
     Verdict,
     candidate_ref,
 )
@@ -63,9 +63,9 @@ __all__ = [
     "Catalog",
     "FieldPlan",
     "FieldRouting",
-    "FieldReader",
+    "CandidateJudge",
     "FieldSpec",
-    "LLMFieldReader",
+    "LLMCandidateJudge",
     "LLMProseReader",
     "ProseReader",
     "ReadResult",

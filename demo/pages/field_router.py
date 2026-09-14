@@ -60,8 +60,8 @@ def main() -> None:
         inputs={"resolved": resolved},
         preceding_command=f"{resolver_command} --out {catalog_resolver.RESOLUTION_FILE}",
         render=lambda result: _render(result, resolved),
-        layout=[["Input", "Metadata standard", "Routing"], ["Field reader model"]],
-        enabled_by={"Field reader model": "field_reader"},
+        layout=[["Input", "Metadata standard", "Routing"], ["LLM candidate judge model"]],
+        enabled_by={"LLM candidate judge model": "llm_candidate_judge"},
     )
 
 

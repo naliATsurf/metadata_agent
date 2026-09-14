@@ -17,7 +17,7 @@ Configuration Options
 ``LLM_<FIELD>_<MODULE>``
     Per-module overrides, for every module named in :data:`LLM_MODULES` and every
     field of :class:`LLMSettings` — ``LLM_MODEL_PLANNING``,
-    ``LLM_TEMPERATURE_CATALOG_RESOLVER``, ``LLM_PROVIDER_FIELD_READER``, and so on.
+    ``LLM_TEMPERATURE_CATALOG_RESOLVER``, ``LLM_PROVIDER_CANDIDATE_JUDGE``, and so on.
     A module with none set follows the global settings above.
 ``PLAYER_TOOL_EXECUTION_MODE``
     ``"investigate"`` (default) or ``"survey"``; see :data:`PLAYER_TOOL_MODES`.
@@ -153,16 +153,16 @@ LLM_MODULES = {
         "Writes the execution plan. Deterministic, and wants the strongest reasoner.",
     ),
     "PLAYER": LLMModule(
-        "Players", 0.3,
+        "Player", 0.3,
         "Extract and synthesize metadata for each plan step. A little latitude helps.",
     ),
     "CATALOG_RESOLVER": LLMModule(
-        "Catalog prose reader", 0.0,
+        "LLM prose reader", 0.0,
         "Reads a column's meaning out of free narrative. Copies stated definitions, "
         "so it can be a cheaper model.",
     ),
-    "FIELD_READER": LLMModule(
-        "Field reader", 0.0,
+    "CANDIDATE_JUDGE": LLMModule(
+        "LLM candidate judge", 0.0,
         "Decides which routed candidate answers a schema field, or that none does. "
         "A judgement, not a draft.",
     ),

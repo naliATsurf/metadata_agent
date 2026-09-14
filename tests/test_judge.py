@@ -1,6 +1,6 @@
-"""Tests for the field reader — the layer-4b adjudicator (see src/router/rerank.py).
+"""Tests for the candidate judge — the layer-4b adjudicator (see src/router/judge.py).
 
-The reader's job is mostly to *reject*, so most of what matters here is what happens
+The judge's job is mostly to *reject*, so most of what matters here is what happens
 when it says no, and what happens when it says something the code should not believe.
 Every test drives a stub ``invoke``; no model is contacted.
 """
@@ -19,8 +19,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from src.context import create_context
 from src.router import resolve_catalog, route_fields
-from src.router.rerank import (
-    LLMFieldReader,
+from src.router.judge import (
+    LLMCandidateJudge,
     Verdict,
     candidate_ref,
     describe,
@@ -41,8 +41,8 @@ def _reply(**payload) -> str:
     return json.dumps(payload)
 
 
-class StubReader(LLMFieldReader):
-    """A reader whose every answer is scripted, recording the prompts it saw."""
+class StubJudge(LLMCandidateJudge):
+    """A judge whose every answer is scripted, recording the prompts it saw."""
 
     def __init__(self, replies):
         self.prompts: List[str] = []
@@ -68,7 +68,7 @@ class RefTest(unittest.TestCase):
                            snippet="", score=1.0)
         self.assertEqual(candidate_ref(column), "growth::pH")
         self.assertEqual(candidate_ref(tool), "tool::get_item_count")
-        # A span collapses to its document: a reader cites a passage, not offsets.
+        # A span collapses to its document: a judge cites a passage, not offsets.
         self.assertEqual(candidate_ref(span), "doc::readme")
 
 
@@ -79,7 +79,7 @@ class RefereeTest(unittest.TestCase):
     cards = [{"ref": "t::a", "kind": "column", "meaning": "mass of the fish"}]
 
     def _verdict(self, reply) -> Verdict:
-        return StubReader(reply).choose(field=self.field, cards=self.cards)
+        return StubJudge(reply).choose(field=self.field, cards=self.cards)
 
     def test_a_ref_that_was_not_offered_is_discarded(self):
         v = self._verdict(_reply(choice="t::invented", confidence="high", quote="mass"))
@@ -114,19 +114,19 @@ class RefereeTest(unittest.TestCase):
         def boom(_prompt):
             raise RuntimeError("connection reset")
 
-        reader = LLMFieldReader(boom)
-        self.assertTrue(reader.choose(field=self.field, cards=self.cards).abstained)
+        judge = LLMCandidateJudge(boom)
+        self.assertTrue(judge.choose(field=self.field, cards=self.cards).abstained)
 
     def test_no_candidates_means_no_call(self):
-        reader = StubReader(_reply(choice="t::a"))
-        self.assertTrue(reader.choose(field=self.field, cards=[]).abstained)
-        self.assertEqual(reader.prompts, [])
+        judge = StubJudge(_reply(choice="t::a"))
+        self.assertTrue(judge.choose(field=self.field, cards=[]).abstained)
+        self.assertEqual(judge.prompts, [])
 
     def test_one_call_per_distinct_field_and_candidate_set(self):
-        reader = StubReader(_reply(choice=None))
+        judge = StubJudge(_reply(choice=None))
         for _ in range(3):
-            reader.choose(field=self.field, cards=self.cards)
-        self.assertEqual(len(reader.prompts), 1)
+            judge.choose(field=self.field, cards=self.cards)
+        self.assertEqual(len(judge.prompts), 1)
 
 
 class BatchingTest(unittest.TestCase):
@@ -147,19 +147,19 @@ class BatchingTest(unittest.TestCase):
         ]
 
     def test_identical_candidate_sets_share_one_call(self):
-        reader = StubReader(_reply(one={"choice": None}, two={"choice": "t::a"}))
-        reader.choose_many(requests=self._requests())
+        judge = StubJudge(_reply(one={"choice": None}, two={"choice": "t::a"}))
+        judge.choose_many(requests=self._requests())
         # two calls: one for the {a,b} pair, one for the lone {c} field.
-        self.assertEqual(len(reader.prompts), 2)
+        self.assertEqual(len(judge.prompts), 2)
 
     def test_batching_off_is_one_call_per_field(self):
-        reader = StubReader(_reply(choice=None))
-        reader._batch = False
-        reader.choose_many(requests=self._requests())
-        self.assertEqual(len(reader.prompts), 3)
+        judge = StubJudge(_reply(choice=None))
+        judge._batch = False
+        judge.choose_many(requests=self._requests())
+        self.assertEqual(len(judge.prompts), 3)
 
     def test_a_grouped_answer_maps_back_to_each_field(self):
-        reader = StubReader(
+        judge = StubJudge(
             lambda prompt: _reply(
                 one={"choice": "t::a", "quote": "fish mass", "confidence": "high"},
                 two={"choice": None, "because": "not a mass"},
@@ -167,7 +167,7 @@ class BatchingTest(unittest.TestCase):
             if "one" in prompt
             else _reply(three={"choice": None})
         )
-        verdicts = reader.choose_many(requests=self._requests())
+        verdicts = judge.choose_many(requests=self._requests())
         self.assertEqual(verdicts["one"].choice, "t::a")
         self.assertEqual(verdicts["one"].confidence, "high")
         self.assertTrue(verdicts["two"].abstained)
@@ -176,45 +176,45 @@ class BatchingTest(unittest.TestCase):
 
     def test_a_field_missing_from_the_reply_abstains(self):
         """Silence about a field is not a pick — the group's other answers stand."""
-        reader = StubReader(_reply(one={"choice": "t::a", "quote": "fish mass"}))
-        verdicts = reader.choose_many(requests=self._requests())
+        judge = StubJudge(_reply(one={"choice": "t::a", "quote": "fish mass"}))
+        verdicts = judge.choose_many(requests=self._requests())
         self.assertEqual(verdicts["one"].choice, "t::a")
         self.assertTrue(verdicts["two"].abstained)
 
     def test_a_garbled_group_reply_abstains_every_field_in_it(self):
-        reader = StubReader("sorry, I can't tell")
-        verdicts = reader.choose_many(requests=self._requests())
+        judge = StubJudge("sorry, I can't tell")
+        verdicts = judge.choose_many(requests=self._requests())
         self.assertTrue(all(v.abstained for v in verdicts.values()))
 
     def test_the_referee_still_applies_inside_a_group(self):
-        reader = StubReader(
+        judge = StubJudge(
             _reply(one={"choice": "t::invented", "confidence": "high"},
                    two={"choice": "t::a", "confidence": "high", "quote": "nowhere"})
         )
-        verdicts = reader.choose_many(requests=self._requests())
+        verdicts = judge.choose_many(requests=self._requests())
         self.assertTrue(verdicts["one"].abstained)          # ref never offered
         self.assertEqual(verdicts["two"].confidence, "low")  # quote not locatable
 
     def test_concurrent_dispatch_returns_every_verdict(self):
-        reader = StubReader(_reply(one={"choice": None}, two={"choice": None},
+        judge = StubJudge(_reply(one={"choice": None}, two={"choice": None},
                                    three={"choice": None}))
-        reader._max_workers = 4
-        verdicts = reader.choose_many(requests=self._requests())
+        judge._max_workers = 4
+        verdicts = judge.choose_many(requests=self._requests())
         self.assertEqual(set(verdicts), {"one", "two", "three"})
 
     def test_the_default_batched_entrypoint_loops_choose(self):
-        """A reader that implements only `choose` still works as a batched one."""
-        from src.router.rerank import FieldReader
+        """A judge that implements only `choose` still works as a batched one."""
+        from src.router.judge import CandidateJudge
 
-        class Single(FieldReader):
+        class Single(CandidateJudge):
             def __init__(self): self.seen = []
             def choose(self, *, field, cards):
                 self.seen.append(field.path)
                 return Verdict(choice=None)
 
-        reader = Single()
-        verdicts = reader.choose_many(requests=self._requests())
-        self.assertEqual(reader.seen, ["one", "two", "three"])
+        judge = Single()
+        verdicts = judge.choose_many(requests=self._requests())
+        self.assertEqual(judge.seen, ["one", "two", "three"])
         self.assertEqual(len(verdicts), 3)
 
 
@@ -227,7 +227,7 @@ class WeakerTest(unittest.TestCase):
 
 
 class RoutingIntegrationTest(unittest.TestCase):
-    """The reader's effect on a real routing: promotion, abstention, fall-through."""
+    """The judge's effect on a real routing: promotion, abstention, fall-through."""
 
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -255,23 +255,23 @@ class RoutingIntegrationTest(unittest.TestCase):
     def _route(self, reply):
         return route_fields(
             Meta, catalog=self.catalog, docs=[self.doc], k=5,
-            reader=StubReader(reply),
+            judge=StubJudge(reply),
         )
 
-    def test_without_a_reader_the_lexical_winner_stands(self):
+    def test_without_a_judge_the_lexical_winner_stands(self):
         routing = route_fields(
             Meta, catalog=self.catalog, docs=[self.doc], k=5
         ).routings["duration_days"]
         self.assertEqual(routing.status, "routed")
-        self.assertIsNone(routing.reader_choice)
+        self.assertIsNone(routing.judge_choice)
 
-    def test_the_readers_pick_becomes_rank_one(self):
+    def test_the_judges_pick_becomes_rank_one(self):
         routing = self._route(
             _reply(choice="growth::days", confidence="high",
                    quote="Length of the acclimation period")
         ).routings["duration_days"]
         self.assertEqual(candidate_ref(routing.candidates[0]), "growth::days")
-        self.assertEqual(routing.reader_choice, "growth::days")
+        self.assertEqual(routing.judge_choice, "growth::days")
         # Everything downstream reads candidates[0], so promotion is what makes the
         # bucket and the task's resource follow a judgement instead of a BM25 tie.
         self.assertEqual(routing.bucket, "column")
@@ -288,10 +288,10 @@ class RoutingIntegrationTest(unittest.TestCase):
         # Keeping the candidates is the record of what was considered and refused;
         # an empty list would make an abstention indistinguishable from no retrieval.
         self.assertTrue(routing.candidates)
-        self.assertIsNone(routing.reader_choice)
+        self.assertIsNone(routing.judge_choice)
 
     def test_rejecting_the_structured_tier_falls_through_to_documents(self):
-        """A reader that dismisses lexical coincidences still gets to read the prose."""
+        """A judge that dismisses lexical coincidences still gets to read the prose."""
         def reply(prompt: str) -> str:
             if "Foo Survey" in prompt:
                 return _reply(choice="doc::doc", confidence="medium",
@@ -300,9 +300,9 @@ class RoutingIntegrationTest(unittest.TestCase):
 
         routing = self._route(reply).routings["title"]
         self.assertEqual(routing.bucket, "document")
-        self.assertEqual(routing.reader_choice, "doc::doc")
+        self.assertEqual(routing.judge_choice, "doc::doc")
 
-    def test_assurance_never_exceeds_the_readers_confidence(self):
+    def test_assurance_never_exceeds_the_judges_confidence(self):
         routing = self._route(
             _reply(choice="growth::days", confidence="low",
                    quote="Length of the acclimation period")
@@ -310,7 +310,7 @@ class RoutingIntegrationTest(unittest.TestCase):
         self.assertEqual(routing.assurance, "low")
 
     def test_the_card_shows_units_and_the_value_range(self):
-        """The two things a name alone cannot convey, and the reader's only defence."""
+        """The two things a name alone cannot convey, and the judge's only defence."""
         from src.context.base_context import EvidenceRef
 
         cards = {
@@ -326,14 +326,14 @@ class RoutingIntegrationTest(unittest.TestCase):
         self.assertIn("value_range", cards["condition"])
         self.assertNotIn("units", cards["condition"])   # unitless: the key is absent
 
-    def test_the_veto_cuts_the_bait_before_the_reader_sees_it(self):
+    def test_the_veto_cuts_the_bait_before_the_judge_sees_it(self):
         """`condition` runs 0.97-1.11, so it cannot answer a field wanting whole days."""
-        reader = StubReader(_reply(choice=None))
+        judge = StubJudge(_reply(choice=None))
         routing = route_fields(
-            Meta, catalog=self.catalog, docs=[self.doc], k=5, reader=reader
+            Meta, catalog=self.catalog, docs=[self.doc], k=5, judge=judge
         ).routings["duration_days"]
         self.assertTrue(any("condition" in reason for reason in routing.vetoed))
-        offered = "".join(reader.prompts)
+        offered = "".join(judge.prompts)
         self.assertNotIn("growth::condition", offered)
         self.assertIn("growth::days", offered)
 

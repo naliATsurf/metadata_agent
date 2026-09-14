@@ -3,7 +3,7 @@
 The sheet is deliberately not limited to what retrieval surfaced. A labeler may name
 any ref in ``sources.csv``, including one the router never ranked, because that is
 the only way to measure **recall** — and recall decides whether a re-ranker could
-ever help, since a reader re-ranks and cannot recover a miss.
+ever help, since a judge re-ranks and cannot recover a miss.
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ def write_sources(catalog: Catalog, field_plan: FieldPlan, out: Path) -> Path:
 
     ``ever_retrieved`` marks the refs no field ranked. Those are the lexically
     invisible ones, and spotting them is most of the point: a bundle where half the
-    vocabulary is never retrieved has a recall problem no reader can fix.
+    vocabulary is never retrieved has a recall problem no judge can fix.
     """
     retrieved = {ref_of(c) for r in field_plan.routings.values() for c in r.candidates}
     rows: List[Dict[str, str]] = []

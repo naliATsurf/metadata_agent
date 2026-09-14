@@ -68,12 +68,12 @@ always recommend answering more.
 
 ```bash
 python -m eval score --no-veto                       # layer 4a off
-python -m eval score --field-reader                  # layer 4b on
-python -m eval score --field-reader --no-reader-batch  # judged field by field
-python -m eval score --field-reader --reader-workers 8 # same, concurrent
+python -m eval score --llm-candidate-judge                  # layer 4b on
+python -m eval score --llm-candidate-judge --no-judge-batch  # judged field by field
+python -m eval score --llm-candidate-judge --judge-workers 8 # same, concurrent
 ```
 
-`--no-reader-batch` is the comparison worth running: grouping fields that share a
+`--no-judge-batch` is the comparison worth running: grouping fields that share a
 candidate list saves round-trips, but fields judged together stop being independent,
 and a model shown one passage and nine fields tends to distribute answers among them.
 The sheet is how you find out whether that costs anything.

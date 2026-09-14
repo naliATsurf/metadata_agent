@@ -8,6 +8,10 @@ records findings from an investigation that changed no code.
 ## 2026-09
 
 - -
+  **[2026-09-14 — The field reader is the LLM candidate judge](2026-09-14_candidate-judge.change.md)**
+  — layer 4b renamed for what it does: judge whether any routed candidate answers a
+  field, including that none does.
+- -
   **[2026-09-14 — The router routes a resolution; it does not resolve](2026-09-14_router-handoff.change.md)**
   — `ResolvedBundle` hands a catalog and its source files from layer 3 to layer 4; the
   router page is gated on a catalog run and routes it in memory.
@@ -86,6 +90,7 @@ records findings from an investigation that changed no code.
 :maxdepth: 1
 :hidden:
 
+2026-09-14_candidate-judge.change
 2026-09-14_router-handoff.change
 2026-09-14_text-codebook.change
 2026-09-11_pipeline-settings.change

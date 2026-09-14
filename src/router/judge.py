@@ -1,4 +1,4 @@
-"""Layer 4b — the field reader: choose among routed candidates, or reject them all.
+"""Layer 4b — the candidate judge: choose among routed candidates, or reject them all.
 
 The router ranks lexically (BM25) and then reads its verdict off ``candidates[0]``.
 Measured against hand labels on a real bundle, that verdict answers **88%** of a
@@ -9,7 +9,7 @@ exactly the confident lexical coincidences ("Fulton's condition factor" winning
 ``temperature`` on the word *condition*).
 
 This module is the disposing half the design already promises but never had. A
-reader is shown one field and the candidates retrieval surfaced — each with what
+judge is shown one field and the candidates retrieval surfaced — each with what
 layer 3 resolved about it: meaning, units, dtype, value range, the citation it came
 from — and answers with **one candidate or none**. Its most valuable answer is
 *none*: over-answering, not mis-ranking, is where the accuracy goes.
@@ -17,19 +17,19 @@ from — and answers with **one candidate or none**. Its most valuable answer is
 Three boundaries worth keeping in mind.
 
 **It re-ranks; it cannot retrieve.** A field whose true answer never entered the
-candidate set is unreachable here no matter how good the reader is. Recall stays a
+candidate set is unreachable here no matter how good the judge is. Recall stays a
 retrieval problem (see the embedding work in the field-router plan).
 
 **A model proposes; code disposes.** Same discipline as layer 3: a choice naming a
 candidate that was not offered is discarded, a quote that cannot be located in the
 candidate's own material caps confidence at ``low``, and a failed or garbled call
-abstains rather than crashes. The reader can only pick from what it was shown, and
+abstains rather than crashes. The judge can only pick from what it was shown, and
 can only be believed as far as it can cite.
 
 **One field is the unit of judgement, not the unit of round-trip.** Fields offered
 an identical candidate list can share a call, and the calls can be issued
-concurrently (see :class:`LLMFieldReader`), because a schema is dozens of fields and
-a reader is a network hop. Judged together, though, fields stop being independent —
+concurrently (see :class:`LLMCandidateJudge`), because a schema is dozens of fields and
+a judge is a network hop. Judged together, though, fields stop being independent —
 a model shown one passage and nine fields tends to *distribute* answers among them —
 so grouping is defeasible and worth measuring against a labeled sheet rather than
 assumed free.
@@ -45,20 +45,20 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from src.context.base_context import EvidenceRef
 from src.router.schema import FieldSpec
 
-# The stable identity of a candidate, shared by the reader, the ground-truth sheet,
+# The stable identity of a candidate, shared by the judge, the ground-truth sheet,
 # and anything comparing a pick to a label. One string per answerable place, so a
 # hand-written answer and a retrieved candidate compare with ``==``.
 _TOOL_PREFIX = "tool::"
 _DOC_PREFIX = "doc::"
 
-#: Confidence values a reader may return, weakest first.
+#: Confidence values a judge may return, weakest first.
 CONFIDENCE_ORDER = ("none", "low", "medium", "high")
 
 
 def candidate_ref(candidate: EvidenceRef) -> str:
     """The stable reference string identifying what a candidate points at.
 
-    Document spans collapse to their *document*: a reader cites a passage, and
+    Document spans collapse to their *document*: a judge cites a passage, and
     holding a pick to character offsets would measure the chunker, not the router.
     """
     if candidate.kind == "tool":
@@ -70,7 +70,7 @@ def candidate_ref(candidate: EvidenceRef) -> str:
 
 @dataclass(frozen=True)
 class Verdict:
-    """What a reader concluded about one field's candidate set."""
+    """What a judge concluded about one field's candidate set."""
 
     choice: Optional[str]                  # a candidate ref, or None to abstain
     because: str = ""
@@ -84,13 +84,13 @@ class Verdict:
 
 
 def describe(candidate: EvidenceRef, catalog: Any = None) -> Dict[str, Any]:
-    """Everything known about one candidate, as the flat card a reader judges.
+    """Everything known about one candidate, as the flat card a judge rules on.
 
     The units and the value range are the load-bearing parts. The two mistakes this
     bundle invites — reading ``EPOC::Duration`` (minutes of post-exercise recovery)
     as the condition's duration in days, and ``growth::condition`` (unitless, 0.89–
     1.22) as a temperature — are decidable from units and numbers and from nothing
-    else. Layer 3 already computed both; this just puts them in front of the reader.
+    else. Layer 3 already computed both; this just puts them in front of the judge.
     """
     card: Dict[str, Any] = {
         "ref": candidate_ref(candidate),
@@ -127,11 +127,11 @@ def describe(candidate: EvidenceRef, catalog: Any = None) -> Dict[str, Any]:
 Request = Tuple[FieldSpec, Sequence[Dict[str, Any]]]
 
 
-class FieldReader:
+class CandidateJudge:
     """The seam: choose which candidate answers a field, or none of them.
 
     Implementations receive the field and the candidate cards and nothing else, so a
-    reader never touches a catalog, a context, or an SDK. Return a :class:`Verdict`;
+    judge never touches a catalog, a context, or an SDK. Return a :class:`Verdict`;
     abstention is a first-class answer, not a failure.
 
     Two entrypoints, the same shape as :class:`~src.router.catalog.ProseReader`.
@@ -203,8 +203,8 @@ _BATCH_INSTRUCTION = (
 )
 
 
-class LLMFieldReader(FieldReader):
-    """LLM-backed field reader — abstention first-class.
+class LLMCandidateJudge(CandidateJudge):
+    """LLM-backed candidate judge — abstention first-class.
 
     ``invoke`` is the only dependency: a callable ``prompt -> model text``, which
     keeps this free of any SDK and testable with a stub. Adapt a chat model with
@@ -247,7 +247,7 @@ class LLMFieldReader(FieldReader):
     @classmethod
     def from_chat_model(
         cls, model: Any, *, batch: bool = True, max_workers: int = 1
-    ) -> "LLMFieldReader":
+    ) -> "LLMCandidateJudge":
         """Adapt a chat model exposing ``.invoke(prompt) -> message.content``."""
         return cls(
             lambda prompt: model.invoke(prompt).content,
@@ -368,7 +368,7 @@ def _referee(data: Optional[dict], cards: Sequence[Dict[str, Any]]) -> Verdict:
     whose quote does not appear in the passage.
     """
     if not data:
-        return Verdict(choice=None, because="no usable answer from the reader")
+        return Verdict(choice=None, because="no usable answer from the judge")
 
     raw = data.get("choice")
     because = str(data.get("because") or "").strip()
@@ -380,7 +380,7 @@ def _referee(data: Optional[dict], cards: Sequence[Dict[str, Any]]) -> Verdict:
         # A ref that was never offered is a fabrication, not a pick.
         return Verdict(
             choice=None,
-            because=f"reader named {raw!r}, which was not among the candidates",
+            because=f"judge named {raw!r}, which was not among the candidates",
         )
 
     quote = str(data.get("quote") or "").strip()
@@ -397,7 +397,7 @@ def _referee(data: Optional[dict], cards: Sequence[Dict[str, Any]]) -> Verdict:
 
 
 def _locatable(quote: str, card: Dict[str, Any]) -> bool:
-    """Is ``quote`` present in the card the reader was shown?
+    """Is ``quote`` present in the card the judge was shown?
 
     Whitespace-normalized and case-folded, because a model reflows what it copies.
     An empty quote is not grounded — silence is not a citation.
@@ -418,10 +418,10 @@ def weaker(first: str, second: str) -> str:
     return first if order.get(first, 0) <= order.get(second, 0) else second
 
 
-def rerank(
+def promote(
     candidates: List[EvidenceRef], verdict: Verdict
 ) -> List[EvidenceRef]:
-    """Reorder so the reader's choice is rank 1, keeping the rest in ranked order.
+    """Reorder so the judge's choice is rank 1, keeping the rest in ranked order.
 
     Promoting rather than truncating is deliberate. Everything downstream reads
     ``candidates[0]`` — the bucket, the task's resource, the assurance — so promoting

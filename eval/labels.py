@@ -2,9 +2,9 @@
 
 A label and a retrieved candidate must reduce to the same token so they compare
 with ``==``; the scheme itself lives in the library
-(:func:`~src.router.rerank.candidate_ref`) because the field reader picks by the
+(:func:`~src.router.judge.candidate_ref`) because the candidate judge picks by the
 same identifiers a human labels with. A pick and a label are then comparable
-without translation, which is the only reason scoring a reader is cheap.
+without translation, which is the only reason scoring a judge is cheap.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 from src.context.base_context import EvidenceRef, content_terms, tokenize
-from src.router.rerank import candidate_ref
+from src.router.judge import candidate_ref
 from src.router.route import FieldPlan
 
 #: The label meaning "nothing in this bundle answers this field" — the single most
@@ -75,9 +75,9 @@ def relative_margin(candidates: Sequence[EvidenceRef]) -> float:
 
     1.0 when rank 1 is unchallenged. A flat top-k means retrieval found nothing
     *discriminating*, which is different from finding nothing. Goes **negative** when
-    a field reader promoted a candidate BM25 ranked lower — all three signals here
+    a candidate judge promoted a candidate BM25 ranked lower — all three signals here
     describe the lexical router, so reading them after adjudication says only how far
-    the reader departed from the ranking.
+    the judge departed from the ranking.
     """
     if not candidates or not candidates[0].score:
         return 0.0
@@ -110,7 +110,7 @@ class Scored:
     ranked: List[str]
     routed: bool
     signals: Dict[str, float]
-    abstained_by: Optional[str] = None   # "veto" | "reader" | None
+    abstained_by: Optional[str] = None   # "veto" | "judge" | None
 
     @property
     def answerable(self) -> bool:
@@ -131,13 +131,13 @@ def score(field_plan: FieldPlan, labels: Dict[str, List[str]]) -> List[Scored]:
         routed = routing.status != "unanswered" and bool(ranked)
         by = None
         if not routed:
-            by = "reader" if routing.reader_note else ("veto" if routing.vetoed else None)
+            by = "judge" if routing.judge_note else ("veto" if routing.vetoed else None)
         scored.append(
             Scored(
                 field=path,
                 truth=labels[path],
                 # An abstention is not a pick. A rejected set stays in ``ranked`` —
-                # recall@k measures *retrieval* and is unaffected by the reader — but
+                # recall@k measures *retrieval* and is unaffected by the judge — but
                 # nothing is credited at rank 1.
                 top1=ranked[0] if routed else None,
                 ranked=ranked,

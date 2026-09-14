@@ -3,9 +3,9 @@
 Two numbers carry the design, and they answer different questions:
 
 - **recall@k** — of the answerable fields, how many have their true answer anywhere
-  in the ranked set. The ceiling on *any* re-ranking strategy, an LLM reader
-  included, because a reader chooses among what retrieval surfaced and can never
-  recover a miss. Unaffected by the veto or the reader.
+  in the ranked set. The ceiling on *any* re-ranking strategy, an LLM judge
+  included, because a judge chooses among what retrieval surfaced and can never
+  recover a miss. Unaffected by the veto or the judge.
 - **over-answered** — of the fields labeled ``NONE``, how many the router answered
   anyway. The abstention failure, counted directly. This is the one that moves.
 
@@ -80,11 +80,11 @@ def report(scored: List[Scored], console: Console, k: int) -> Dict[str, float]:
     console.print(f"  [bold]accuracy    {correct}/{len(scored)}[/] "
                   f"({correct / len(scored):.0%})")
 
-    # Who did the abstaining — the deterministic veto, or the reader.
+    # Who did the abstaining — the deterministic veto, or the judge.
     by_veto = sum(1 for s in scored if s.abstained_by == "veto")
-    by_reader = sum(1 for s in scored if s.abstained_by == "reader")
-    if by_veto or by_reader:
-        console.print(f"  abstentions: veto {by_veto}, reader {by_reader}")
+    by_judge = sum(1 for s in scored if s.abstained_by == "judge")
+    if by_veto or by_judge:
+        console.print(f"  abstentions: veto {by_veto}, judge {by_judge}")
 
     for signal in SIGNALS:
         curve = risk_coverage(scored, signal)

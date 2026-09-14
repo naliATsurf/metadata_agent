@@ -44,7 +44,7 @@ def settings(**overrides) -> PipelineSettings:
             "PLANNING": LLMSettings("openai", "planner-model", 0.1),
             "PLAYER": LLMSettings("openai", "player-model", 0.4),
             "CATALOG_RESOLVER": LLMSettings("google", "catalog-model", 0.2),
-            "FIELD_READER": LLMSettings("openai", "reader-model", 0.3),
+            "CANDIDATE_JUDGE": LLMSettings("openai", "judge-model", 0.3),
         },
         "topology": "fast",
     }
@@ -59,7 +59,7 @@ class TestEnvironment(unittest.TestCase):
             self.assertEqual(llm_settings("PLANNING").model, "planner-model")
             self.assertEqual(llm_settings("PLAYER").temperature, 0.4)
             self.assertEqual(llm_settings("CATALOG_RESOLVER").provider, "google")
-            self.assertEqual(llm_settings("FIELD_READER").model, "reader-model")
+            self.assertEqual(llm_settings("CANDIDATE_JUDGE").model, "judge-model")
 
     def test_player_tool_budget_is_carried(self):
         chosen = settings(player_tool_mode="survey", player_tool_iterations=3)
@@ -125,9 +125,9 @@ class TestExampleArguments(unittest.TestCase):
         chosen = settings(
             catalog_prose_tier="llm",
             router_candidates=8,
-            router_field_reader=True,
-            router_reader_workers=4,
-            router_reader_batch=False,
+            router_candidate_judge=True,
+            router_judge_workers=4,
+            router_judge_batch=False,
         )
         args = self.parse(
             field_router_plan.build_parser(), chosen.router_arguments(),
@@ -135,17 +135,17 @@ class TestExampleArguments(unittest.TestCase):
         )
         # Layer 3 is the resolver page's: the router routes its catalog, not its settings.
         self.assertFalse(hasattr(args, "llm_reader"))
-        # Layer 4b: the field reader, its model, and how its calls are issued.
-        self.assertTrue(args.field_reader)
-        self.assertEqual(args.model, "reader-model")
+        # Layer 4b: the candidate judge, its model, and how its calls are issued.
+        self.assertTrue(args.llm_candidate_judge)
+        self.assertEqual(args.model, "judge-model")
         self.assertEqual(args.candidates, 8)
-        self.assertEqual(args.reader_workers, 4)
-        self.assertTrue(args.no_reader_batch)
+        self.assertEqual(args.judge_workers, 4)
+        self.assertTrue(args.no_judge_batch)
 
     def test_batching_is_stated_positively(self):
         """The panel offers batching; the example takes its negation."""
-        chosen = settings(router_reader_batch=True)
-        self.assertFalse(chosen.router_arguments()["no_reader_batch"])
+        chosen = settings(router_judge_batch=True)
+        self.assertFalse(chosen.router_arguments()["no_judge_batch"])
 
 
 class TestToken(unittest.TestCase):
@@ -153,6 +153,13 @@ class TestToken(unittest.TestCase):
 
     def test_same_settings_same_token(self):
         self.assertEqual(settings().token(), settings().token())
+
+    def test_summary_names_the_model_stages_that_are_on(self):
+        """The collapsed panel's header; rendered on every load of the landing page."""
+        self.assertNotIn("judge", settings().summary())
+        on = settings(catalog_prose_tier="llm", router_candidate_judge=True).summary()
+        self.assertIn("catalog prose: llm", on)
+        self.assertIn("candidate judge: on", on)
 
     def test_any_change_is_visible(self):
         baseline = settings().token()
@@ -177,6 +184,46 @@ class TestFormDefaults(unittest.TestCase):
     def test_an_argument_left_alone_keeps_its_own_default(self):
         action = resolve_catalog.build_parser()._actions[-1]
         self.assertEqual(Defaults().default_for(action), action.default)
+
+
+def _panel():
+    """The settings panel alone, as a script AppTest can run."""
+    import sys
+    sys.path.insert(0, ".")
+    from demo import settings
+    settings.render()
+
+
+class TestOverviewSync(unittest.TestCase):
+    """The overview and a module's tab are two views of one set of values."""
+
+    def setUp(self):
+        from streamlit.testing.v1 import AppTest
+
+        self.app = AppTest.from_function(_panel, default_timeout=60)
+        self.app.run()
+
+    def value(self, kind, key):
+        return getattr(self.app, kind)(key=key).value
+
+    def test_a_change_in_the_overview_shows_in_the_module_tab(self):
+        self.app.number_input(key="pipeline.routing.candidates@overview").set_value(9).run()
+        self.assertEqual(self.value("number_input", "pipeline.routing.candidates@module"), 9)
+        self.assertEqual(self.app.session_state["pipeline.settings"].router_candidates, 9)
+
+    def test_a_change_in_the_module_tab_shows_in_the_overview(self):
+        self.app.checkbox(key="pipeline.routing.candidate_judge@module").check().run()
+        self.assertTrue(self.value("checkbox", "pipeline.routing.candidate_judge@overview"))
+        # The judge's model follows in both views, not just the one clicked.
+        for view in ("overview", "module"):
+            self.assertFalse(
+                self.app.selectbox(key=f"pipeline.candidate_judge.provider@{view}").disabled
+            )
+
+    def test_no_warning_about_defaults_and_session_state(self):
+        self.app.text_input(key="pipeline.planning.model@module").set_value("m").run()
+        self.assertEqual(list(self.app.exception), [])
+        self.assertEqual(list(self.app.warning), [])
 
 
 if __name__ == "__main__":
