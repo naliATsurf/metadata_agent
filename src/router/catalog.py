@@ -498,8 +498,11 @@ def _as_text_codebook(
     Parses every ``term <sep> definition`` entry, groups adjacent well-formed entries
     into runs, and keeps a run only when it has at least ``_TEXT_CODEBOOK_MIN_ENTRIES``
     entries and ``_DICTIONARY_KEY_PRECISION`` of its terms are target column names — the
-    precision rule a codebook table is held to. A malformed entry ends a run. Where a
-    term is defined more than once, its first accepted entry stands.
+    precision rule a codebook table is held to. A malformed entry ends a run. An entry
+    that says nothing — its definition only restates the term (``p50 – p50``) — still
+    counts toward its run's structure but is not recorded, so the column stays open for
+    the reader. Where a term is defined more than once, its first informative entry
+    stands.
     """
     vocabulary = {_read_key(c) for c in target_columns if _match_key(c)}
     if not vocabulary:
@@ -518,14 +521,15 @@ def _as_text_codebook(
         definition = " ".join(raw.split()).rstrip(".;, ")
         entry = None
         if _is_definition(definition):
+            key = _match_key(head.group("term"))
             description, units = _split_trailing_units(definition)
             units = units or (head.group("units") or "").strip() or None
-            if re.search(r"[A-Za-z]{2}", description) or units:
-                key = _match_key(head.group("term"))
-                entry = _Entry(
-                    key, description or None, units,
-                    f"{resource}#{head.start()}-{end}", text[head.start():end],
-                )
+            if _read_key(description) == _read_key(key):
+                description = ""               # restates the term: no meaning, at most units
+            entry = _Entry(
+                key, description or None, units,
+                f"{resource}#{head.start()}-{end}", text[head.start():end],
+            )
         parsed.append((head.start(), end, entry))
 
     # Group into runs of adjacent well-formed entries.
@@ -550,7 +554,8 @@ def _as_text_codebook(
         if len(run) < _TEXT_CODEBOOK_MIN_ENTRIES or keyed / len(run) < _DICTIONARY_KEY_PRECISION:
             continue
         for e in run:
-            by_name.setdefault(_read_key(e.key), e)
+            if e.description or e.units:
+                by_name.setdefault(_read_key(e.key), e)
     if not by_name:
         return None
     return _Dictionary(resource, "text_codebook", "medium", by_name)

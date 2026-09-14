@@ -581,6 +581,23 @@ class TextCodebookTest(unittest.TestCase):
         text = "a1 – first; a2 – second; a3 = a1 − a2; a4 – fourth; a5 – fifth\n"
         self.assertIsNone(self._codebook(text, ["a1", "a2", "a3", "a4", "a5"]))
 
+    def test_a_definition_that_restates_its_term_is_not_recorded(self):
+        # The real Readme's `p50 – p50`: well-formed, but it names nothing. It must not
+        # resolve the column (that would gate the reader off it), must not split the run
+        # it sits in, and must not shadow a later entry that does define the term.
+        text = "pH – acclimation pH; p50 – P50; tank – replicate tank; ID – fish ID\np50 – half-saturation oxygen tension\n"
+        cb = self._codebook(text, ["pH", "p50", "tank", "ID"])
+        self.assertEqual(set(cb.by_name), {"ph", "tank", "id", "p50"})    # one run, not two short ones
+        self.assertEqual(cb.by_name["p50"].description, "half-saturation oxygen tension")
+
+    def test_a_restated_term_keeps_its_units(self):
+        cb = self._codebook("p50 – p50 (kPa); tank – replicate tank; ID – fish ID\n", ["p50", "tank", "ID"])
+        self.assertEqual((cb.by_name["p50"].description, cb.by_name["p50"].units), (None, "kPa"))
+
+    def test_a_short_definition_is_still_a_definition(self):
+        cb = self._codebook("gas – O2; tank – replicate tank; ID – fish ID\n", ["gas", "tank", "ID"])
+        self.assertEqual(cb.by_name["gas"].description, "O2")
+
     def test_markdown_list_with_units(self):
         cb = self._codebook(
             "# Variables\n\n- `la`: latitude (decimal degrees)\n- `lo`: longitude (decimal degrees)\n"

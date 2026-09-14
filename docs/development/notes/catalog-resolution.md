@@ -45,7 +45,9 @@ Each auxiliary source is auto-classified; nothing depends on a filename conventi
   the signal**: `AAS = MO2max − MO2standard` in a Methods paragraph has the same `=` as
   `la = latitude`. An entry must also be shaped like a definition (`_is_definition`:
   balanced brackets, no arithmetic, no stray spaced dash, no dangling function word), and a
-  malformed entry ends its run. Trailing parenthesised units are split off. Isolated
+  malformed entry ends its run. An entry whose definition only restates its term
+  (`p50 – p50`) is well-formed, so it keeps its run intact, but it is not recorded: the
+  column stays unresolved and open to the reader. Trailing parenthesised units are split off. Isolated
   matches are dropped — they are narrative, and narrative is the reader's.
 
 **The vocabulary the codebook tests are judged against matters.** `resolve_catalog` uses
