@@ -36,9 +36,19 @@ Each auxiliary source is auto-classified; nothing depends on a filename conventi
   read as a codebook. Description / units / notes columns are then picked by name regex,
   yielding a `by_name` map. (`looks_like_dictionary` exposes this same test to a caller
   partitioning a bundle.)
-- A **`TextContext`** is kept as a document for the prose tiers.
+- A **`TextContext`** is kept as a document for the reader, and each of its files is
+  tested by `_as_text_codebook` for the same thing written as text: a glossary. Every
+  `term <sep> definition` entry is parsed (`:` / `=`, or a dash with whitespace on both
+  sides), and adjacent well-formed entries are grouped into runs. A run is accepted only if
+  it has at least `_TEXT_CODEBOOK_MIN_ENTRIES` (3) entries and `_DICTIONARY_KEY_PRECISION`
+  of its terms are schema names — the table's precision rule. **A separator alone is never
+  the signal**: `AAS = MO2max − MO2standard` in a Methods paragraph has the same `=` as
+  `la = latitude`. An entry must also be shaped like a definition (`_is_definition`:
+  balanced brackets, no arithmetic, no stray spaced dash, no dangling function word), and a
+  malformed entry ends its run. Trailing parenthesised units are split off. Isolated
+  matches are dropped — they are narrative, and narrative is the reader's.
 
-**The vocabulary the dictionary test is judged against matters.** `resolve_catalog` uses
+**The vocabulary the codebook tests are judged against matters.** `resolve_catalog` uses
 that one table's columns; `resolve_bundle` passes *the whole bundle's* column names. Without
 that, a bundle-wide codebook is mostly *other* tables' names from any single table's point of
 view and falls under the precision floor — so one shared codebook would be recognised nowhere.
@@ -56,8 +66,8 @@ tiers, ranked by `_TIER_RANK`:
 
 | Tier | Rank | Source |
 |---|---|---|
-| `structured_dictionary` | 3 | a codebook row keyed on the column name (matched via `_match_key`, whitespace-trimmed, so a stray-space header like `'Nitrate '` still finds its row) |
-| `lexical_prose` | 2 | `_prose_candidates` — a glossary-style definition (`la = latitude`) found by regex over a whole document |
+| `structured_dictionary` | 3 | a codebook row keyed on the column name (matched via `_read_key`, trimmed and case-folded, so a stray-space header like `'Nitrate '` still finds its row); base confidence `high` |
+| `text_codebook` | 2 | an entry of an accepted glossary run, cited as a `resource#start-end` span; base confidence `medium`. Ranked below a table because a parse of text can split an entry wrongly where a cell cannot — the table wins a disagreement, and the text can only corroborate it |
 | `value_prior` | 1 | only the `_SELF_EVIDENT` labels — coordinates, parseable dates. Values genuinely identify nothing else: "numeric, [0.3, 8.7]" names neither pH nor biomass. The coordinate prior additionally requires the *name* to corroborate (`_looks_like_coordinate_name`), turning a guess into a name-plus-value agreement. |
 
 `_decide` then adjudicates:
@@ -80,7 +90,7 @@ than an honest gap, and the abstention is exactly what gates the next phase.
 `_read_residuals`, skipped entirely when no `prose_reader` was supplied.
 
 **Residual gating.** Only columns left `link_method == "none"` by Phase 1 are read, which
-keeps an expensive reader off every column a codebook or glossary already resolved.
+keeps an expensive reader off every column a codebook, table or text, already resolved.
 
 **Bundle-level hoist.** Residual columns from *all* tables are unioned into a single pass,
 deduped on `_read_key` (trimmed **and** case-folded) — a prose read depends on the name and
@@ -115,16 +125,16 @@ its evidence is unconfirmed.
 
 ## Phase 3 — re-decide the residuals
 
-Each residual column goes back through `_resolve_column`, now with an **empty** dictionary
-and document set (it had no deterministic candidate, by definition) plus its `prose_read`
-candidates — and **its value profile still referees the claim**. A grounding conflict is
-keyed by the read's evidence, so it attaches only if that read is the one chosen. Reads are
+Each residual column goes back through `_resolve_column`, now with **no** codebooks
+(it had no deterministic candidate, by definition) plus its `prose_read` candidates — and
+**its value profile still referees the claim**. A grounding conflict is keyed by the read's
+evidence, so it attaches only if that read is the one chosen. Reads are
 fanned back out on `_read_key`, so a single read reaches every spelling of the column across
 the bundle.
 
-The `prose_read` tier deliberately shares rank 2 with `lexical_prose`, with no special-casing:
-if a glossary candidate is also present, source order breaks the same-tier tie and a differing
-read surfaces as a tier-2 conflict rather than silently overriding.
+`prose_read` shares rank 2 with `text_codebook`, but under residual gating the two never
+compete for one column: a read only reaches a column no codebook answered. The rank only
+places a read above the value prior.
 
 ## Phase 4 — assemble, and what the router sees
 
@@ -153,10 +163,12 @@ Three, worth stating separately because they are what the design buys:
 
 ## In one paragraph
 
-Catalog resolution classifies the bundle's other resources into data dictionaries (recognised
-structurally, by a column whose values are the schema's names) and documents; resolves each
+Catalog resolution classifies the bundle's other resources into codebooks (recognised
+structurally — a table column, or a run of glossary entries, whose keys are the schema's names)
+and documents; resolves each
 table's columns deterministically by gathering candidates from three assurance tiers —
-structured dictionary, glossary prose, self-evident value prior — and choosing the top tier
+codebook table, text codebook (a glossary run accepted on its structure, not its
+separators), self-evident value prior — and choosing the top tier
 with the sampled value profile as referee, recording corroboration, conflicts, and losing
 alternatives; abstains where nothing describes a column; then, only for those abstentions and
 only once for the whole bundle, invokes an optional prose reader, handing it whole documents

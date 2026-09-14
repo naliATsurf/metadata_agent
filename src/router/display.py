@@ -31,7 +31,7 @@ _CONF_STYLE = {"high": "green", "medium": "yellow", "low": "red", "none": "dim"}
 # a method the same way this one does.
 METHOD_LABELS = {
     "structured_dictionary": "dictionary",
-    "lexical_prose": "prose",
+    "text_codebook": "glossary",
     "prose_read": "prose·read",
     "value_prior": "value",
     "none": "none",

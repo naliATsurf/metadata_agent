@@ -10,24 +10,22 @@ the missing context into the catalog *before* routing.
 :func:`resolve_catalog` turns each opaque column into a *described* column by
 harvesting explanations from the other resources. It does **not** stop at the
 first hit: it gathers *every* candidate resolution for a column — from every
-dictionary, every prose definition, every prose *read*, and the value prior — then
-chooses among them by assurance tier, with the value profile as referee for
-conflicts:
+codebook, every prose *read*, and the value prior — then chooses among them by
+assurance tier, with the value profile as referee for conflicts:
 
-1. **structured dictionary** (``structured_dictionary``) — a data-dictionary table
-   keyed by column name;
-2. **prose**, in two forms at the *same* tier, because both are a document's claim
-   about a column and differ only in how it was extracted:
-
-   - ``lexical_prose`` — a cued definition like ``la = latitude``, found by regex;
-   - ``prose_read`` — a meaning read out of narrative by an optional pluggable
-     :class:`ProseReader` (deterministic, or LLM-backed via
-     :class:`LLMProseReader`). Opt-in: pass ``prose_reader=``, or the tier simply
-     does not run. It sees only columns the deterministic tiers left unresolved
-     (residual gating), so it fills gaps rather than re-reading a codebook line
-     the regex already caught;
-
-3. **self-evident value type** (``value_prior``) — the *only* thing values can
+1. **structured dictionary** (``structured_dictionary``) — a codebook *table* keyed by
+   column name;
+2. **text codebook** (``text_codebook``) — the same thing written in a document: a run
+   of glossary entries (``pH – acclimation pH; nitrate – nominal nitrate (mg/L); …``)
+   whose terms are the schema's names. Accepted on that structure, never on a
+   separator — ``AAS = MO2max − MO2standard`` has the ``=`` of ``la = latitude`` — and
+   ranked below a table, because a parse of text is less certain than a parse of cells;
+3. **prose read** (``prose_read``) — a meaning read out of narrative by an optional
+   pluggable :class:`ProseReader` (in practice :class:`LLMProseReader`). Opt-in: pass
+   ``prose_reader=``, or the tier simply does not run. It sees only columns the
+   deterministic tiers left unresolved (residual gating), so it fills gaps rather than
+   re-reading an entry a codebook already gave;
+4. **self-evident value type** (``value_prior``) — the *only* thing values can
    identify on their own: a coordinate range, a parseable date. Not a general
    identifier.
 
@@ -58,18 +56,16 @@ condition factor" and "temperature" are indistinguishable by name and obvious by
 value. The profile still cannot *name* a column — that is the abstention above —
 but what shape its values are is a fact worth carrying forward.
 
-**Choosing a reader.** The prose tiers are opt-in, and which to pass depends on how
+**Choosing a reader.** The reader is opt-in, and whether to pass one depends on how
 the bundle *states* its meanings, not on how large it is:
 
-- **none** — a codebook keyed by column name resolves everything it covers, and the
-  glossary regex plus the value prior handle what it does not. There is nothing for
-  a reader to do in a bundle with no explanatory prose.
-- :class:`DeterministicProseReader` — the document defines columns in a *cued* shape
-  (``mass - fish mass``, ``fish mass (mass)``). High precision, no model, and it
-  abstains rather than guess when the cue is absent.
-- :class:`LLMProseReader` — the meanings are stated in plain narrative ("Mass records
-  its mass in grams"), where there is no cue to match. The only tier that reads those,
-  and the only one that costs a model call.
+- **none** — the bundle's codebooks, as tables or as glossaries in its README, resolve
+  everything they cover, and the value prior handles what it can. There is nothing
+  for a reader to do in a bundle with no explanatory prose.
+- :class:`LLMProseReader` — the meanings are stated in narrative ("Mass records its
+  mass in grams", "body mass (mass)", a Methods paragraph), where there is no codebook
+  structure to parse. The only tier that reads those, and the only one that costs a
+  model call.
 
 A reader only ever sees columns the deterministic tiers left unresolved (residual
 gating), so adding one cannot overturn a resolution a codebook already made — it can
@@ -180,7 +176,7 @@ class ResolvedColumn:
     dtype: str
     description: Optional[str] = None       # resolved human meaning
     units: Optional[str] = None
-    # structured_dictionary | lexical_prose | prose_read | value_prior | none
+    # structured_dictionary | text_codebook | prose_read | value_prior | none
     link_method: str = "none"
     link_confidence: str = "none"          # high | medium | low | none
     link_evidence: Optional[str] = None    # citation for the interpretation
@@ -281,12 +277,31 @@ class Catalog:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _Entry:
+    """One codebook entry: what a source says a column name means, and where it says it."""
+
+    key: str
+    description: Optional[str]
+    units: Optional[str]
+    evidence: str       # citation: ``resource row 'key'`` or ``resource#start-end``
+    quote: str          # the entry as the source states it
+
+
 @dataclass
 class _Dictionary:
-    """A parsed data dictionary: column name -> its harvested description."""
+    """A recognised codebook: column name (``_read_key``) -> its entry.
+
+    Two kinds, told apart by ``method``: a codebook *table* (``structured_dictionary``)
+    and a glossary written in text (``text_codebook``). Both are keyed on the schema's
+    names and accepted only on structure; they differ in how much the parse can be
+    trusted, so each carries the base ``confidence`` its candidates start at.
+    """
 
     resource: str
-    by_name: Dict[str, Dict[str, Optional[str]]]
+    method: str
+    confidence: str
+    by_name: Dict[str, _Entry]
 
 
 def _pick_column(df: pd.DataFrame, pattern: re.Pattern, exclude: str) -> Optional[str]:
@@ -338,19 +353,37 @@ def _as_dictionary(src: TabularContext, target_columns: List[str]) -> Optional[_
         unit_col = _pick_column(df, _UNIT_NAME_RE, best_key)
         note_col = _pick_column(df, _NOTE_NAME_RE, best_key)
 
-        by_name: Dict[str, Dict[str, Optional[str]]] = {}
+        by_name: Dict[str, _Entry] = {}
         for _, row in df.iterrows():
             key = str(row[best_key]).strip()
             if not key:
                 continue
-            by_name[key.lower()] = {
-                "description": _cell(row, desc_col),
-                "units": _cell(row, unit_col),
-                "notes": _cell(row, note_col),
-                "key": key,
-            }
-        return _Dictionary(resource=resource, by_name=by_name)
+            description, units = _cell(row, desc_col), _cell(row, unit_col)
+            by_name[_read_key(key)] = _Entry(
+                key, description, units, f"{resource} row '{key}'",
+                _dictionary_quote(key, description, units, _cell(row, note_col)),
+            )
+        return _Dictionary(resource, "structured_dictionary", "high", by_name)
     return None
+
+
+def _dictionary_quote(
+    key: str, description: Optional[str], units: Optional[str], notes: Optional[str]
+) -> str:
+    """Render a codebook row as the text it states.
+
+    A dictionary citation addresses a row; this is what that row says, so the row can
+    be shown beside its citation exactly as a prose quote is. It also surfaces the
+    ``notes`` column, which is otherwise parsed and never seen.
+    """
+    quote = key
+    if description:
+        quote += f" — {description}"
+    if units:
+        quote += f" [{units}]"
+    if notes:
+        quote += f" ({notes})"
+    return quote
 
 
 def _cell(row: pd.Series, col: Optional[str]) -> Optional[str]:
@@ -364,92 +397,189 @@ def _cell(row: pd.Series, col: Optional[str]) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Lexical prose linking (a document *defines* the token)
+# Text-codebook linking (a glossary written in a document)
 # ---------------------------------------------------------------------------
+#
+# A README often carries its codebook as text: ``pH – acclimation pH; nitrate – nominal
+# nitrate treatment concentration (mg/L); tank – replicate tank ID; …``. A separator alone
+# says nothing — ``AAS = MO2max − MO2standard`` in a manuscript has the same ``=`` as
+# ``la = latitude`` — so no single ``term <sep> text`` match is taken as a definition.
+# What makes the README a codebook is **structure**, the same evidence `_as_dictionary`
+# accepts a table on: a *run* of adjacent entries whose terms are, mostly, the schema's
+# own column names. An isolated match is left to the prose reader, which reads narrative
+# and equations for what they are.
+#
+# Each entry must also be *shaped* like a definition — balanced brackets, no arithmetic,
+# no dangling conjunction — so an equation sitting beside a glossary cannot join its run.
+# An accepted run becomes a `_Dictionary` with method ``text_codebook``: keyed and
+# decided exactly like a codebook table, one rank below it, because a parse of free text
+# is less certain than a parse of cells.
+
+# Fewest adjacent entries that make a run a glossary rather than a coincidence. Two
+# ``X = …`` side by side is ordinary in a Methods section; three is a list.
+_TEXT_CODEBOOK_MIN_ENTRIES = 3
+# A definition longer than this is a paragraph that happened to follow a separator.
+_TEXT_DEFINITION_MAX_CHARS = 160
+
+# A term: a bare identifier, optionally quoted/emphasised, optionally followed by its
+# units in parentheses (``SGR (%/day) – specific growth rate``).
+_TERM_TOKEN = r"[A-Za-z_][A-Za-z0-9_]*"
+_TERM_WRAP = r"[`'\"*]{0,2}"
+# ``:`` or ``=`` (spaces optional), or a dash — hyphen, en, em — with whitespace on both
+# sides, so a hyphen inside a compound (``tank-level``, ``post-exercise``) never separates.
+# A line break may follow the separator: wrapped glossaries break right after it.
+_ENTRY_SEP = r"(?:[ \t]*[:=][ \t]*(?:\n[ \t]*)?|[ \t]+[–—-](?:[ \t]+|[ \t]*\n[ \t]*))"
+# Where a definition stops, short of the next entry: a ``;``, a paragraph break, a line
+# break into a list item or into a heading-like line (``Tab 2 – EPOC``), or a sentence end.
+_ENTRY_END = re.compile(
+    r";|\n[ \t]*\n|\n(?=[ \t]*(?:[-*•#>|]|\d+[.)][ \t]))|\n(?=[^\n;]*?\s[–—-]\s)"
+    r"|\.(?=\s+[A-Z]|\s*\Z)"
+)
+# What may sit between two entries of one run: delimiters and list markers, nothing else.
+_RUN_GAP = re.compile(r"(?:[\s;,.|>*•–—-]|\d+[.)])*")
+_ARITHMETIC = re.compile(r"[=−×÷<>≤≥]")
+_SPACED_DASH = re.compile(r"\s[–—-]\s")
+_DANGLING_WORD = re.compile(r"\b(?:and|or|of|the|a|an|to|in|on|at|by|for|with|from|as|than)$")
+_TRAILING_UNITS = re.compile(r"\s*(?:\(\(([^()]{1,24})\)\)|\(([^()]{1,24})\))\s*$")
 
 
-_ABSORBED_DEF = re.compile(r"\s[–—-]\s")
+def _split_trailing_units(text: str) -> Tuple[str, Optional[str]]:
+    """Peel a trailing parenthetical: ``fish mass (g)`` -> (``fish mass``, ``g``).
 
-
-def _trim_absorbed_definition(text: str) -> str:
-    """Undo a missing delimiter that merged the *next* glossary entry into this value.
-
-    Entries are ``term <spaced-dash> def``; a captured value that itself contains a
-    **space-surrounded** dash has swallowed a following ``term – def`` past a typo'd or
-    absent ``;`` (e.g. ``fish mass (g) Duration - recovery duration (min)`` → the real
-    value is ``fish mass (g)``). Truncate at that inner separator and drop the absorbed
-    term (the word right before it). Hyphens *inside* words (``post-exercise``,
-    ``kg-1``) are not space-surrounded, so legitimate values are left intact.
+    A doubled one (``((mg O2 kg-1 h-1))``, as real READMEs write it) is peeled whole.
     """
-    m = _ABSORBED_DEF.search(text)
-    if not m:
-        return text
-    head = text[: m.start()]                       # "... fish mass (g) Duration"
-    return re.sub(r"\s+\S+\s*$", "", head).strip() or text
+    m = _TRAILING_UNITS.search(text)
+    if m:
+        return text[: m.start()].strip(), (m.group(1) or m.group(2)).strip()
+    return text.strip(), None
 
 
-def _prose_candidates(name: str, docs: List[TextContext]) -> List[Dict[str, Any]]:
-    """Find glossary-style definitions (``la = latitude``, ``pH – acclimation pH``).
+def _is_definition(text: str) -> bool:
+    """Whether ``text`` reads as a glossary definition rather than a formula or a fragment.
 
-    Returns one candidate per document that defines the token — so a definition
-    appearing in several docs contributes several candidates, which the decision
-    step then treats as corroboration or conflict.
-
-    The separator is either ``:`` / ``=`` (whitespace optional) or a dash — hyphen,
-    en-dash, or em-dash — that must be **surrounded by whitespace**. Real glossaries
-    use the en-dash (``pH – acclimation pH``); requiring spaces around a dash keeps a
-    hyphen *inside* a compound word from matching (``tank-level`` is not a definition
-    of ``tank``). Matching is **case-insensitive** (a ``mass`` column finds
-    ``Mass – fish mass (g)``); a lookbehind keeps the token from matching inside a
-    longer word (``id`` does not match ``individual``).
+    Rejects what a separator match picks up when it is not a glossary: arithmetic
+    (``MO2max − MO2standard``), unbalanced brackets (the tail of a parenthetical the
+    match started inside), a spaced dash (a heading or a further entry the delimiters
+    did not split), and a dangling function word (a phrase cut off mid-sentence).
     """
-    pattern = re.compile(
-        rf"(?<![A-Za-z0-9_])[`'\"]?{re.escape(_match_key(name))}[`'\"]?(?:\s*[:=]\s*|\s+[–—-]\s+)"
-        rf"([A-Za-z][A-Za-z0-9 /()%-]{{2,60}})",
+    if not text or len(text) > _TEXT_DEFINITION_MAX_CHARS:
+        return False
+    if text.count("(") != text.count(")") or text.count("[") != text.count("]"):
+        return False
+    if _ARITHMETIC.search(text) or _SPACED_DASH.search(text) or _DANGLING_WORD.search(text):
+        return False
+    return bool(re.match(r"[A-Za-z(]", text))
+
+
+def _term_pattern(vocabulary: List[str]) -> re.Pattern:
+    """The entry-head pattern: ``term [ (units) ] <sep>``.
+
+    Any bare identifier can be a term, so a run's key precision can be measured against
+    the schema; vocabulary names that are not bare identifiers (``body mass``,
+    ``O2.sat``) are added verbatim so they can head an entry too.
+    """
+    irregular = sorted(
+        {_match_key(v) for v in vocabulary if _match_key(v) and not re.fullmatch(_TERM_TOKEN, _match_key(v))},
+        key=len, reverse=True,
+    )
+    term = "|".join([*(re.escape(v) for v in irregular), _TERM_TOKEN])
+    return re.compile(
+        rf"(?<![A-Za-z0-9_]){_TERM_WRAP}(?P<term>{term}){_TERM_WRAP}"
+        rf"(?:[ \t]*\((?P<units>[^()\n]{{1,24}})\))?{_ENTRY_SEP}",
         re.IGNORECASE,
     )
-    found: List[Dict[str, Any]] = []
-    for doc in docs:
-        for resource in doc.resources:
-            match = pattern.search(doc.read_text(resource))
-            if match:
-                found.append({
-                    "description": _trim_absorbed_definition(match.group(1).strip()).rstrip(".;,"),
-                    "evidence": f"{resource}#{match.start()}",
-                    "quote": match.group(0).strip(),
-                })
-    return found
+
+
+def _as_text_codebook(
+    doc: TextContext, resource: str, target_columns: List[str]
+) -> Optional[_Dictionary]:
+    """Recognise the glossaries in one document as a codebook for ``target_columns``.
+
+    Parses every ``term <sep> definition`` entry, groups adjacent well-formed entries
+    into runs, and keeps a run only when it has at least ``_TEXT_CODEBOOK_MIN_ENTRIES``
+    entries and ``_DICTIONARY_KEY_PRECISION`` of its terms are target column names — the
+    precision rule a codebook table is held to. A malformed entry ends a run. Where a
+    term is defined more than once, its first accepted entry stands.
+    """
+    vocabulary = {_read_key(c) for c in target_columns if _match_key(c)}
+    if not vocabulary:
+        return None
+    text = doc.read_text(resource)
+    heads = list(_term_pattern(target_columns).finditer(text))
+
+    # Parse: each definition runs from its separator to the first stop or the next head.
+    parsed: List[Tuple[int, int, Optional[_Entry]]] = []   # (head start, entry end, entry)
+    for i, head in enumerate(heads):
+        limit = heads[i + 1].start() if i + 1 < len(heads) else len(text)
+        region = text[head.end():limit]
+        stop = _ENTRY_END.search(region)
+        raw = region[: stop.start()] if stop else region
+        end = head.end() + len(raw.rstrip())
+        definition = " ".join(raw.split()).rstrip(".;, ")
+        entry = None
+        if _is_definition(definition):
+            description, units = _split_trailing_units(definition)
+            units = units or (head.group("units") or "").strip() or None
+            if re.search(r"[A-Za-z]{2}", description) or units:
+                key = _match_key(head.group("term"))
+                entry = _Entry(
+                    key, description or None, units,
+                    f"{resource}#{head.start()}-{end}", text[head.start():end],
+                )
+        parsed.append((head.start(), end, entry))
+
+    # Group into runs of adjacent well-formed entries.
+    runs: List[List[_Entry]] = []
+    current: List[_Entry] = []
+    previous_end: Optional[int] = None
+    for start, end, entry in parsed:
+        adjacent = previous_end is not None and _RUN_GAP.fullmatch(text[previous_end:start])
+        if entry is None or not adjacent:
+            if current:
+                runs.append(current)
+            current = []
+        if entry is not None:
+            current.append(entry)
+        previous_end = end if entry is not None else None
+    if current:
+        runs.append(current)
+
+    by_name: Dict[str, _Entry] = {}
+    for run in runs:
+        keyed = sum(_read_key(e.key) in vocabulary for e in run)
+        if len(run) < _TEXT_CODEBOOK_MIN_ENTRIES or keyed / len(run) < _DICTIONARY_KEY_PRECISION:
+            continue
+        for e in run:
+            by_name.setdefault(_read_key(e.key), e)
+    if not by_name:
+        return None
+    return _Dictionary(resource, "text_codebook", "medium", by_name)
 
 
 # ---------------------------------------------------------------------------
-# Prose *reading* (retrieve-then-read) — the fallback above the glossary regex
+# Prose *reading* — meanings a document states outside any codebook
 # ---------------------------------------------------------------------------
 #
-# The glossary regex (`_prose_candidates`) scans a whole document for one fixed
-# shape (`term <sep> definition`). That fits a short codebook README and nothing
-# else: a long manuscript defines a column narratively, scattered across pages and
-# files, and `search`-ing the whole text for the first match yields an arbitrary,
-# usually wrong, hit. This tier fixes both halves of that:
+# A text codebook covers a README that lists its columns. Everything else a document
+# says about a column — a Methods paragraph, a parenthetical ``body mass (mass)``, a
+# definition by equation — is narrative, and reading narrative takes a reader. This
+# tier hands a document (or, for a manuscript, its most relevant chunks) to a pluggable
+# `ProseReader` — in practice :class:`LLMProseReader` — and grounds what comes back
+# against the verbatim quote the reader cites:
 #
-#   1. **Retrieve** — BM25-rank *every chunk across every document* by the column
-#      token, so the definition is localized out of a 20-page manuscript (and, with
-#      several files, ranked across them at once). Cost is (k chunks x reader), not
-#      document length — this is what keeps it doc-scale.
-#   2. **Read** — hand the top-k chunks to a pluggable `ProseReader`. The default
-#      deterministic reader extracts only a *cued* definition (forward `mass - fish
-#      mass`, reversed `fish mass (mass)`), splitting trailing units — high
-#      precision, no free-sentence guessing. A narrative document whose prose has no
-#      such cue is the LLM reader's job (the seam below); until one is injected the
-#      reader abstains, which is the honest outcome.
+#   1. **Localize** — a short file goes whole; a long one is BM25-ranked chunk by chunk
+#      on the column token, so the definition is found in a 20-page manuscript at a
+#      cost of (k chunks x reader), not document length.
+#   2. **Read** — the reader returns a description, units, and its supporting quote,
+#      or omits the column; abstention is first-class.
 #
-# It emits `_Candidate(method="prose_read")`, registered at the *same* tier as the
-# glossary regex. The reader is opt-in (`resolve_catalog(..., prose_reader=...)`);
-# passing none skips it entirely.
+# It emits `_Candidate(method="prose_read")`. The reader is opt-in
+# (`resolve_catalog(..., prose_reader=...)`); passing none skips it entirely.
 #
 # **Residual gating + bundle hoist.** The reader runs only on columns the deterministic
 # tiers left *unresolved* (`link_method == "none"`) — it fills genuine gaps rather than
-# re-reading a codebook/glossary line the regex already caught (reading the same prose
-# line two ways is not independent corroboration). Across a multi-table bundle, every
+# re-reading a line a codebook, table or text, already answered (reading the same line
+# two ways is not independent corroboration). Across a multi-table bundle, every
 # table's residual columns are unioned into a **single** `_batch_prose_reads` pass over
 # the shared docs (`_read_residuals`), so a definition chunk is read once for the whole
 # bundle, not once per table. Together these bound an expensive reader's cost to the
@@ -462,8 +592,7 @@ def _prose_candidates(name: str, docs: List[TextContext]) -> List[Dict[str, Any]
 # chunk to the columns that reached it and calls the reader **once per chunk** over all
 # of them (`ProseReader.read_many`). Cost scales with *distinct retrieved chunks*, not
 # column count. `CachedProseReader` memoizes by (column, chunk) — negatives included —
-# so re-runs are free. The deterministic reader is cheap enough that this is invisible;
-# the shape exists so an LLM reader is affordable the day it is wired.
+# so re-runs are free.
 
 
 @dataclass(frozen=True)
@@ -487,9 +616,9 @@ class ProseReader:
     Two entrypoints. :meth:`read` handles one column; :meth:`read_many` handles all
     columns that retrieved a given chunk in a single shot — the batched path the
     resolver actually calls. Implement whichever fits the backend: a cheap
-    per-column reader (the deterministic floor) implements ``read`` and inherits the
-    default ``read_many`` that loops it; a batched backend (an LLM answering many
-    columns per chunk) overrides ``read_many``. Return ``None`` / omit a column to
+    per-column reader implements ``read`` and inherits the default ``read_many`` that
+    loops it; a batched backend (an LLM answering many columns per chunk) overrides
+    ``read_many``. Return ``None`` / omit a column to
     abstain. Retrieval, caching, and :func:`_decide` are all external, so any reader
     plugs in identically.
     """
@@ -555,65 +684,6 @@ class CachedProseReader(ProseReader):
         return out
 
 
-_SENTENCE_SPLIT = re.compile(r"[.;\n]+")
-_TRAILING_UNITS = re.compile(r"\s*\(([^)]{1,24})\)\s*$")
-
-
-def _split_trailing_units(text: str) -> Tuple[str, Optional[str]]:
-    """Peel a trailing parenthetical: ``fish mass (g)`` -> (``fish mass``, ``g``)."""
-    m = _TRAILING_UNITS.search(text)
-    if m:
-        return text[: m.start()].strip(), m.group(1).strip()
-    return text.strip(), None
-
-
-def _forward_definition(name: str, sentence: str) -> Optional[str]:
-    """``mass - fish mass``/``mass: fish mass`` *within a localized sentence*."""
-    m = re.search(
-        rf"(?<![A-Za-z0-9_])[`'\"]?{re.escape(name)}[`'\"]?(?:\s*[:=]\s*|\s+[–—-]\s+)"
-        rf"([A-Za-z][A-Za-z0-9 /()%-]{{2,80}})",
-        sentence,
-        re.IGNORECASE,
-    )
-    return _trim_absorbed_definition(m.group(1).strip()).rstrip(".;,") if m else None
-
-
-def _reversed_definition(name: str, sentence: str) -> Optional[str]:
-    """``fish mass (mass)`` / ``fish mass `mass``` — the phrase *before* the token."""
-    m = re.search(
-        rf"([A-Za-z][A-Za-z0-9 /()%-]{{2,80}}?)\s*[\(\[`'\"]{re.escape(name)}[\)\]`'\"]",
-        sentence,
-        re.IGNORECASE,
-    )
-    return m.group(1).strip() if m else None
-
-
-class DeterministicProseReader(ProseReader):
-    """The LLM-free floor: return a meaning only when a definitional *cue* is present.
-
-    Scoped to a chunk the retriever already localized, it looks in each sentence that
-    mentions the token for a forward or reversed definition and splits off trailing
-    units. It deliberately does **not** treat an arbitrary mentioning sentence as a
-    definition — that keeps precision high and abstention honest; narrative prose with
-    no cue is left to an LLM reader. Per-column and cheap, so it uses the inherited
-    :meth:`read_many` (a loop) unchanged.
-    """
-
-    def read(self, *, column: str, dtype: str, chunk: str) -> Optional[ReadResult]:
-        column = _match_key(column)   # match on the trimmed name; a stray space would defeat it
-        token = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(column)}(?![A-Za-z0-9_])", re.I)
-        for sentence in _SENTENCE_SPLIT.split(chunk):
-            if not token.search(sentence):
-                continue
-            for extract in (_forward_definition, _reversed_definition):
-                phrase = extract(column, sentence)
-                if phrase:
-                    desc, units = _split_trailing_units(phrase)
-                    if len(desc) >= 3:
-                        return ReadResult(desc, units, "medium", sentence.strip())
-        return None
-
-
 # The extraction contract handed to the model: define only what the passage states,
 # omit the rest (abstention is first-class), return strict JSON we can parse.
 _LLM_READER_INSTRUCTION = (
@@ -644,10 +714,10 @@ def _extract_json_object(text: Any) -> Optional[dict]:
 
 
 class LLMProseReader(ProseReader):
-    """LLM-backed reader — the ceiling for genuine *narrative* prose.
+    """LLM-backed reader — reads what a document says about a column in *narrative*.
 
-    Where the deterministic reader needs a cued ``term – def`` shape, this reads plain
-    sentences ("Mass is the fish mass in grams") by asking a model. It overrides the
+    Where a text codebook needs a glossary's structure, this reads plain sentences
+    ("Mass is the fish mass in grams") by asking a model. It overrides the
     **batched** entrypoint so every column handed to a passage is defined in one call —
     one round-trip per passage, not per column.
 
@@ -957,29 +1027,31 @@ def _resolve_table_deterministic(
     sources: List[ExecutionContext],
     vocabulary: Optional[List[str]] = None,
 ) -> _TableResolution:
-    """Resolve one table with the deterministic tiers only (dictionary, prose regex,
-    value prior) — no reader. The reader pass is applied afterwards, and only to the
-    columns this leaves unresolved (:func:`_read_residuals`).
+    """Resolve one table with the deterministic tiers only (codebook tables, text
+    codebooks, value prior) — no reader. The reader pass is applied afterwards, and only
+    to the columns this leaves unresolved (:func:`_read_residuals`).
 
-    ``vocabulary`` is the set of column names a tabular source is judged against when
-    deciding whether it is a data dictionary. It defaults to this table's own columns;
+    ``vocabulary`` is the set of column names a source is judged against when deciding
+    whether it is a codebook, table or text. It defaults to this table's own columns;
     :func:`resolve_bundle` passes the whole bundle's columns instead, so **one codebook
     describing every table is recognised at each of them**. Without that, a bundle-wide
     codebook is mostly *other* tables' names from any single table's point of view and
-    falls under the key-column precision floor.
+    falls under the key precision floor.
     """
     resource = resource or target.resources[0]
     info = target.get_resource_info(resource)
     frame = target.read_resource(resource, limit=_PROFILE_SAMPLE)
 
+    vocabulary = vocabulary or info.field_names
+    docs = [src for src in sources if isinstance(src, TextContext)]
     dictionaries = [
         d
-        for src in sources
-        if isinstance(src, TabularContext)
-        for d in [_as_dictionary(src, vocabulary or info.field_names)]
+        for d in (
+            *(_as_dictionary(src, vocabulary) for src in sources if isinstance(src, TabularContext)),
+            *(_as_text_codebook(doc, r, vocabulary) for doc in docs for r in doc.resources),
+        )
         if d is not None
     ]
-    docs = [src for src in sources if isinstance(src, TextContext)]
 
     columns: List[ResolvedColumn] = []
     profiles: Dict[str, Dict[str, Any]] = {}
@@ -988,7 +1060,7 @@ def _resolve_table_deterministic(
         profile = _value_profile(frame[f.name]) if f.name in frame.columns else {"numeric": False}
         profiles[f.name] = profile
         dtypes[f.name] = f.dtype
-        columns.append(_resolve_column(f.name, f.dtype, resource, profile, dictionaries, docs, ()))
+        columns.append(_resolve_column(f.name, f.dtype, resource, profile, dictionaries))
     return _TableResolution(resource, columns, profiles, dtypes, docs)
 
 
@@ -1105,8 +1177,8 @@ def _read_residuals(
     **localized** (:func:`_localized_reads`). Both sets contribute, so a README sitting
     beside a manuscript keeps the high-recall path it qualifies for. Each residual
     column is re-decided
-    with an *empty* dictionary/doc set (it had no deterministic candidate, by definition)
-    plus its reads, its value profile still refereeing the claim.
+    with *no* codebooks (it had no deterministic candidate, by definition) plus its
+    reads, its value profile still refereeing the claim.
     """
     residual: List[Tuple[str, str]] = []
     seen: set = set()
@@ -1143,7 +1215,7 @@ def _read_residuals(
             if col.link_method == "none" and candidates:
                 t.columns[i] = _resolve_column(
                     col.name, t.dtypes[col.name], t.resource,
-                    t.profiles[col.name], [], [], candidates,
+                    t.profiles[col.name], [], candidates,
                 )
 
 
@@ -1167,8 +1239,8 @@ def resolve_catalog(
 
     ``sources`` are the other resources in the bundle — data dictionaries and
     description documents — each auto-classified: a tabular source that keys the
-    target's columns is parsed as a dictionary; text sources are searched for
-    prose definitions. Value priors, computed from the target's own values, are
+    target's columns is parsed as a dictionary; a text source's glossaries that key
+    them are parsed as a text codebook. Value priors, computed from the target's own values, are
     the floor when neither yields a link, and the basis for cross-checking any
     link that does. An optional ``prose_reader`` reads the still-unresolved columns
     (residual gating; see :func:`_read_residuals`).
@@ -1195,7 +1267,7 @@ def resolve_bundle(
     :class:`ResolvedColumn` keeps its ``resource``, the router ranks a field against
     every table's columns at once and the compiler groups extraction by table.
 
-    The auxiliary ``sources`` (dictionaries, prose) are offered to *every* target, so
+    The auxiliary ``sources`` (codebooks, documents) are offered to *every* target, so
     a shared codebook resolves the columns it covers wherever they live. A column
     name may legitimately occur in two tables; each is resolved on its own values, so
     lookups that need to disambiguate use :meth:`Catalog.find` with the resource.
@@ -1217,12 +1289,15 @@ def resolve_bundle(
     return Catalog(resource=resource, columns=columns)
 
 
-# Assurance tiers, most authoritative first. Both prose methods — the glossary
-# regex and the retrieve-then-read reader — share tier 2, so when both fire _decide
-# treats them as same-tier corroboration or conflict with no special-casing.
+# Assurance tiers, most authoritative first. A text codebook sits below a codebook table:
+# both are accepted on the same structural evidence, but a parse of free text can split
+# an entry wrongly where a cell cannot, so the table wins a disagreement and the text
+# can only corroborate it. A prose read shares the text codebook's rank; under residual
+# gating the two never compete for one column (a read only reaches a column no codebook
+# answered), so the rank only orders them above the value prior.
 _TIER_RANK = {
     "structured_dictionary": 3,
-    "lexical_prose": 2,
+    "text_codebook": 2,
     "prose_read": 2,
     "value_prior": 1,
 }
@@ -1250,56 +1325,32 @@ class _Candidate:
         }
 
 
-def _dictionary_quote(entry: Dict[str, Optional[str]]) -> str:
-    """Render a codebook row as the text it states.
-
-    A dictionary citation addresses a row; this is what that row says, so the row can
-    be shown beside its citation exactly as a prose quote is. It also surfaces the
-    ``notes`` column, which is otherwise parsed and never seen.
-    """
-    quote = str(entry["key"])
-    if entry["description"]:
-        quote += f" — {entry['description']}"
-    if entry["units"]:
-        quote += f" [{entry['units']}]"
-    if entry["notes"]:
-        quote += f" ({entry['notes']})"
-    return quote
-
-
 def _norm(text: Optional[str]) -> str:
     return (text or "").strip().lower()
 
 
-def _resolve_column(name, dtype, resource, profile, dictionaries, docs, prose_reads=()) -> ResolvedColumn:
+def _resolve_column(name, dtype, resource, profile, dictionaries, prose_reads=()) -> ResolvedColumn:
     """Gather every candidate resolution for the column, then decide among them.
 
-    ``prose_reads`` are this column's retrieve-then-read candidates, precomputed in
-    one batched pass (:func:`_batch_prose_reads`) so an expensive reader is called
-    per chunk, not per column; empty when no reader was supplied.
+    ``dictionaries`` are the recognised codebooks, table and text alike; each proposes
+    at its own method and base confidence. ``prose_reads`` are this column's reader
+    candidates, precomputed in one batched pass (:func:`_read_residuals`) so an
+    expensive reader is called per chunk, not per column; empty when no reader ran.
     """
     label = profile.get("label")
     candidates: List[_Candidate] = []
 
     for d in dictionaries:
-        entry = d.by_name.get(_match_key(name).lower())
-        if entry and (entry["description"] or entry["units"]):
+        entry = d.by_name.get(_read_key(name))
+        if entry and (entry.description or entry.units):
             candidates.append(_Candidate(
-                entry["description"], entry["units"], "structured_dictionary",
-                "high", f"{d.resource} row '{entry['key']}'", _dictionary_quote(entry),
+                entry.description, entry.units, d.method, d.confidence,
+                entry.evidence, entry.quote,
             ))
 
-    for pc in _prose_candidates(name, docs):
-        candidates.append(_Candidate(
-            pc["description"], None, "lexical_prose", "medium", pc["evidence"],
-            pc.get("quote"),
-        ))
-
-    # The retrieve-then-read tier. Precomputed and passed in (empty unless a reader
-    # ran); under residual gating these arrive only for columns with no deterministic
-    # candidate, so they typically stand alone at tier 2. Kept generic — if a glossary
-    # candidate is also present, source order (regex first) breaks a same-tier tie and a
-    # differing read surfaces as a tier-2 conflict rather than silently overriding.
+    # The reader tier. Precomputed and passed in (empty unless a reader ran); under
+    # residual gating these arrive only for columns with no deterministic candidate, so
+    # they stand alone.
     for rc in prose_reads:
         candidates.append(_Candidate(
             rc["description"], rc["units"], "prose_read", rc["confidence"],

@@ -101,20 +101,19 @@ class TestExampleArguments(unittest.TestCase):
     def test_catalog_tiers_pick_one_reader(self):
         parser = resolve_catalog.build_parser()
         for tier, expected in (
-            ("off", (False, False)),
-            ("deterministic", (True, False)),
-            ("llm", (False, True)),
+            ("off", False),
+            ("llm", True),
         ):
             with self.subTest(tier=tier):
                 chosen = settings(catalog_prose_tier=tier)
                 args = self.parse(parser, chosen.catalog_arguments())
-                self.assertEqual((args.prose_reader, args.llm_reader), expected)
+                self.assertEqual(args.llm_reader, expected)
                 self.assertEqual(args.model, "catalog-model")
                 self.assertEqual(args.provider, "google")
 
     def test_catalog_debug_needs_the_llm_tier(self):
         """Prompt logging is a property of the LLM reader; without it, nothing logs."""
-        chosen = settings(catalog_prose_tier="deterministic", catalog_debug=True)
+        chosen = settings(catalog_prose_tier="off", catalog_debug=True)
         self.assertFalse(chosen.catalog_arguments()["debug"])
 
     def test_router_carries_both_stages(self):

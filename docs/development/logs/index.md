@@ -8,6 +8,11 @@ records findings from an investigation that changed no code.
 ## 2026-09
 
 - -
+  **[2026-09-14 — A glossary is accepted on its structure, not its separators](2026-09-14_text-codebook.change.md)**
+  — the glossary regex and `DeterministicProseReader` replaced by a text codebook: runs of
+  entries keyed on the schema, ranked below a codebook table; isolated matches go to the
+  reader.
+- -
   **[2026-09-11 — One settings panel for the whole pipeline](2026-09-11_pipeline-settings.change.md)**
   — every stage's parameters on the landing page; configuration read when it is
   asked for rather than at import; the field router gained the LLM prose reader.

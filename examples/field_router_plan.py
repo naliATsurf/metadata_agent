@@ -52,7 +52,6 @@ from src.router import (
     NONE,
     CachedProseReader,
     Catalog,
-    DeterministicProseReader,
     FieldPlan,
     LLMProseReader,
     ProseReader,
@@ -192,7 +191,7 @@ def build_parser() -> argparse.ArgumentParser:
         "Routing", "How many candidates the router keeps per field."
     )
     tier = ap.add_argument_group(
-        "Prose tiers", "Which readers run above the codebook and the value prior."
+        "Prose reader", "Whether a model reads the narrative no codebook covers."
     )
     model = ap.add_argument_group(
         "Field reader model",
@@ -222,13 +221,9 @@ def build_parser() -> argparse.ArgumentParser:
                          help="let an LLM decide which candidate answers each field, or "
                               "none of them. Without it rank 1 wins on BM25 score, which "
                               "over-answers when schema and data were authored apart")
-    tier.add_argument("--prose-reader", action="store_true",
-                      help="enable the retrieve-then-read prose tier (localize + read a "
-                           "cued definition) above the glossary regex")
     tier.add_argument("--llm-reader", action="store_true",
                       help="read free narrative with the catalog reader's model, for "
-                           "columns the deterministic tiers cannot resolve; wins over "
-                           "--prose-reader")
+                           "columns no codebook, table or glossary, resolves")
 
     configured = llm_settings(LLM_MODULE)
     model.add_argument("--provider", choices=list(PROVIDER_CONFIGS),
@@ -266,9 +261,9 @@ def build_parser() -> argparse.ArgumentParser:
 def build_prose_reader(args: argparse.Namespace) -> Tuple[ProseReader | None, str]:
     """Build layer 3's prose reader from the flags, and a label naming what reads.
 
-    ``--llm-reader`` wins over ``--prose-reader``: it subsumes the deterministic tier,
-    reading narrative the cued reader cannot. The reader is cached, so a document is
-    read once no matter how many of the bundle's tables are resolved against it.
+    ``--llm-reader`` reads narrative no codebook covers; without it no reader runs. The
+    reader is cached, so a document is read once no matter how many of the bundle's
+    tables are resolved against it.
     """
     if args.llm_reader:
         from src.config import create_llm_for   # lazy: pulls provider SDKs when used
@@ -279,8 +274,6 @@ def build_prose_reader(args: argparse.Namespace) -> Tuple[ProseReader | None, st
         )
         reader = LLMProseReader.from_chat_model(create_llm_for(CATALOG_MODULE, **vars(settings)))
         return CachedProseReader(reader), f"llm {settings.describe()}"
-    if args.prose_reader:
-        return DeterministicProseReader(), "deterministic"
     return None, "off"
 
 

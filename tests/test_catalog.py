@@ -14,25 +14,47 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from src.context import create_context
 from src.router import (
     CachedProseReader,
-    DeterministicProseReader,
     LLMProseReader,
     ProseReader,
+    ReadResult,
     resolve_bundle,
     resolve_catalog,
 )
+from src.router.catalog import _as_text_codebook
 from src.tools.base import clear_registry
 
 
-class _CountingReader(ProseReader):
-    """A deterministic reader that records every batched call, to prove call shape."""
+# What the stub reader "understands": column -> (description, units, verbatim quote).
+_FISH_READS = {
+    "mass": ("wet body mass", None, "Wet body mass (mass)"),
+    "epoc": ("oxygen debt", None, "Oxygen debt (epoc)"),
+}
 
-    def __init__(self):
-        self._inner = DeterministicProseReader()
+
+class _PassageReader(ProseReader):
+    """A reader that returns a column's meaning only when its defining quote is in the
+    chunk — a model that reads what it is handed and nothing else, with no network."""
+
+    def __init__(self, reads=None):
+        self.reads = reads if reads is not None else _FISH_READS
+
+    def read(self, *, column, dtype, chunk):
+        known = self.reads.get(column)
+        if known and known[2] in chunk:
+            return ReadResult(known[0], known[1], "medium", known[2])
+        return None
+
+
+class _CountingReader(_PassageReader):
+    """A passage reader that records every batched call, to prove call shape."""
+
+    def __init__(self, reads=None):
+        super().__init__(reads)
         self.calls = []  # one (column_names, chunk_text) per read_many invocation
 
     def read_many(self, *, columns, chunk):
         self.calls.append(([name for name, _ in columns], chunk))
-        return self._inner.read_many(columns=columns, chunk=chunk)
+        return super().read_many(columns=columns, chunk=chunk)
 
 
 class _StubLLM:
@@ -145,34 +167,40 @@ class CatalogResolutionTest(unittest.TestCase):
         self.assertEqual(cat.get("n").value_label, "numeric")
         self.assertEqual(cat.get("n").link_method, "none")  # abstains
 
-    # --- lexical prose ----------------------------------------------------
+    # --- text codebook ----------------------------------------------------
 
-    def test_lexical_prose_definition_resolves_a_column(self):
-        pd.DataFrame({"qq": [1, 2, 3]}).to_csv(os.path.join(self.dir, "q.csv"), index=False)
+    def test_text_codebook_resolves_a_column(self):
+        pd.DataFrame({"qq": [1, 2, 3], "zz": [4, 5, 6]}).to_csv(os.path.join(self.dir, "q.csv"), index=False)
         with open(os.path.join(self.dir, "notes.md"), "w") as f:
-            f.write("# Notes\n\nHere qq = quality quotient score for the site.\n")
+            f.write("# Variables\n\n- qq = quality quotient score\n- zz = zone code\n- site = site name\n")
         tab = create_context(os.path.join(self.dir, "q.csv"), name="q")
         doc = create_context(os.path.join(self.dir, "notes.md"), name="notes")
-        cat = resolve_catalog(tab, sources=[doc])
-        qq = cat.get("qq")
-        self.assertEqual(qq.link_method, "lexical_prose")
-        self.assertIn("quality quotient", qq.description)
+        qq = resolve_catalog(tab, sources=[doc]).get("qq")
+        self.assertEqual(qq.link_method, "text_codebook")
+        self.assertEqual(qq.link_confidence, "medium")      # below a codebook table's high
+        self.assertEqual(qq.description, "quality quotient score")
+        self.assertEqual(qq.link_quote, "qq = quality quotient score")
+        start, end = (int(x) for x in qq.link_evidence.split("#")[1].split("-"))
+        self.assertEqual(doc.read_text("notes")[start:end], qq.link_quote)   # a real span
 
     # --- name hygiene: stray whitespace in a header ----------------------
 
-    def test_trailing_space_in_header_still_resolves_via_prose(self):
+    def test_trailing_space_in_header_still_resolves_via_text_codebook(self):
         """A real header like 'Nitrate ' (trailing space) must match the glossary
         definition of 'nitrate' — matching strips the name, the locator keeps it."""
-        pd.DataFrame({"Nitrate ": [1.0, 2.0, 3.0]}).to_csv(
+        pd.DataFrame({"Nitrate ": [1.0, 2.0, 3.0], "tank": [1, 2, 3], "pH": [7.0, 7.5, 8.0]}).to_csv(
             os.path.join(self.dir, "epoc.csv"), index=False
         )
         with open(os.path.join(self.dir, "readme.txt"), "w") as f:
-            f.write("nitrate – nominal nitrate treatment concentration (mg/L); tank – replicate tank ID\n")
+            f.write(
+                "pH – acclimation pH; nitrate – nominal nitrate treatment concentration (mg/L); "
+                "tank – replicate tank ID\n"
+            )
         tab = create_context(os.path.join(self.dir, "epoc.csv"), name="epoc")
         doc = create_context(os.path.join(self.dir, "readme.txt"), name="readme")
         col = resolve_catalog(tab, sources=[doc]).get("Nitrate ")
-        self.assertEqual(col.link_method, "lexical_prose")
-        self.assertIn("nitrate treatment", col.description)
+        self.assertEqual(col.link_method, "text_codebook")
+        self.assertEqual((col.description, col.units), ("nominal nitrate treatment concentration", "mg/L"))
         self.assertEqual(col.name, "Nitrate ")   # true header preserved for the locator
 
     def test_trailing_space_in_header_still_resolves_via_dictionary(self):
@@ -190,8 +218,8 @@ class CatalogResolutionTest(unittest.TestCase):
         self.assertEqual(col.name, "Nitrate ")
 
     def test_missing_delimiter_does_not_absorb_the_next_entry(self):
-        """A glossary with a missing ';' merges two entries; the captured value must
-        stop at the absorbed term, not swallow it (real Readme: 'Mass – fish mass (g)
+        """A glossary with a missing ';' merges two entries; the definition must stop at
+        the next entry's head, not swallow it (real Readme: 'Mass – fish mass (g)
         Duration - recovery duration (min)')."""
         pd.DataFrame({"Mass": [1.0, 2.0], "Duration": [3.0, 4.0]}).to_csv(
             os.path.join(self.dir, "epoc.csv"), index=False
@@ -201,20 +229,26 @@ class CatalogResolutionTest(unittest.TestCase):
         tab = create_context(os.path.join(self.dir, "epoc.csv"), name="epoc")
         doc = create_context(os.path.join(self.dir, "readme.txt"), name="readme")
         cat = resolve_catalog(tab, sources=[doc])
-        self.assertEqual(cat.get("Mass").description, "fish mass (g)")   # not the merged run
+        self.assertEqual((cat.get("Mass").description, cat.get("Mass").units), ("fish mass", "g"))
         # The absorbed entry still resolves on its own term.
-        self.assertIn("recovery duration", cat.get("Duration").description)
+        self.assertEqual((cat.get("Duration").description, cat.get("Duration").units),
+                         ("recovery duration", "min"))
 
     def test_internal_hyphen_in_a_value_is_preserved(self):
         """A hyphen *inside* a word is not a spaced dash, so the value is left intact."""
-        pd.DataFrame({"epoc": [1.0, 2.0]}).to_csv(os.path.join(self.dir, "e.csv"), index=False)
+        pd.DataFrame({"epoc": [1.0, 2.0], "mass": [3.0, 4.0]}).to_csv(os.path.join(self.dir, "e.csv"), index=False)
         with open(os.path.join(self.dir, "r.txt"), "w") as f:
-            f.write("epoc – excess post-exercise oxygen consumption (mg O2 kg-1 h-1)\n")
+            f.write(
+                "mass – fish mass (g)\n"
+                "epoc – excess post-exercise oxygen consumption (mg O2 kg-1 h-1)\n"
+                "tank – replicate tank\n"
+            )
         tab = create_context(os.path.join(self.dir, "e.csv"), name="e")
         doc = create_context(os.path.join(self.dir, "r.txt"), name="r")
+        epoc = resolve_catalog(tab, sources=[doc]).get("epoc")
         self.assertEqual(
-            resolve_catalog(tab, sources=[doc]).get("epoc").description,
-            "excess post-exercise oxygen consumption (mg O2 kg-1 h-1)",
+            (epoc.description, epoc.units),
+            ("excess post-exercise oxygen consumption", "mg O2 kg-1 h-1"),
         )
 
     # --- cross-check without a dictionary claim --------------------------
@@ -312,18 +346,18 @@ class CatalogEdgeCaseTest(unittest.TestCase):
         self.assertEqual(temp.link_confidence, "medium")
         self.assertTrue(any("Kelvin" in c for c in temp.conflicts))
 
-    def test_corroborating_prose_raises_confidence(self):
+    def test_corroborating_text_codebooks_raise_confidence(self):
         """Two documents defining the same token → corroborated above single-source."""
-        pd.DataFrame({"qq": [1, 2, 3]}).to_csv(os.path.join(self.dir, "q.csv"), index=False)
+        pd.DataFrame({"qq": [1, 2, 3], "zz": [4, 5, 6]}).to_csv(os.path.join(self.dir, "q.csv"), index=False)
         for i in (1, 2):
             with open(os.path.join(self.dir, f"doc{i}.md"), "w") as f:
-                f.write(f"# Doc {i}\n\nqq = quality index\n")
+                f.write(f"# Doc {i}\n\nqq = quality index\nzz = zone code\nsite = site name\n")
         tab = create_context(os.path.join(self.dir, "q.csv"), name="q")
         d1 = create_context(os.path.join(self.dir, "doc1.md"), name="doc1")
         d2 = create_context(os.path.join(self.dir, "doc2.md"), name="doc2")
         qq = resolve_catalog(tab, sources=[d1, d2]).get("qq")
-        self.assertEqual(qq.link_method, "lexical_prose")
-        self.assertEqual(qq.link_confidence, "high")       # corroborated (a single prose is medium)
+        self.assertEqual(qq.link_method, "text_codebook")
+        self.assertEqual(qq.link_confidence, "high")       # corroborated (a single text codebook is medium)
         self.assertEqual(qq.conflicts, [])
         # the agreeing source is recorded, citably — not just a confidence bump
         self.assertEqual(len(qq.corroborated_by), 1)
@@ -370,7 +404,7 @@ class FullyExercisedCatalogTest(unittest.TestCase):
     | tmp    | structured_dictionary| medium | numeric     | everything (conflict+corrob+alts)  |
     | la     | structured_dictionary| high   | coordinate  | corroboration → high, alternatives |
     | frac   | structured_dictionary| low    | numeric     | chosen claim refuted by values     |
-    | note   | lexical_prose        | medium | categorical | prose definition                   |
+    | note   | text_codebook        | medium | categorical | glossary entry in the README       |
     | dt     | value_prior          | high   | temporal    | self-evident value, chosen by prior|
     | oid    | none                 | none   | numeric     | abstains — nothing describes it     |
 
@@ -409,7 +443,14 @@ class FullyExercisedCatalogTest(unittest.TestCase):
             "units": ["Kelvin"],
         }).to_csv(os.path.join(self.dir, "cb3.csv"), index=False)
         with open(os.path.join(self.dir, "README.md"), "w") as f:
-            f.write("# Survey\n\nField glossary: `note` = field remark recorded by the observer.\n")
+            # The glossary also covers la and frac, but a text codebook ranks below the
+            # tables that describe those, so it only resolves `note`.
+            f.write(
+                "# Survey\n\nField glossary:\n\n"
+                "- `note` = field remark recorded by the observer\n"
+                "- `la` = survey point latitude\n"
+                "- `frac` = sampled fraction\n"
+            )
 
         self.tab = create_context(os.path.join(self.dir, "observations.csv"), name="obs")
         self.sources = [
@@ -450,7 +491,7 @@ class FullyExercisedCatalogTest(unittest.TestCase):
         cat = self._catalog()
         methods = {c.name: c.link_method for c in cat.columns}
         self.assertEqual(methods["la"], "structured_dictionary")
-        self.assertEqual(methods["note"], "lexical_prose")
+        self.assertEqual(methods["note"], "text_codebook")
         self.assertEqual(methods["dt"], "value_prior")
         self.assertEqual(methods["oid"], "none")
 
@@ -460,7 +501,7 @@ class FullyExercisedCatalogTest(unittest.TestCase):
         self.assertEqual(conf["la"], "high")     # corroborated
         self.assertEqual(conf["dt"], "high")     # self-evident temporal
         self.assertEqual(conf["tmp"], "medium")  # tie broken by the values
-        self.assertEqual(conf["note"], "medium") # lone prose
+        self.assertEqual(conf["note"], "medium") # lone text codebook
         self.assertEqual(conf["frac"], "low")    # chosen claim refuted
         self.assertEqual(conf["oid"], "none")    # abstained
 
@@ -488,6 +529,111 @@ class FullyExercisedCatalogTest(unittest.TestCase):
         self.assertEqual(oid.link_confidence, "none")
         self.assertIsNone(oid.description)
         self.assertEqual(oid.value_label, "numeric")  # the coarse prior is still kept
+
+
+class TextCodebookTest(unittest.TestCase):
+    """A glossary in a document is accepted on its structure, never on a separator.
+
+    ``la = latitude`` and ``AAS = MO2max − MO2standard`` share the ``=``; what tells a
+    README's codebook from a manuscript's equation is a run of adjacent, well-formed
+    entries keyed on the schema's names.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        clear_registry()
+
+    def _doc(self, text, name="doc.txt"):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as f:
+            f.write(text)
+        return create_context(path, name=name.split(".")[0])
+
+    def _codebook(self, text, vocabulary):
+        doc = self._doc(text)
+        return _as_text_codebook(doc, doc.resources[0], vocabulary)
+
+    def test_an_equation_in_a_manuscript_is_not_a_definition(self):
+        """The regression: PDF-extracted Methods prose defining aerobic scope by formula.
+        The old glossary regex resolved `aas` as 'Inline graphicO2MAX Inline
+        graphicO2STANDARD) and factorial a'."""
+        text = (
+            "Metabolic rates were used to calculate absolute aerobic scope (AAS; "
+            "AAS=Inline graphicO2MAX Inline graphicO2STANDARD) and factorial aerobic scope "
+            "(FAS; FAS=Inline graphicO2MAX / Inline graphicO2STANDARD). Mass: recorded daily.\n"
+        )
+        self.assertIsNone(self._codebook(text, ["aas", "fas", "mass"]))
+
+    def test_an_isolated_definition_is_left_to_the_reader(self):
+        self.assertIsNone(self._codebook("# Notes\n\nHere qq = quality quotient score for the site.\n", ["qq"]))
+
+    def test_two_entries_are_not_yet_a_glossary(self):
+        self.assertIsNone(self._codebook("la = latitude; lo = longitude\n", ["la", "lo"]))
+
+    def test_a_run_mostly_of_other_names_is_not_this_tables_codebook(self):
+        text = "alpha – first thing; beta – second thing; gamma – third thing; la – latitude\n"
+        self.assertIsNone(self._codebook(text, ["la", "lo"]))   # 1 of 4 terms is a column
+
+    def test_a_malformed_entry_breaks_the_run(self):
+        # Two good entries, a formula, two good entries: neither side reaches three.
+        text = "a1 – first; a2 – second; a3 = a1 − a2; a4 – fourth; a5 – fifth\n"
+        self.assertIsNone(self._codebook(text, ["a1", "a2", "a3", "a4", "a5"]))
+
+    def test_markdown_list_with_units(self):
+        cb = self._codebook(
+            "# Variables\n\n- `la`: latitude (decimal degrees)\n- `lo`: longitude (decimal degrees)\n"
+            "- **sp** – species code\n\nThe survey ran in 2020.\n",
+            ["la", "lo", "sp"],
+        )
+        self.assertEqual(
+            {k: (e.description, e.units) for k, e in cb.by_name.items()},
+            {"la": ("latitude", "decimal degrees"), "lo": ("longitude", "decimal degrees"),
+             "sp": ("species code", None)},
+        )
+
+    def test_real_readme_wrapped_glossary(self):
+        """The shape of data/sample/Readme.txt: entries separated by ';', lines wrapped
+        mid-definition, a tab heading between runs, one entry with no ';' before the next."""
+        text = (
+            "Abbreviations and units:\nTab 2 – EPOC\n"
+            "pH – acclimation pH; nitrate – nominal nitrate treatment concentration (mg/L); tank – replicate tank\n"
+            "ID; ID – individual fish ID; Mass – fish mass (g) Duration - recovery duration (min); EPOC –\n"
+            "excess post-exercise oxygen consumption (mg O2 kg-1 h-1)\n"
+            "Tab 3 – MR\n"
+            "rest – resting metabolic rate (mg O2 kg-1 h-1); aas – absolute aerobic scope\n"
+            "((mg O2 kg-1 h-1)); fas – factorial aerobic scope\n"
+        )
+        vocabulary = ["pH", "nitrate", "tank", "ID", "Mass", "Duration", "EPOC", "rest", "aas", "fas"]
+        cb = self._codebook(text, vocabulary)
+        got = {k: (e.description, e.units) for k, e in cb.by_name.items()}
+        self.assertEqual(got["tank"], ("replicate tank ID", None))            # wrapped line joined
+        self.assertEqual(got["mass"], ("fish mass", "g"))                     # stops at 'Duration'
+        self.assertEqual(got["epoc"], ("excess post-exercise oxygen consumption", "mg O2 kg-1 h-1"))
+        self.assertEqual(got["aas"], ("absolute aerobic scope", "mg O2 kg-1 h-1"))
+        self.assertEqual(got["fas"], ("factorial aerobic scope", None))       # heading not absorbed
+        self.assertEqual(set(got), {_k.lower() for _k in vocabulary})
+
+    def test_a_codebook_table_outranks_a_text_codebook(self):
+        pd.DataFrame({"la": [53.1, 53.2], "lo": [-9.1, -9.2], "sp": ["a", "b"]}).to_csv(
+            os.path.join(self.dir, "obs.csv"), index=False
+        )
+        pd.DataFrame({"variable": ["la", "lo"], "description": ["Latitude", "Longitude"]}).to_csv(
+            os.path.join(self.dir, "cb.csv"), index=False
+        )
+        tab = create_context(os.path.join(self.dir, "obs.csv"), name="obs")
+        cb = create_context(os.path.join(self.dir, "cb.csv"), name="cb")
+        readme = self._doc("la – latitude\nlo – easting of the site\nsp – species code\n", "readme.txt")
+        cat = resolve_catalog(tab, sources=[readme, cb])
+        la, lo = cat.get("la"), cat.get("lo")
+        self.assertEqual(la.link_method, "structured_dictionary")
+        self.assertEqual(la.link_confidence, "high")
+        self.assertEqual(la.corroborated_by, ["readme#0-13"])    # the text agrees, and is cited
+        self.assertEqual(lo.description, "Longitude")            # the table wins a disagreement
+        self.assertEqual(lo.conflicts, [])                       # a lower tier is not a same-tier rival
+        self.assertTrue(any(a["method"] == "text_codebook" for a in lo.alternatives))
+        self.assertEqual(cat.get("sp").link_method, "text_codebook")   # the text fills the gap
 
 
 class MultiTableBundleTest(unittest.TestCase):
@@ -667,13 +813,12 @@ class MixedDocumentLengthTest(unittest.TestCase):
 
 
 class ProseReaderTierTest(unittest.TestCase):
-    """The retrieve-then-read tier: localize a chunk, then read a *cued* definition.
+    """The reader tier: hand a document (or its localized chunks) to a reader.
 
-    It is opt-in (``prose_reader=``) and registered at the same tier as the glossary
-    regex, so :func:`_decide` treats the two prose methods as corroboration or
-    conflict with no special-casing. These tests exercise: the deterministic reader's
-    extraction, retrieval localizing the right chunk across long/many documents, the
-    opt-in gate, and same-tier corroboration/conflict through the decision step.
+    It is opt-in (``prose_reader=``) and runs only on columns no codebook resolved.
+    These tests exercise: the LLM reader's parsing, grounding a read against its quote,
+    retrieval localizing the right chunk across long/many documents, the opt-in gate,
+    residual gating, and the batched/cached call shape.
     """
 
     def setUp(self):
@@ -684,7 +829,7 @@ class ProseReaderTierTest(unittest.TestCase):
             os.path.join(self.dir, "fish.csv"), index=False
         )
         self.tab = create_context(os.path.join(self.dir, "fish.csv"), name="fish")
-        self.reader = DeterministicProseReader()
+        self.reader = _PassageReader()
 
     def tearDown(self):
         clear_registry()
@@ -694,17 +839,6 @@ class ProseReaderTierTest(unittest.TestCase):
         with open(path, "w") as f:
             f.write(text)
         return create_context(path, name=name.split(".")[0])
-
-    # --- the deterministic reader in isolation ---------------------------
-
-    def test_deterministic_reader_extracts_forward_reversed_and_abstains(self):
-        r = DeterministicProseReader()
-        fwd = r.read(column="mass", dtype="float", chunk="pH – acclimation pH; Mass – fish mass (g)")
-        self.assertEqual((fwd.description, fwd.units), ("fish mass", "g"))  # forward + unit split
-        rev = r.read(column="mass", dtype="float", chunk="Body mass (mass) recorded in grams.")
-        self.assertEqual(rev.description, "Body mass")                      # reversed, phrase before token
-        # A sentence that merely mentions the token, with no definitional cue, abstains.
-        self.assertIsNone(r.read(column="mass", dtype="float", chunk="Mass matters for fish."))
 
     # --- the LLM reader in isolation (stub invoke, no network) -----------
 
@@ -818,25 +952,25 @@ class ProseReaderTierTest(unittest.TestCase):
 
     # --- the tier in the resolution pipeline -----------------------------
 
-    def test_reader_resolves_a_reversed_definition_the_regex_misses(self):
-        # The token is defined in parens *after* the phrase ("body mass (mass)"), a
-        # shape the whole-doc glossary regex cannot match — only a reader can.
+    def test_reader_resolves_narrative_no_codebook_covers(self):
+        # The token is defined in parens *after* the phrase ("Wet body mass (mass)") —
+        # narrative, not a glossary, so only a reader can resolve it.
         doc = self._doc(
             "manuscript.md",
             "# Methods\n\n"
             "Fish were held at 15C for two weeks prior to trials. "
-            "Body mass (mass) was recorded to the nearest 0.1 g before each swim test. "
+            "Wet body mass (mass) was recorded to the nearest 0.1 g before each swim test. "
             "We then measured excess post-exercise oxygen consumption (EPOC).\n",
         )
-        # Opt-in gate: with no reader the reversed definition is invisible → abstains.
+        # Opt-in gate: with no reader the narrative definition is invisible → abstains.
         without = resolve_catalog(self.tab, sources=[doc]).get("mass")
         self.assertEqual(without.link_method, "none")
-        # With the reader it is localized and read.
+        # With the reader it is read.
         with_reader = resolve_catalog(
             self.tab, sources=[doc], prose_reader=self.reader
         ).get("mass")
         self.assertEqual(with_reader.link_method, "prose_read")
-        self.assertIn("mass", with_reader.description.lower())
+        self.assertEqual(with_reader.description, "wet body mass")
         # Well-grounded: the quote locates, names the column, and carries the description.
         self.assertEqual(with_reader.link_confidence, "high")
         self.assertIn("manuscript", with_reader.link_evidence)   # cites the located span
@@ -844,8 +978,8 @@ class ProseReaderTierTest(unittest.TestCase):
     def test_retrieval_localizes_the_defining_document_among_many(self):
         # Long-doc (retrieval) path: forced by a low whole-doc threshold. A long decoy
         # that mentions the token constantly but never defines it, and a short appendix
-        # that defines it in a reversed (regex-invisible) shape — retrieval must rank the
-        # appendix chunk to the top so only a reader can resolve it, cited to the definer.
+        # that defines it in narrative — retrieval must rank the appendix chunk to the
+        # top so the reader resolves it, cited to the definer.
         decoy = self._doc("intro.md", "# Introduction\n\n" + ("Mass matters for fish physiology. " * 40))
         appendix = self._doc(
             "appendix.md",
@@ -856,7 +990,7 @@ class ProseReaderTierTest(unittest.TestCase):
                 self.tab, sources=[decoy, appendix], prose_reader=self.reader
             ).get("mass")
         self.assertEqual(col.link_method, "prose_read")
-        self.assertEqual(col.description, "Wet body mass")
+        self.assertEqual(col.description, "wet body mass")
         self.assertIn("appendix", col.link_evidence)   # the definer, not the decoy
 
     def test_reader_abstains_when_no_document_defines_the_column(self):
@@ -867,27 +1001,32 @@ class ProseReaderTierTest(unittest.TestCase):
     # --- residual gating: the reader only fills genuine gaps ---------------
 
     def test_reader_is_skipped_for_columns_the_deterministic_tiers_resolved(self):
-        # Residual gating: the glossary regex resolves both columns, so the reader is
-        # never invoked — no re-reading the same prose line as false corroboration.
-        doc = self._doc("readme.md", "# Vars\n\nmass – wet body mass; epoc – oxygen debt\n")
+        # Residual gating: the README's glossary resolves both columns, so the reader is
+        # never invoked — no re-reading the same line as false corroboration.
+        doc = self._doc("readme.md", "# Vars\n\nmass – wet body mass; epoc – oxygen debt; tank – tank ID\n")
         spy = _CountingReader()
         cat = resolve_catalog(self.tab, sources=[doc], prose_reader=spy)
         self.assertEqual(spy.calls, [])                       # nothing residual → reader idle
-        self.assertEqual(cat.get("mass").link_method, "lexical_prose")
+        self.assertEqual(cat.get("mass").link_method, "text_codebook")
         self.assertEqual(cat.get("mass").link_confidence, "medium")  # not inflated by re-reading
 
     def test_reader_runs_only_on_the_unresolved_column(self):
-        # 'mass' is defined in the glossary (resolved deterministically); 'epoc' only in
-        # a reversed shape the regex misses. The reader is asked about 'epoc' alone.
+        # 'mass', 'tank' and 'pH' are in the glossary (resolved deterministically); 'epoc'
+        # only in narrative. The reader is asked about 'epoc' alone.
+        pd.DataFrame({"mass": [1.0], "tank": [1], "pH": [7.0], "epoc": [2.0]}).to_csv(
+            os.path.join(self.dir, "wide.csv"), index=False
+        )
+        tab = create_context(os.path.join(self.dir, "wide.csv"), name="wide")
         doc = self._doc(
             "readme.md",
-            "# Vars\n\nmass – wet body mass\n\nOxygen debt (epoc) was logged each trial.\n",
+            "# Vars\n\nmass – wet body mass; tank – tank ID; pH – acclimation pH\n\n"
+            "Oxygen debt (epoc) was logged each trial.\n",
         )
         spy = _CountingReader()
-        cat = resolve_catalog(self.tab, sources=[doc], prose_reader=spy)
+        cat = resolve_catalog(tab, sources=[doc], prose_reader=spy)
         read_columns = {name for call in spy.calls for name in call[0]}
         self.assertEqual(read_columns, {"epoc"})             # 'mass' never handed to the reader
-        self.assertEqual(cat.get("mass").link_method, "lexical_prose")
+        self.assertEqual(cat.get("mass").link_method, "text_codebook")
         self.assertEqual(cat.get("epoc").link_method, "prose_read")
 
     # --- LLM reader over narrative prose, whole-doc (short doc) path -------
@@ -938,8 +1077,8 @@ class ProseReaderTierTest(unittest.TestCase):
     # --- batched, cached call shape (cost control for an expensive reader) ---
 
     def test_reader_reads_all_residual_columns_in_one_call(self):
-        # Two columns defined in a reversed shape (regex-invisible); both residual. In the
-        # whole-doc (short) path the reader is handed the doc once, covering both columns.
+        # Two columns defined in narrative; both residual. In the whole-doc (short) path
+        # the reader is handed the doc once, covering both columns.
         doc = self._doc(
             "m.md",
             "# M\n\nWet body mass (mass) was recorded. Oxygen debt (epoc) was logged.\n",
@@ -954,7 +1093,7 @@ class ProseReaderTierTest(unittest.TestCase):
     def test_cached_reader_reads_each_chunk_once_including_negatives(self):
         spy = _CountingReader()
         cached = CachedProseReader(spy)
-        chunk = "mass – wet body mass"
+        chunk = "Wet body mass (mass) was recorded."
         # 'mass' resolves; 'foo' abstains — the cache must remember *both*.
         first = cached.read_many(columns=[("mass", "float"), ("foo", "float")], chunk=chunk)
         self.assertEqual(first["mass"].description, "wet body mass")
@@ -967,9 +1106,9 @@ class ProseReaderTierTest(unittest.TestCase):
         self.assertEqual(second["mass"].description, "wet body mass")
 
     def test_bundle_hoist_reads_the_doc_once_across_tables(self):
-        # Two tables each have a residual 'mass' (reversed def, regex-invisible). The
-        # bundle-level hoist unions them into ONE pass over the shared doc, so the doc is
-        # read once for the whole bundle — even without a cache.
+        # Two tables each have a residual 'mass' (defined in narrative). The bundle-level
+        # hoist unions them into ONE pass over the shared doc, so the doc is read once for
+        # the whole bundle — even without a cache.
         pd.DataFrame({"mass": [1.0, 2.0]}).to_csv(os.path.join(self.dir, "t1.csv"), index=False)
         pd.DataFrame({"mass": [3.0, 4.0]}).to_csv(os.path.join(self.dir, "t2.csv"), index=False)
         t1 = create_context(os.path.join(self.dir, "t1.csv"), name="t1")
@@ -978,8 +1117,8 @@ class ProseReaderTierTest(unittest.TestCase):
         spy = _CountingReader()  # uncached: the hoist alone gives the single call
         cat = resolve_bundle([t1, t2], sources=[doc], prose_reader=spy)
         self.assertEqual(len(spy.calls), 1)                  # hoisted union, one chunk
-        self.assertEqual(cat.find("mass", "t1").description, "Wet body mass")
-        self.assertEqual(cat.find("mass", "t2").description, "Wet body mass")
+        self.assertEqual(cat.find("mass", "t1").description, "wet body mass")
+        self.assertEqual(cat.find("mass", "t2").description, "wet body mass")
 
 
 if __name__ == "__main__":

@@ -6,8 +6,8 @@ and cross-checking each borrowed claim against the column's actual values. This 
 standard-agnostic: it describes the data, independent of any metadata schema.
 
 This example resolves a bundle and prints, per column: the resolved meaning, *how*
-it was resolved (structured dictionary > prose > value prior), the confidence, the
-citation, and any conflicts or corroboration surfaced along the way.
+it was resolved (codebook table > glossary or prose read > value prior), the
+confidence, the citation, and any conflicts or corroboration surfaced along the way.
 
 Usage:
 
@@ -18,11 +18,9 @@ Usage:
     python examples/resolve_catalog.py --bundle data/sample/sharetrait_preprocessed/TRADAT031
     python examples/resolve_catalog.py --bundle mydir --dictionary variables.csv
 
-    # add the deterministic retrieve-then-read prose tier (reads a *cued* definition)
-    python examples/resolve_catalog.py --prose-reader
-
-    # read free *narrative* prose with the configured LLM (reads what the deterministic
-    # tiers can't); --doc restricts to one document, e.g. a natural-language readme
+    # read free *narrative* prose with the configured LLM (reads what no codebook,
+    # table or glossary, covers); --doc restricts to one document, e.g. a
+    # natural-language readme
     python examples/resolve_catalog.py --doc readme_hard.txt --llm-reader
 
     # add --debug to log every LLM prompt and raw response (and surface an error the
@@ -52,7 +50,6 @@ from src.context import create_context
 from src.router import (
     CachedProseReader,
     Catalog,
-    DeterministicProseReader,
     LLMProseReader,
     NONE,
     ProseReader,
@@ -108,7 +105,7 @@ def _logging_invoke(model, console: Console):
 
 
 def build_reader(args, console: Console) -> Tuple[ProseReader | None, str]:
-    """Pick the prose reader from the flags. --llm-reader wins over --prose-reader.
+    """Pick the prose reader from the flags: the LLM reader with --llm-reader, else none.
 
     The LLM reader is built from the provider, model, and temperature on ``args``
     (each defaulting to the repo's configuration) and wrapped in CachedProseReader
@@ -134,8 +131,6 @@ def build_reader(args, console: Console) -> Tuple[ProseReader | None, str]:
         )
         label = f"llm {settings.describe()}"
         return CachedProseReader(reader), f"{label} (debug)" if args.debug else label
-    if args.prose_reader:
-        return DeterministicProseReader(), "deterministic"
     return None, "off"
 
 
@@ -153,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
         "Input", "The bundle, and which of its discovered sources to resolve from."
     )
     tier = ap.add_argument_group(
-        "Prose tiers", "Which readers run above the codebook and the value prior."
+        "Prose reader", "Whether a model reads the narrative no codebook covers."
     )
     model = ap.add_argument_group(
         "Model", "Backing the LLM prose reader; each defaults to this module's configuration."
@@ -163,12 +158,9 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--dictionary", action="append", default=None,
                     help="codebooks to use, by filename (repeatable). Omit to use every "
                          f"codebook found in the bundle; pass '{NONE}' to use none")
-    tier.add_argument("--prose-reader", action="store_true",
-                    help="enable the deterministic retrieve-then-read prose tier (reads a "
-                         "cued definition) above the glossary regex")
     tier.add_argument("--llm-reader", action="store_true",
                     help="enable the LLM prose reader (reads free narrative) using the "
-                         "configured model; wins over --prose-reader")
+                         "configured model, for columns no codebook covers")
     source.add_argument("--doc", action="append", default=None,
                     help="documents to use, by filename (repeatable). Omit to use every "
                          f"document found in the bundle; pass '{NONE}' to use none")

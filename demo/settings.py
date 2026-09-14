@@ -39,9 +39,8 @@ from src.topology import EXECUTION_TOPOLOGIES
 #: The prose tiers layer 3 can run above the codebook lookup and the value prior,
 #: in increasing order of what they can read — and of what they cost.
 PROSE_TIERS = {
-    "off": "Structured codebooks and the value prior only. No prose is read.",
-    "deterministic": "Retrieve-then-read: finds a *cued* definition. No model call.",
-    "llm": "Reads free narrative with the catalog reader's model.",
+    "off": "Codebooks — tables, or glossaries in a README — and the value prior. No model call.",
+    "llm": "Also reads the narrative no codebook covers, with the catalog reader's model.",
 }
 
 #: Where the panel's widgets keep their state.
@@ -112,7 +111,6 @@ class PipelineSettings:
         """Starting values for ``examples/resolve_catalog.py``'s form, by ``dest``."""
         model = self.model_for("CATALOG_RESOLVER")
         return {
-            "prose_reader": self.catalog_prose_tier == "deterministic",
             "llm_reader": self.catalog_prose_tier == "llm",
             # There are no prompts to log unless a model is the one reading.
             "debug": self.catalog_debug and self.catalog_prose_tier == "llm",
@@ -131,7 +129,6 @@ class PipelineSettings:
         catalog = self.model_for("CATALOG_RESOLVER")
         reader = self.model_for("FIELD_READER")
         return {
-            "prose_reader": self.catalog_prose_tier == "deterministic",
             "llm_reader": self.catalog_prose_tier == "llm",
             "catalog_provider": catalog.provider,
             "catalog_model": catalog.model,

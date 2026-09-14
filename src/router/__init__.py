@@ -25,7 +25,6 @@ model and may be wrong, so its every answer is refereed by code.
 from src.router.catalog import (
     CachedProseReader,
     Catalog,
-    DeterministicProseReader,
     LLMProseReader,
     ProseReader,
     ReadResult,
@@ -61,7 +60,6 @@ __all__ = [
     "select",
     "CachedProseReader",
     "Catalog",
-    "DeterministicProseReader",
     "FieldPlan",
     "FieldRouting",
     "FieldReader",
