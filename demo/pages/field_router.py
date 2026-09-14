@@ -1,56 +1,94 @@
 """Streamlit page for the field router example.
 
 The router starts from the schema's fields and routes each to whatever can answer
-it, then compiles that routing into an executable plan. This page runs the example
-that exercises that path and renders what it produced.
+it, then compiles that routing into an executable plan. It routes a catalog the
+catalog resolver page already resolved, so this page is the router alone: until that
+page has run, there is nothing here to route.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import streamlit as st
+
 from demo import settings as pipeline_settings
 from demo.components.arg_form import Defaults
-from demo.components.bundle_controls import (
-    CODEBOOKS,
-    DOCUMENTS,
-    bundle_picker,
-    render_tree,
-    source_picker,
-)
+from demo.components.bundle_controls import render_tree
 from demo.components.example_runner import run_example
 from demo.components.router_view import render_router_view
+from demo.pages import catalog_resolver
 from examples import field_router_plan
+from src.router import ResolvedBundle
 
 
 KEY = "field_router"
+TITLE = "Field router"
 
 
 def main() -> None:
     """Render the field router page."""
-    render_tree(KEY)
+    upstream = catalog_resolver.last_resolution()
+    if upstream is None:
+        st.title(TITLE)
+        st.info(
+            "The router routes a resolved catalog. Run the **Catalog resolver** "
+            "first; its catalog, and the bundle files it came from, are routed here."
+        )
+        return
+
+    resolved, resolver_command = upstream
+    render_tree(resolved.root)
     settings = pipeline_settings.current()
     run_example(
         field_router_plan,
         key=KEY,
         script="examples/field_router_plan.py",
-        title="Field router",
+        title=TITLE,
         intro=(
-            "Fill a metadata standard field by field: resolve every table into one "
-            "catalog, route each schema field to whatever answers it, and compile the "
-            "routing into a plan whose extraction is grouped per table. A field "
-            "nothing can answer is flagged here, before extraction."
+            "Fill a metadata standard field by field: route each schema field of the "
+            "resolved catalog to whatever answers it, and compile the routing into a "
+            "plan whose extraction is grouped per table. A field nothing can answer is "
+            "flagged here, before extraction."
         ),
-        overrides={
-            "bundle": bundle_picker,
-            "dictionary": source_picker(CODEBOOKS),
-            "doc": source_picker(DOCUMENTS),
-        },
+        overrides={"catalog": _catalog_input(resolved)},
         defaults=Defaults(
             settings.router_arguments(),
             token=settings.token(),
             note=pipeline_settings.FORM_NOTE,
         ),
-        render=lambda result: render_router_view(result, key=KEY),
+        inputs={"resolved": resolved},
+        preceding_command=f"{resolver_command} --out {catalog_resolver.RESOLUTION_FILE}",
+        render=lambda result: _render(result, resolved),
+        layout=[["Input", "Metadata standard", "Routing"], ["Field reader model"]],
+        enabled_by={"Field reader model": "field_reader"},
     )
+
+
+def _catalog_input(resolved: ResolvedBundle):
+    """The ``--catalog`` widget: not a choice, a statement of what will be routed."""
+    def widget(action, key) -> Path:
+        catalog = resolved.catalog
+        described = sum(1 for c in catalog.columns if c.link_method != "none")
+        st.markdown(f"**Catalog** — `{resolved.root.name}`")
+        st.caption(
+            f"From the catalog resolver: {described}/{len(catalog.columns)} columns "
+            f"described across {len(resolved.tables)} tables · prose reader "
+            f"{resolved.reader} · documents "
+            f"{', '.join(p.name for p in resolved.documents) or 'none'}"
+        )
+        # What the command line names; the run itself is handed the resolution.
+        return Path(catalog_resolver.RESOLUTION_FILE)
+    return widget
+
+
+def _render(result: field_router_plan.RouterResult, current: ResolvedBundle) -> None:
+    if result.resolved is not current:
+        st.warning(
+            "The catalog has been resolved again since this routing ran. "
+            "Run again to route the current catalog."
+        )
+    render_router_view(result, key=KEY)
 
 
 if __name__ == "__main__":

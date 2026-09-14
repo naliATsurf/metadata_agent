@@ -70,6 +70,7 @@ def render_form(
     key_prefix: str,
     overrides: dict[str, WidgetOverride] | None = None,
     defaults: Defaults | None = None,
+    disabled: Callable[[argparse.Action], bool] | None = None,
 ) -> argparse.Namespace:
     """Render one widget per parser argument and collect the results.
 
@@ -79,6 +80,8 @@ def render_form(
             showing similar arguments do not collide.
         overrides: Optional per-``dest`` widget replacements.
         defaults: Optional starting values, replacing the parser's own.
+        disabled: Optional predicate: an argument it holds true for is shown greyed
+            out. It still returns its value; it only cannot be changed.
 
     Returns:
         A namespace holding a value for every argument the parser defines.
@@ -95,7 +98,10 @@ def render_form(
         values[action.dest] = (
             override(action, key)
             if override
-            else _render_action(action, key, defaults.default_for(action))
+            else _render_action(
+                action, key, defaults.default_for(action),
+                disabled=bool(disabled and disabled(action)),
+            )
         )
     return argparse.Namespace(**values)
 
@@ -154,35 +160,35 @@ def _render_value(value: Any) -> str:
     return shlex.quote(str(value))
 
 
-def _render_action(action: argparse.Action, key: str, default: Any) -> Any:
+def _render_action(
+    action: argparse.Action, key: str, default: Any, *, disabled: bool = False
+) -> Any:
     """Render the widget that matches ``action``'s kind and return its value."""
     label = _label(action)
     help_text = action.help or None
+    common = {"help": help_text, "key": key, "disabled": disabled}
 
     if _is_flag_action(action):
-        return st.checkbox(label, value=bool(default), help=help_text, key=key)
+        return st.checkbox(label, value=bool(default), **common)
 
     if isinstance(action, argparse._CountAction):
         return int(
-            st.number_input(
-                label, min_value=0, value=int(default or 0),
-                step=1, help=help_text, key=key,
-            )
+            st.number_input(label, min_value=0, value=int(default or 0), step=1, **common)
         )
 
     if isinstance(action, argparse._AppendAction) or action.nargs in ("*", "+"):
-        return _render_multi(action, key, label, help_text, default)
+        return _render_multi(action, label, default, common)
 
     if action.choices:
         options = list(action.choices)
         index = options.index(default) if default in options else 0
-        return st.selectbox(label, options, index=index, help=help_text, key=key)
+        return st.selectbox(label, options, index=index, **common)
 
-    return _render_scalar(action, key, label, help_text, default)
+    return _render_scalar(action, label, default, common)
 
 
 def _render_multi(
-    action: argparse.Action, key: str, label: str, help_text: str | None, default: Any
+    action: argparse.Action, label: str, default: Any, common: dict[str, Any]
 ) -> list[Any]:
     """Render a repeatable argument as one value per line."""
     default = default or []
@@ -190,31 +196,28 @@ def _render_multi(
         f"{label} (one per line)",
         value="\n".join(str(item) for item in default),
         height=80,
-        help=help_text,
-        key=key,
+        **common,
     )
     items = [line.strip() for line in raw.splitlines() if line.strip()]
     return [_coerce(action, item) for item in items]
 
 
 def _render_scalar(
-    action: argparse.Action, key: str, label: str, help_text: str | None, default: Any
+    action: argparse.Action, label: str, default: Any, common: dict[str, Any]
 ) -> Any:
     """Render a single-value argument, honouring its declared ``type``."""
     if action.type in (int, float):
         value = st.number_input(
             label,
             value=action.type(default if default is not None else 0),
-            help=help_text,
-            key=key,
+            **common,
         )
         return action.type(value)
 
     raw = st.text_input(
         label,
         value="" if default is None else str(default),
-        help=help_text,
-        key=key,
+        **common,
     ).strip()
     if not raw:
         return default

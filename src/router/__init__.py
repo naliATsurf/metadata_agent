@@ -33,7 +33,7 @@ from src.router.catalog import (
     resolve_bundle,
     resolve_catalog,
 )
-from src.router.bundle import NONE, Bundle, discover_bundle, select
+from src.router.bundle import NONE, Bundle, ResolvedBundle, discover_bundle, select
 from src.router.compile import compile_field_plan
 from src.router.display import (
     METHOD_LABELS,
@@ -56,6 +56,7 @@ __all__ = [
     "METHOD_LABELS",
     "NONE",
     "Bundle",
+    "ResolvedBundle",
     "discover_bundle",
     "select",
     "CachedProseReader",

@@ -8,6 +8,10 @@ records findings from an investigation that changed no code.
 ## 2026-09
 
 - -
+  **[2026-09-14 — The router routes a resolution; it does not resolve](2026-09-14_router-handoff.change.md)**
+  — `ResolvedBundle` hands a catalog and its source files from layer 3 to layer 4; the
+  router page is gated on a catalog run and routes it in memory.
+- -
   **[2026-09-14 — A glossary is accepted on its structure, not its separators](2026-09-14_text-codebook.change.md)**
   — the glossary regex and `DeterministicProseReader` replaced by a text codebook: runs of
   entries keyed on the schema, ranked below a codebook table; isolated matches go to the
@@ -82,6 +86,9 @@ records findings from an investigation that changed no code.
 :maxdepth: 1
 :hidden:
 
+2026-09-14_router-handoff.change
+2026-09-14_text-codebook.change
+2026-09-11_pipeline-settings.change
 2026-09-03_premature-commitment.analysis
 2026-09-01_router-ui-and-vocabulary.change
 2026-08-31_demo-module-pages.change

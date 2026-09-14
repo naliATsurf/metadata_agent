@@ -1,32 +1,29 @@
-"""Example: build a field-driven extraction plan for a dataset bundle.
+"""Example: route a resolved catalog into a field-driven extraction plan.
 
-Runs the field-driven pipeline end to end, deterministically and with no LLM calls:
+The router's half of the field-driven pipeline, deterministic and with no LLM calls
+unless a field reader is asked for:
 
-    resolve_bundle   →  route_fields  →  compile_field_plan
-    (layer 3)           (layer 4)        (layer 5)
+    (layer 3, examples/resolve_catalog.py)  →  route_fields  →  compile_field_plan
+                                               (layer 4)        (layer 5)
 
-A real repository is **many tables** — the fields of one schema are answered by
-columns in *different* CSVs (a dataset table, a measurement table, a taxonomy
-table). This resolves *every* data table into one catalog spanning all their
-columns (`resolve_bundle`), routes each schema field to whichever table's column
-(or document span) answers it, and compiles the routing into a `Plan` whose
-extraction tasks are grouped per table.
+It starts from a *resolution* — the catalog examples/resolve_catalog.py saves, together
+with the bundle files it was resolved from — rather than resolving again, so the two
+stages are run, inspected, and varied separately. A real repository is **many tables**:
+the fields of one schema are answered by columns in *different* CSVs, so each field is
+routed to whichever table's column (or document span) answers it, and the routing is
+compiled into a `Plan` whose extraction tasks are grouped per table.
 
 Usage:
 
-    # default: the sharetrait bundle + the sharetrait_basic standard
-    python examples/field_router_plan.py
+    # resolve once, then route the saved resolution
+    python examples/resolve_catalog.py --out catalog.json
+    python examples/field_router_plan.py --catalog catalog.json
 
-    # any bundle + standard; mark codebook CSVs as dictionaries (sources, not tables)
-    python examples/field_router_plan.py --bundle data/tests/router_test \\
-        --standard field_router_test --dictionary codebook.csv
+    # another standard, with a model adjudicating which candidate answers each field
+    python examples/field_router_plan.py --catalog catalog.json \\
+        --standard field_router_test --field-reader
 
-    # read the columns the codebook does not define out of narrative prose (layer 3),
-    # then let a model adjudicate which candidate answers each field (layer 4b)
-    python examples/field_router_plan.py --llm-reader --field-reader
-
-Every CSV in the bundle is treated as a data table unless named with --dictionary;
-.md / .txt files are documents (prose definitions + a narrative surface).
+The documents routed against are the ones the catalog was resolved from.
 """
 
 from __future__ import annotations
@@ -49,17 +46,10 @@ from rich.console import Console
 from src.context import create_context
 from src.core.schemas import Plan
 from src.router import (
-    NONE,
-    CachedProseReader,
-    Catalog,
     FieldPlan,
-    LLMProseReader,
-    ProseReader,
+    ResolvedBundle,
     compile_field_plan,
-    discover_bundle,
-    resolve_bundle,
     route_fields,
-    select,
 )
 from src.config import llm_settings, PROVIDER_CONFIGS
 from src.router.rerank import FieldReader, LLMFieldReader
@@ -68,7 +58,6 @@ from src.standards import METADATA_STANDARDS, get_schema_for_standard
 REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / "data" / "sample_output"
 
-DEFAULT_BUNDLE = REPO / "data/sample/sharetrait_preprocessed/TRADAT031"
 DEFAULT_STANDARD = "sharetrait_basic"
 
 #: Which per-module LLM configuration the field reader draws from. Set
@@ -76,39 +65,26 @@ DEFAULT_STANDARD = "sharetrait_basic"
 #: in .env to point it somewhere other than the global default.
 LLM_MODULE = "FIELD_READER"
 
-#: The catalog's prose reader is the *same* stage this example's layer 3 runs as
-#: examples/resolve_catalog.py, so it draws on the same configuration rather than
-#: a router-specific one: a model good enough to read a README there is good
-#: enough here.
-CATALOG_MODULE = "CATALOG_RESOLVER"
-
 
 def build_plan(
-    tables: List[Path], dicts: List[Path], docs: List[Path], standard: str,
-    prose_reader: ProseReader | None = None,
+    resolved: ResolvedBundle,
+    standard: str,
     candidates: int = 5,
     field_reader: FieldReader | None = None,
     veto: bool = True,
-) -> Tuple[Catalog, FieldPlan, Plan]:
-    """The core: resolve the whole bundle → route → compile."""
+) -> Tuple[FieldPlan, Plan]:
+    """The core: route the resolved catalog → compile."""
     schema = get_schema_for_standard(standard)
     if schema is None:
         raise SystemExit(f"Unknown standard {standard!r}.")
 
-    table_ctx = [create_context(str(p), name=p.stem) for p in tables]
-    doc_ctx = [create_context(str(p), name=p.stem) for p in docs]
-    dict_ctx = [create_context(str(p), name=p.stem) for p in dicts]
-    # Codebooks and documents describe columns wherever they live, so they are
-    # offered to every table's resolution.
-    sources = dict_ctx + doc_ctx
-
-    catalog = resolve_bundle(table_ctx, sources=sources, prose_reader=prose_reader)  # layer 3
+    doc_ctx = [create_context(str(p), name=p.stem) for p in resolved.documents]
     field_plan = route_fields(                                     # layer 4 (+ 4b)
-        schema, catalog=catalog, docs=doc_ctx, k=candidates, reader=field_reader,
-        veto=veto,
+        schema, catalog=resolved.catalog, docs=doc_ctx, k=candidates,
+        reader=field_reader, veto=veto,
     )
     plan = compile_field_plan(field_plan)                          # layer 5
-    return catalog, field_plan, plan
+    return field_plan, plan
 
 
 # ---------------------------------------------------------------------------
@@ -121,22 +97,9 @@ def _yaml(obj) -> str:
     return yaml.safe_dump(json.loads(json.dumps(obj, default=str)), sort_keys=False, width=100)
 
 
-def print_catalog(catalog: Catalog, console: Console) -> None:
-    """The resolved columns across every table."""
-    console.print("\n[bold]1. Resolved catalog (columns across all tables)[/]")
-    console.print(f"{'table':<16}{'column':<24}{'method':<22}{'conf':<7}meaning", style="dim")
-    for c in catalog.columns:
-        meaning = c.description or "(unresolved)"
-        console.print(
-            f"{c.resource:<16}{c.name:<24}{c.link_method:<22}{c.link_confidence:<7}{meaning}"
-        )
-        for msg in c.conflicts:
-            console.print(f"{'':<16}conflict: {msg}", style="yellow")
-
-
 def print_routing(field_plan: FieldPlan, console: Console) -> None:
     """Which table, column, or document span answers each schema field."""
-    console.print("\n[bold]2. Field routing (which table/column answers each field)[/]")
+    console.print("\n[bold]1. Field routing (which table/column answers each field)[/]")
     console.print(f"{'field':<28}{'bucket':<22}{'assurance':<10}source", style="dim")
     for path, r in field_plan.routings.items():
         console.print(f"{path:<28}{r.bucket:<22}{r.assurance:<10}{_source_of(r)}")
@@ -157,7 +120,7 @@ def _source_of(routing) -> str:
 
 def print_plan(plan: Plan, console: Console) -> None:
     """The compiled plan: one extraction task per table."""
-    console.print("\n[bold]3. Compiled plan (one extraction task per table)[/]")
+    console.print("\n[bold]2. Compiled plan (one extraction task per table)[/]")
     for i, t in enumerate(plan.steps):
         scope = t.target_resources or ["<context>"]
         console.print(
@@ -170,7 +133,7 @@ def print_plan(plan: Plan, console: Console) -> None:
 class RouterResult:
     """Everything one run produced, for a caller that renders it itself."""
 
-    catalog: Catalog
+    resolved: ResolvedBundle
     field_plan: FieldPlan
     plan: Plan
     standard: str
@@ -179,10 +142,10 @@ class RouterResult:
 def build_parser() -> argparse.ArgumentParser:
     """The example's argument surface, built separately so a UI can render it."""
     ap = argparse.ArgumentParser(
-        description="Build a field-driven plan for a multi-table bundle."
+        description="Route a resolved catalog into a field-driven plan."
     )
     source = ap.add_argument_group(
-        "Input", "The bundle, and which of its discovered sources to resolve from."
+        "Input", "The resolution to route: a catalog and the files it came from."
     )
     target = ap.add_argument_group(
         "Metadata standard", "The schema whose fields are routed."
@@ -190,29 +153,16 @@ def build_parser() -> argparse.ArgumentParser:
     routing = ap.add_argument_group(
         "Routing", "How many candidates the router keeps per field."
     )
-    tier = ap.add_argument_group(
-        "Prose reader", "Whether a model reads the narrative no codebook covers."
-    )
     model = ap.add_argument_group(
         "Field reader model",
         "Backing --field-reader; each defaults to that module's configuration.",
     )
-    catalog_model = ap.add_argument_group(
-        "Catalog reader model",
-        "Backing --llm-reader; each defaults to the catalog resolver's configuration.",
-    )
 
-    source.add_argument("--bundle", type=Path, default=DEFAULT_BUNDLE,
-                        help="bundle directory")
+    source.add_argument("--catalog", type=Path, required=True,
+                        help="a resolution saved by examples/resolve_catalog.py --out")
     target.add_argument("--standard", default=DEFAULT_STANDARD,
                         choices=sorted(METADATA_STANDARDS),
                         help="metadata standard whose fields are routed")
-    source.add_argument("--dictionary", action="append", default=None,
-                        help="codebooks to use, by filename (repeatable). Omit to use every "
-                             f"codebook found in the bundle; pass '{NONE}' to use none")
-    source.add_argument("--doc", action="append", default=None,
-                        help="documents to use, by filename (repeatable). Omit to use every "
-                             f"document found in the bundle; pass '{NONE}' to use none")
     routing.add_argument("--candidates", type=int, default=5,
                          help="how many ranked candidates to keep per field. The router "
                               "proposes a set and the executor picks from it, so this is "
@@ -221,9 +171,6 @@ def build_parser() -> argparse.ArgumentParser:
                          help="let an LLM decide which candidate answers each field, or "
                               "none of them. Without it rank 1 wins on BM25 score, which "
                               "over-answers when schema and data were authored apart")
-    tier.add_argument("--llm-reader", action="store_true",
-                      help="read free narrative with the catalog reader's model, for "
-                           "columns no codebook, table or glossary, resolves")
 
     configured = llm_settings(LLM_MODULE)
     model.add_argument("--provider", choices=list(PROVIDER_CONFIGS),
@@ -242,39 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="ask about every field separately instead of grouping "
                             "fields offered identical candidates. Slower, but each "
                             "field is judged independently")
-
-    catalog_configured = llm_settings(CATALOG_MODULE)
-    catalog_model.add_argument(
-        "--catalog-provider", choices=list(PROVIDER_CONFIGS),
-        default=catalog_configured.provider,
-        help=f"provider backing --llm-reader (default: {catalog_configured.provider})")
-    catalog_model.add_argument(
-        "--catalog-model", default=catalog_configured.model,
-        help=f"model backing --llm-reader (default: {catalog_configured.model})")
-    catalog_model.add_argument(
-        "--catalog-temperature", type=float, default=catalog_configured.temperature,
-        help="sampling temperature for --llm-reader (default: "
-             f"{catalog_configured.temperature})")
     return ap
-
-
-def build_prose_reader(args: argparse.Namespace) -> Tuple[ProseReader | None, str]:
-    """Build layer 3's prose reader from the flags, and a label naming what reads.
-
-    ``--llm-reader`` reads narrative no codebook covers; without it no reader runs. The
-    reader is cached, so a document is read once no matter how many of the bundle's
-    tables are resolved against it.
-    """
-    if args.llm_reader:
-        from src.config import create_llm_for   # lazy: pulls provider SDKs when used
-
-        settings = llm_settings(
-            CATALOG_MODULE, provider=args.catalog_provider, model=args.catalog_model,
-            temperature=args.catalog_temperature,
-        )
-        reader = LLMProseReader.from_chat_model(create_llm_for(CATALOG_MODULE, **vars(settings)))
-        return CachedProseReader(reader), f"llm {settings.describe()}"
-    return None, "off"
 
 
 def build_field_reader(args: argparse.Namespace) -> Tuple[FieldReader | None, str]:
@@ -303,51 +218,45 @@ def build_field_reader(args: argparse.Namespace) -> Tuple[FieldReader | None, st
     return reader, f"{settings.describe()} ({detail})"
 
 
-def run(args: argparse.Namespace, console: Console) -> RouterResult:
-    """Resolve, route, and compile, reporting through ``console``.
+def run(
+    args: argparse.Namespace,
+    console: Console,
+    resolved: ResolvedBundle | None = None,
+) -> RouterResult:
+    """Route and compile, reporting through ``console``.
 
-    Returns what it built as well, so a caller can render the routing itself rather
-    than read the printed tables.
+    The resolution is read from ``args.catalog``, unless a caller that already holds
+    one in memory passes it as ``resolved`` — the UI hands on the catalog its resolver
+    page produced, without a file in between. Returns what it built as well, so a
+    caller can render the routing itself rather than read the printed tables.
     """
-    if not args.bundle.exists() or not any(args.bundle.iterdir()):
-        raise SystemExit(
-            f"Bundle {args.bundle} is missing or empty. Put the data table(s) there "
-            f"(plus any codebook / README), then rerun."
-        )
-    try:
-        bundle = discover_bundle(args.bundle)
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
-
-    dicts = select(bundle.codebooks, args.dictionary)
-    docs = select(bundle.documents, args.doc)
-    reader, reader_label = build_prose_reader(args)
+    if resolved is None:
+        if not args.catalog.is_file():
+            raise SystemExit(
+                f"No resolution at {args.catalog}. Save one with "
+                f"examples/resolve_catalog.py --out {args.catalog}, then rerun."
+            )
+        resolved = ResolvedBundle.load(args.catalog)
     field_reader, field_reader_label = build_field_reader(args)
 
-    console.print(f"[bold]bundle:[/] {args.bundle}")
+    console.print(f"[bold]bundle:[/] {resolved.root}")
     console.print(f"standard: {args.standard}")
-    console.print(f"tables:   {[p.name for p in bundle.tables]}")
     console.print(
-        f"sources:  dictionaries={[p.name for p in dicts] or 'none'}  "
-        f"docs={[p.name for p in docs] or 'none'}  "
-        f"prose-reader={reader_label}  candidates={args.candidates}\n"
-        f"          field-reader={field_reader_label}"
+        f"catalog:  {len(resolved.catalog.columns)} columns from "
+        f"{[p.name for p in resolved.tables]}  (prose reader: {resolved.reader})"
     )
-    excluded = [
-        p.name for p in (*bundle.codebooks, *bundle.documents) if p not in (*dicts, *docs)
-    ]
-    if excluded:
-        console.print(f"[dim]discovered but not used: {excluded}[/]")
+    console.print(
+        f"docs:     {[p.name for p in resolved.documents] or 'none'}  "
+        f"candidates={args.candidates}  field-reader={field_reader_label}"
+    )
 
-    catalog, field_plan, plan = build_plan(
-        bundle.tables, dicts, docs, args.standard,
-        prose_reader=reader, candidates=args.candidates, field_reader=field_reader,
+    field_plan, plan = build_plan(
+        resolved, args.standard, candidates=args.candidates, field_reader=field_reader,
     )
-    print_catalog(catalog, console)
     print_routing(field_plan, console)
     print_plan(plan, console)
 
-    return RouterResult(catalog, field_plan, plan, args.standard)
+    return RouterResult(resolved, field_plan, plan, args.standard)
 
 
 def write_artifacts(result: RouterResult, console: Console) -> List[Path]:

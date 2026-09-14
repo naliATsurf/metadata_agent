@@ -212,6 +212,18 @@ class ResolvedColumn:
             "alternatives": self.alternatives,
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ResolvedColumn":
+        """Rebuild a column from :meth:`to_dict`'s output."""
+        value_range = data.get("value_range")
+        return cls(**{
+            **data,
+            "value_range": tuple(value_range) if value_range else None,
+            "conflicts": list(data.get("conflicts") or []),
+            "corroborated_by": list(data.get("corroborated_by") or []),
+            "alternatives": list(data.get("alternatives") or []),
+        })
+
 
 @dataclass
 class Catalog:
@@ -270,6 +282,15 @@ class Catalog:
 
     def to_dict(self) -> Dict[str, Any]:
         return {"resource": self.resource, "columns": [c.to_dict() for c in self.columns]}
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Catalog":
+        """Rebuild a catalog from :meth:`to_dict`'s output, so a resolution made once
+        can be routed later, elsewhere, without resolving again."""
+        return cls(
+            resource=data["resource"],
+            columns=[ResolvedColumn.from_dict(c) for c in data["columns"]],
+        )
 
 
 # ---------------------------------------------------------------------------

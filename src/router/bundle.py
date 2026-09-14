@@ -8,16 +8,22 @@ bundle's column names), so classification needs nothing declared about a bundle.
 
 That is what production wants. :func:`select` is the other half, for a caller that
 wants to resolve a *subset* — a UI comparing inputs, or a run isolating one source.
+
+:class:`ResolvedBundle` is what leaves resolution: the catalog together with the files
+it was resolved from. Routing needs both — the catalog to rank columns, the documents
+to rank spans — so the two travel as one value, and a catalog can be resolved once and
+routed later, elsewhere, from a file.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from src.context import create_context
-from src.router.catalog import looks_like_dictionary
+from src.router.catalog import Catalog, looks_like_dictionary
 
 
 #: Passed to :func:`select` to use none of a source kind. A filename could never be
@@ -89,3 +95,53 @@ def select(discovered: List[Path], chosen: Optional[List[str]]) -> List[Path]:
     if NONE in {n.lower() for n in names}:
         return []
     return [p for p in discovered if p.name in names]
+
+
+@dataclass(frozen=True)
+class ResolvedBundle:
+    """A resolved catalog and the bundle files it was resolved from — layer 3's output.
+
+    ``codebooks`` and ``documents`` are the sources the resolution *used*, which may be
+    a subset of what the bundle holds (:func:`select`). The router reads the same
+    documents the catalog was resolved against, so a routing never quietly draws on a
+    source the catalog did not see. ``reader`` names the prose reader that ran, so a
+    saved resolution records what produced it.
+    """
+
+    root: Path
+    tables: List[Path]
+    codebooks: List[Path]
+    documents: List[Path]
+    reader: str
+    catalog: Catalog
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "root": str(self.root),
+            "tables": [str(p) for p in self.tables],
+            "codebooks": [str(p) for p in self.codebooks],
+            "documents": [str(p) for p in self.documents],
+            "reader": self.reader,
+            "catalog": self.catalog.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ResolvedBundle":
+        return cls(
+            root=Path(data["root"]),
+            tables=[Path(p) for p in data["tables"]],
+            codebooks=[Path(p) for p in data["codebooks"]],
+            documents=[Path(p) for p in data["documents"]],
+            reader=data["reader"],
+            catalog=Catalog.from_dict(data["catalog"]),
+        )
+
+    def save(self, path: Path) -> Path:
+        """Write this resolution as JSON, for a later :meth:`load`."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.to_dict(), indent=1, default=str))
+        return path
+
+    @classmethod
+    def load(cls, path: Path) -> "ResolvedBundle":
+        return cls.from_dict(json.loads(Path(path).read_text()))

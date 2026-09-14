@@ -13,7 +13,6 @@ from typing import Any
 
 import streamlit as st
 
-from demo.components.catalog_view import render_catalog_view
 from demo.components.table_columns import column_chooser
 
 
@@ -75,7 +74,9 @@ _ROUTING_COLUMNS = {
 
 
 def render_router_view(result: Any, *, key: str) -> None:
-    """Render coverage, the per-field routing, the compiled plan, and the catalog.
+    """Render coverage, the per-field routing, and the compiled plan.
+
+    The catalog routed over is not repeated here; it is the catalog resolver page's.
 
     Args:
         result: The example's ``RouterResult``.
@@ -85,9 +86,9 @@ def render_router_view(result: Any, *, key: str) -> None:
     _render_coverage(coverage, result)
 
     # Keyed, because st.tabs resets to the first tab on every rerun otherwise — so
-    # changing a filter inside the catalog tab would bounce the view back to routing.
-    routing_tab, plan_tab, catalog_tab = st.tabs(
-        ["Field routing", "Compiled plan", "Resolved catalog"],
+    # changing a filter inside a tab would bounce the view back to the first one.
+    routing_tab, plan_tab = st.tabs(
+        ["Field routing", "Compiled plan"],
         key=f"{key}.tab",
         on_change="rerun",
     )
@@ -95,8 +96,6 @@ def render_router_view(result: Any, *, key: str) -> None:
         _render_routings(result.field_plan, key=key)
     with plan_tab:
         _render_plan(result.plan, key)
-    with catalog_tab:
-        render_catalog_view(result.catalog, key=f"{key}.catalog")
 
 
 def _render_coverage(coverage: dict[str, Any], result: Any) -> None:

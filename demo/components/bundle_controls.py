@@ -1,8 +1,8 @@
 """Controls for choosing a bundle and the sources within it.
 
-Every module page resolves *some* bundle, so the bundle picker, the per-kind source
-pickers, and the sidebar tree live here rather than in one page that another has to
-import from. Production classifies a bundle and uses all of it; these controls exist
+A module page that resolves a bundle picks it and its sources here, and any module
+page can show a bundle in the sidebar tree, so these live here rather than in one page
+that another has to import from. Production classifies a bundle and uses all of it; these controls exist
 so a page can narrow that down and compare inputs.
 """
 
@@ -82,14 +82,13 @@ def bundle_picker(action: argparse.Action, key: str) -> Path:
     return REPO / choice
 
 
-def render_tree(key: str) -> None:
-    """Show the selected bundle's classified contents in the sidebar.
+def render_tree(bundle: Path) -> None:
+    """Show ``bundle``'s classified contents in the sidebar.
 
-    Read from session state rather than the form, because the sidebar is drawn
-    before the form runs; on the first load nothing is set yet and the parser's
-    own default applies.
+    A page picking its bundle passes :func:`selected_bundle` — read from session state
+    rather than the form, because the sidebar is drawn before the form runs; a page
+    handed a resolution passes the bundle that resolution came from.
     """
-    bundle = Path(selected_bundle(key))
     try:
         found = discover_bundle(bundle)
     except ValueError as exc:

@@ -43,6 +43,10 @@ def run_example(
     defaults: Defaults | None = None,
     columns: int = 2,
     render: Callable[[Any], None] | None = None,
+    inputs: dict[str, Any] | None = None,
+    preceding_command: str | None = None,
+    layout: list[list[str]] | None = None,
+    enabled_by: dict[str, str] | None = None,
 ) -> None:
     """Render the form, run the example, and show its console output.
 
@@ -60,6 +64,15 @@ def run_example(
         render: Optional renderer for whatever ``run()`` returned. Given one,
             the page shows it and keeps the printed output as a fallback;
             without one, the printed output is all there is to show.
+        inputs: Values handed to ``run()`` as keyword arguments rather than parsed
+            from the form — what an earlier page produced, passed on in memory.
+        preceding_command: The command that produced those inputs, shown before
+            this page's own so the displayed commands still reproduce the run.
+        layout: Where the argument groups go: one list of group titles per column,
+            stacked top to bottom. Without it groups fill rows in declaration order.
+        enabled_by: Arguments that only mean something with a flag set, keyed by
+            group title or by argument ``dest``, valued by the flag's ``dest``.
+            They are shown greyed out while the flag is off.
     """
     parser = module.build_parser()
 
@@ -67,10 +80,13 @@ def run_example(
     st.caption(intro or parser.description or "")
 
     args = _render_arguments(
-        parser, key=key, overrides=overrides, defaults=defaults, columns=columns
+        parser, key=key, overrides=overrides, defaults=defaults, columns=columns,
+        layout=layout, disabled=_disabled_by(parser, key, defaults, enabled_by or {}),
     )
 
-    st.code(command_line(parser, args, script=script), language="bash")
+    command = command_line(parser, args, script=script)
+    shown = f"{preceding_command}\n{command}" if preceding_command else command
+    st.code(shown, language="bash")
     if defaults is not None and defaults.note:
         st.caption(defaults.note)
 
@@ -92,7 +108,10 @@ def run_example(
         clicked = st.button("Run", type="primary", width="stretch", key=f"{key}.run")
 
     if clicked:
-        st.session_state[f"{key}.output"] = _execute(module, args, width)
+        st.session_state[f"{key}.output"] = {
+            **_execute(module, args, width, inputs or {}),
+            "command": command,
+        }
 
     _render_output(st.session_state.get(f"{key}.output"), key=key, render=render)
 
@@ -102,6 +121,40 @@ def run_example(
 _GROUPS_PER_ROW = 3
 
 
+def _disabled_by(
+    parser: argparse.ArgumentParser,
+    key: str,
+    defaults: Defaults | None,
+    enabled_by: dict[str, str],
+) -> Callable[[argparse.Action], bool] | None:
+    """A predicate greying out the arguments whose enabling flag is off.
+
+    The flag is read from session state rather than from the form's collected values,
+    so the answer does not depend on whether the flag's widget happens to be drawn
+    before the arguments it controls. Before the first interaction the widget has no
+    state yet, and the flag's starting value applies.
+    """
+    if not enabled_by:
+        return None
+    defaults = defaults or Defaults()
+    actions = {action.dest: action for action in parser._actions}
+    group_of = {
+        action.dest: group.title
+        for group in _argument_groups(parser)
+        for action in group._group_actions
+    }
+
+    def flag_on(dest: str) -> bool:
+        state = st.session_state.get(defaults.key(key, dest))
+        return bool(defaults.default_for(actions[dest]) if state is None else state)
+
+    def disabled(action: argparse.Action) -> bool:
+        flag = enabled_by.get(action.dest) or enabled_by.get(group_of.get(action.dest))
+        return flag is not None and not flag_on(flag)
+
+    return disabled
+
+
 def _render_arguments(
     parser: argparse.ArgumentParser,
     *,
@@ -109,6 +162,8 @@ def _render_arguments(
     overrides: dict[str, WidgetOverride] | None,
     defaults: Defaults | None,
     columns: int,
+    layout: list[list[str]] | None = None,
+    disabled: Callable[[argparse.Action], bool] | None = None,
 ) -> argparse.Namespace:
     """Render the form, one bordered section per argument group.
 
@@ -123,6 +178,27 @@ def _render_arguments(
     ]
     values: dict[str, Any] = {}
 
+    if layout is not None:
+        by_title = {group.title: (group, actions) for group, actions in populated}
+        placed = [title for column in layout for title in column]
+        missing = set(by_title) - set(placed)
+        unknown = set(placed) - set(by_title)
+        if missing or unknown:
+            raise ValueError(
+                f"layout must place every argument group exactly by title; "
+                f"missing {sorted(missing)}, unknown {sorted(unknown)}"
+            )
+        for titles, column in zip(layout, st.columns(len(layout), gap="medium")):
+            with column:
+                for title in titles:
+                    group, actions = by_title[title]
+                    with st.container(border=True):
+                        _render_group_heading(group)
+                        values.update(vars(
+                            _render_actions(actions, key, overrides, defaults, 1, disabled)
+                        ))
+        return argparse.Namespace(**values)
+
     # Groups side by side, each one's arguments stacked under its title: the form
     # stays short instead of scrolling. Rows of at most `_GROUPS_PER_ROW`, because a
     # parser with many groups would otherwise squeeze them all into one row. A parser
@@ -133,7 +209,7 @@ def _render_arguments(
                 with column, st.container(border=True):
                     _render_group_heading(group)
                     values.update(
-                        vars(_render_actions(actions, key, overrides, defaults, 1))
+                        vars(_render_actions(actions, key, overrides, defaults, 1, disabled))
                     )
         return argparse.Namespace(**values)
 
@@ -141,7 +217,7 @@ def _render_arguments(
         with st.container(border=True):
             _render_group_heading(group)
             values.update(
-                vars(_render_actions(actions, key, overrides, defaults, columns))
+                vars(_render_actions(actions, key, overrides, defaults, columns, disabled))
             )
     return argparse.Namespace(**values)
 
@@ -191,12 +267,13 @@ def _render_actions(
     overrides: dict[str, WidgetOverride] | None,
     defaults: Defaults | None,
     columns: int,
+    disabled: Callable[[argparse.Action], bool] | None = None,
 ) -> argparse.Namespace:
     """Lay one group's arguments out across ``columns`` and collect their values."""
     if columns <= 1 or len(actions) == 1:
         return render_form(
             _parser_over(actions), key_prefix=key, overrides=overrides,
-            defaults=defaults,
+            defaults=defaults, disabled=disabled,
         )
 
     groups: list[list[argparse.Action]] = [[] for _ in range(columns)]
@@ -210,7 +287,7 @@ def _render_actions(
         with column:
             namespace = render_form(
                 _parser_over(subset), key_prefix=key, overrides=overrides,
-                defaults=defaults,
+                defaults=defaults, disabled=disabled,
             )
             values.update(vars(namespace))
     return argparse.Namespace(**values)
@@ -227,14 +304,16 @@ def _parser_over(actions: list[argparse.Action]) -> argparse.ArgumentParser:
     return view
 
 
-def _execute(module: ModuleType, args: argparse.Namespace, width: int) -> dict[str, Any]:
+def _execute(
+    module: ModuleType, args: argparse.Namespace, width: int, inputs: dict[str, Any]
+) -> dict[str, Any]:
     """Run the example, capturing its console output and any failure."""
     console = recording_console(width=width)
     error: str | None = None
     result: Any = None
     with st.spinner("Running…"):
         try:
-            result = module.run(args, console)
+            result = module.run(args, console, **inputs)
         except SystemExit as exc:
             # The examples use SystemExit to report bad input from the CLI.
             error = str(exc) or "The example exited."

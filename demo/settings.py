@@ -122,17 +122,12 @@ class PipelineSettings:
     def router_arguments(self) -> dict[str, Any]:
         """Starting values for ``examples/field_router_plan.py``'s form, by ``dest``.
 
-        The router resolves a catalog before it routes, so it takes both stages'
-        settings: the prose tier and its model for layer 3, the field reader and
-        its model for layer 4b.
+        The router routes a catalog the resolver page already resolved, so it takes
+        only its own settings: the candidate budget, and the field reader and its
+        model for layer 4b.
         """
-        catalog = self.model_for("CATALOG_RESOLVER")
         reader = self.model_for("FIELD_READER")
         return {
-            "llm_reader": self.catalog_prose_tier == "llm",
-            "catalog_provider": catalog.provider,
-            "catalog_model": catalog.model,
-            "catalog_temperature": catalog.temperature,
             "candidates": self.router_candidates,
             "field_reader": self.router_field_reader,
             "reader_workers": self.router_reader_workers,

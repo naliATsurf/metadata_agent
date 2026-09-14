@@ -88,9 +88,14 @@ class TestExampleArguments(unittest.TestCase):
     fails here rather than silently ceasing to be configurable.
     """
 
-    def parse(self, parser: argparse.ArgumentParser, arguments: dict) -> argparse.Namespace:
-        """The example's defaults, overridden by ``arguments``, as it would see them."""
-        namespace = parser.parse_args([])
+    def parse(
+        self, parser: argparse.ArgumentParser, arguments: dict, required: tuple = ()
+    ) -> argparse.Namespace:
+        """The example's defaults, overridden by ``arguments``, as it would see them.
+
+        ``required`` supplies the command-line arguments the parser insists on.
+        """
+        namespace = parser.parse_args(list(required))
         for dest, value in arguments.items():
             self.assertTrue(
                 hasattr(namespace, dest), f"no argument named {dest!r}"
@@ -116,7 +121,7 @@ class TestExampleArguments(unittest.TestCase):
         chosen = settings(catalog_prose_tier="off", catalog_debug=True)
         self.assertFalse(chosen.catalog_arguments()["debug"])
 
-    def test_router_carries_both_stages(self):
+    def test_router_carries_only_its_own_stage(self):
         chosen = settings(
             catalog_prose_tier="llm",
             router_candidates=8,
@@ -125,11 +130,11 @@ class TestExampleArguments(unittest.TestCase):
             router_reader_batch=False,
         )
         args = self.parse(
-            field_router_plan.build_parser(), chosen.router_arguments()
+            field_router_plan.build_parser(), chosen.router_arguments(),
+            required=("--catalog", "catalog.json"),
         )
-        # Layer 3: the catalog's reader and the model behind it.
-        self.assertTrue(args.llm_reader)
-        self.assertEqual(args.catalog_model, "catalog-model")
+        # Layer 3 is the resolver page's: the router routes its catalog, not its settings.
+        self.assertFalse(hasattr(args, "llm_reader"))
         # Layer 4b: the field reader, its model, and how its calls are issued.
         self.assertTrue(args.field_reader)
         self.assertEqual(args.model, "reader-model")

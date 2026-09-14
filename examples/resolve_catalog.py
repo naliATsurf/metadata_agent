@@ -31,6 +31,10 @@ Usage:
     # falling back to the global LLM_PROVIDER / LLM_MODEL), overridable per run
     python examples/resolve_catalog.py --llm-reader --provider openai --model gpt-4o-mini
     python examples/resolve_catalog.py --llm-reader --temperature 0.2
+
+    # save the resolution, for the field router to route without resolving again
+    python examples/resolve_catalog.py --out catalog.json
+    python examples/field_router_plan.py --catalog catalog.json
 """
 
 from __future__ import annotations
@@ -48,11 +52,12 @@ from rich.console import Console
 from src.config import PROVIDER_CONFIGS, llm_settings
 from src.context import create_context
 from src.router import (
+    Bundle,
     CachedProseReader,
-    Catalog,
     LLMProseReader,
     NONE,
     ProseReader,
+    ResolvedBundle,
     discover_bundle,
     render_catalog,
     select,
@@ -68,17 +73,20 @@ DEFAULT_BUNDLE = REPO / "data/sample/sharetrait_preprocessed/TRADAT031"
 
 
 def resolve(
-    tables: List[Path],
+    bundle: Bundle,
     dicts: List[Path],
     docs: List[Path],
     prose_reader: ProseReader | None = None,
-) -> Catalog:
-    """Resolve one or many data tables against the codebooks / documents."""
-    table_ctx = [create_context(str(p), name=p.stem) for p in tables]
+    reader_label: str = "off",
+) -> ResolvedBundle:
+    """Resolve the bundle's data tables against the chosen codebooks / documents."""
+    table_ctx = [create_context(str(p), name=p.stem) for p in bundle.tables]
     sources = [create_context(str(p), name=p.stem) for p in (*dicts, *docs)]
     if len(table_ctx) == 1:
-        return resolve_catalog(table_ctx[0], sources=sources, prose_reader=prose_reader)
-    return resolve_bundle(table_ctx, sources=sources, prose_reader=prose_reader)
+        catalog = resolve_catalog(table_ctx[0], sources=sources, prose_reader=prose_reader)
+    else:
+        catalog = resolve_bundle(table_ctx, sources=sources, prose_reader=prose_reader)
+    return ResolvedBundle(bundle.root, bundle.tables, dicts, docs, reader_label, catalog)
 
 
 def _logging_invoke(model, console: Console):
@@ -151,7 +159,8 @@ def build_parser() -> argparse.ArgumentParser:
         "Prose reader", "Whether a model reads the narrative no codebook covers."
     )
     model = ap.add_argument_group(
-        "Model", "Backing the LLM prose reader; each defaults to this module's configuration."
+        "LLM prose reader model",
+        "Backing --llm-reader; each defaults to this module's configuration.",
     )
 
     source.add_argument("--bundle", type=Path, default=DEFAULT_BUNDLE, help="bundle directory")
@@ -167,6 +176,9 @@ def build_parser() -> argparse.ArgumentParser:
     tier.add_argument("--debug", action="store_true",
                     help="with --llm-reader, log each prompt and raw model response (and "
                          "surface an error the reader would otherwise swallow)")
+    source.add_argument("--out", type=Path, default=None,
+                    help="write the resolution as JSON, for examples/field_router_plan.py "
+                         "--catalog")
     # This module's configured model, as the flags' defaults — so --help and the
     # UI show what a run would actually use, and an override is visibly an override.
     configured = llm_settings(LLM_MODULE)
@@ -182,13 +194,13 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def run(args: argparse.Namespace, console: Console) -> Catalog:
+def run(args: argparse.Namespace, console: Console) -> ResolvedBundle:
     """Resolve the bundle described by ``args`` and print the evidence to ``console``.
 
     Everything is written through ``console``, so a caller can pass a
     ``Console(record=True)`` and capture the whole run instead of printing it.
-    The resolved catalog is returned as well, for callers that would rather
-    render it themselves than read the printed table.
+    The resolution is returned as well — the catalog and the files it came from —
+    for callers that render it themselves or hand it on to the router.
     """
     if not args.bundle.exists() or not any(args.bundle.iterdir()):
         raise SystemExit(f"Bundle {args.bundle} is missing or empty.")
@@ -211,13 +223,18 @@ def run(args: argparse.Namespace, console: Console) -> Catalog:
         console.print(f"[dim]discovered but not used: {excluded}[/]")
     console.print("")
 
-    catalog = resolve(tables, dicts, docs, prose_reader=reader)
-    render_catalog(catalog, console)
-    return catalog
+    resolved = resolve(bundle, dicts, docs, prose_reader=reader, reader_label=reader_kind)
+    render_catalog(resolved.catalog, console)
+    return resolved
 
 
 def main() -> None:
-    run(build_parser().parse_args(), Console())
+    args, console = build_parser().parse_args(), Console()
+    resolved = run(args, console)
+    # Written here, not in run(): producing a file is a command-line act, and a UI
+    # driving run() hands the resolution on in memory.
+    if args.out:
+        console.print(f"\nWrote {resolved.save(args.out)}.")
 
 
 if __name__ == "__main__":

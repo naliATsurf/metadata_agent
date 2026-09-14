@@ -16,12 +16,12 @@ from eval.labels import ALTERNATIVE_SEP, UNANSWERABLE, load_labels, score
 from eval.score import report
 from eval.sheet import write_sheet, write_sources
 from examples.field_router_plan import (
-    DEFAULT_BUNDLE,
     DEFAULT_STANDARD,
     LLM_MODULE,
     build_field_reader,
     build_plan,
 )
+from examples.resolve_catalog import DEFAULT_BUNDLE, resolve
 from src.config import PROVIDER_CONFIGS, llm_settings
 from src.router.bundle import NONE, discover_bundle, select
 from src.standards import METADATA_STANDARDS
@@ -75,10 +75,13 @@ def build_parser() -> argparse.ArgumentParser:
 def run(args: argparse.Namespace, console: Console) -> Path:
     bundle = discover_bundle(args.bundle)
     reader, label = build_field_reader(args)
-    catalog, field_plan, _ = build_plan(
-        bundle.tables,
+    resolved = resolve(
+        bundle,
         select(bundle.codebooks, args.dictionary),
         select(bundle.documents, args.doc),
+    )
+    field_plan, _ = build_plan(
+        resolved,
         args.standard,
         candidates=args.candidates,
         field_reader=reader,
@@ -96,7 +99,7 @@ def run(args: argparse.Namespace, console: Console) -> Path:
         return sheet
 
     written, fresh = write_sheet(field_plan, args.standard, sheet, args.candidates)
-    sources = write_sources(catalog, field_plan, out / "sources.csv")
+    sources = write_sources(resolved.catalog, field_plan, out / "sources.csv")
     if not fresh:
         console.print(
             f"[yellow]{sheet.name} already has labels — wrote {written.name} instead "
