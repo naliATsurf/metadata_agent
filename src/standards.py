@@ -451,6 +451,17 @@ STANDARD_DEFINITIONS: Dict[str, Dict[str, Dict[str, Any]]] = {
     },
 }
 
+# ShareTrait "basic" without the per-measurement trait fields. `trait_name`,
+# `trait_value` and `trait_unit` describe one row of a long-format trait table, so
+# on wide data their answer is "every measurement column" — a column role, not a
+# meaning any retrieval can match. Derived rather than copied so the two stay in step.
+_NO_TRAIT_FIELDS = {"trait_name", "trait_value", "trait_unit"}
+STANDARD_DEFINITIONS["sharetrait_basic_no_trait"] = {
+    name: spec
+    for name, spec in STANDARD_DEFINITIONS["sharetrait_basic"].items()
+    if name not in _NO_TRAIT_FIELDS
+}
+
 
 def _to_model_name(standard_name: str) -> str:
     return "".join(part.capitalize() for part in standard_name.split("_")) + "Metadata"
