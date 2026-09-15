@@ -956,6 +956,54 @@ class ProseReaderTierTest(unittest.TestCase):
         self.assertEqual(col.link_confidence, "low")
         self.assertTrue(any("unconfirmed" in m for m in col.conflicts))
 
+    # --- several reads of one column: unconfirmed evidence stays low -------------
+
+    def _two_reads(self, first, second):
+        """Resolve 'mass' from two short files, read in order, with scripted replies."""
+        docs = [
+            self._doc("a.txt", "Mass is the fish mass in grams.\n"),
+            self._doc("b.txt", "Mass was weighed to the nearest gram.\n"),
+        ]
+        replies = iter([{"mass": first}, {"mass": second}])
+        reader = LLMProseReader(lambda prompt: json.dumps(next(replies)))
+        return resolve_catalog(self.tab, sources=docs, prose_reader=reader).get("mass")
+
+    def test_a_found_quote_is_chosen_over_an_unconfirmed_one(self):
+        col = self._two_reads(
+            {"description": "body weight", "units": "g", "quote": "not in the file"},
+            {"description": "fish mass", "units": "g",
+             "quote": "Mass was weighed to the nearest gram."},
+        )
+        self.assertEqual(col.description, "fish mass")
+        self.assertIn("b", col.link_evidence)
+        self.assertFalse(any("unconfirmed" in m for m in col.conflicts))
+
+    def test_unconfirmed_reads_that_disagree_stay_low(self):
+        col = self._two_reads(
+            {"description": "body weight", "units": "g", "quote": "not in the file"},
+            {"description": "fish mass", "units": "g", "quote": "not in this one either"},
+        )
+        self.assertEqual(col.link_confidence, "low")          # not raised to medium
+        self.assertTrue(any("unconfirmed" in m for m in col.conflicts))
+        self.assertTrue(any("sources disagree" in m for m in col.conflicts))
+
+    def test_an_unconfirmed_read_does_not_corroborate(self):
+        col = self._two_reads(
+            {"description": "fish mass", "units": "g",
+             "quote": "Mass is the fish mass in grams."},
+            {"description": "fish mass", "units": "g", "quote": "not in the file"},
+        )
+        self.assertEqual(col.corroborated_by, [])
+        self.assertEqual(col.link_confidence, "high")         # its own grounding grade
+
+    def test_unconfirmed_reads_that_agree_stay_low(self):
+        col = self._two_reads(
+            {"description": "fish mass", "units": "g", "quote": "not in the file"},
+            {"description": "fish mass", "units": "g", "quote": "not in this one either"},
+        )
+        self.assertEqual(col.link_confidence, "low")          # not raised to high
+        self.assertEqual(col.corroborated_by, [])
+
     def test_locate_tolerates_reflowed_whitespace(self):
         # The model returns the sentence with collapsed spacing; a re-flowed newline in
         # the source must still locate (not be misread as a paraphrase → unfair demotion).
@@ -1106,6 +1154,44 @@ class ProseReaderTierTest(unittest.TestCase):
         self.assertEqual(set(spy.calls[0][0]), {"mass", "epoc"})   # both columns batched
         self.assertEqual(cat.get("mass").link_method, "prose_read")
         self.assertEqual(cat.get("epoc").link_method, "prose_read")
+
+    # --- long-doc path: retrieved chunks packed into passages --------------
+
+    _MANUSCRIPT = (
+        "Wet body mass (mass) was recorded.\n\n"
+        "Fish were held in flow-through tanks under a natural photoperiod.\n\n"
+        "Water was replaced weekly and temperature logged hourly.\n\n"
+        "Oxygen debt (epoc) was logged.\n"
+    )
+
+    def _assert_cited_exactly(self, col, doc):
+        text = doc.read_text(doc.resources[0])
+        start, end = map(int, col.link_evidence.rsplit("#", 1)[1].split("-"))
+        self.assertEqual(text[start:end], col.link_quote)
+
+    def test_long_doc_reads_retrieved_chunks_in_one_passage(self):
+        # Two columns retrieve two different paragraphs. Packed, they are one call over
+        # both columns, and each read is still cited to its own paragraph's offsets.
+        doc = self._doc("methods.md", self._MANUSCRIPT)
+        spy = _CountingReader()
+        with patch("src.router.catalog._WHOLE_DOC_MAX_CHARS", 50):   # force the localize path
+            cat = resolve_catalog(self.tab, sources=[doc], prose_reader=spy)
+        self.assertEqual(len(spy.calls), 1)
+        self.assertEqual(set(spy.calls[0][0]), {"mass", "epoc"})
+        self.assertNotIn("photoperiod", spy.calls[0][1])     # only retrieved chunks are sent
+        for name in ("mass", "epoc"):
+            self.assertEqual(cat.get(name).link_method, "prose_read")
+            self._assert_cited_exactly(cat.get(name), doc)
+
+    def test_passages_split_at_the_budget(self):
+        doc = self._doc("methods.md", self._MANUSCRIPT)
+        spy = _CountingReader()
+        with patch("src.router.catalog._WHOLE_DOC_MAX_CHARS", 50), \
+             patch("src.router.catalog._PASSAGE_MAX_CHARS", 60):     # room for one paragraph
+            cat = resolve_catalog(self.tab, sources=[doc], prose_reader=spy)
+        self.assertEqual([set(columns) for columns, _ in spy.calls], [{"mass"}, {"epoc"}])
+        for name in ("mass", "epoc"):
+            self._assert_cited_exactly(cat.get(name), doc)
 
     def test_cached_reader_reads_each_chunk_once_including_negatives(self):
         spy = _CountingReader()

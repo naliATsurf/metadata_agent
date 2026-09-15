@@ -8,6 +8,10 @@ records findings from an investigation that changed no code.
 ## 2026-09
 
 - -
+  **[2026-09-15 — A long document is read in packed passages, not chunk by chunk](2026-09-15_packed-prose-reads.change.md)**
+  — retrieved chunks are packed into passages of up to 20 000 characters, one LLM call
+  each; `readme_long.txt` goes from 19 calls to 2.
+- -
   **[2026-09-14 — The field reader is the LLM candidate judge](2026-09-14_candidate-judge.change.md)**
   — layer 4b renamed for what it does: judge whether any routed candidate answers a
   field, including that none does.

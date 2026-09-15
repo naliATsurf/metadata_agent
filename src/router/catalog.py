@@ -81,7 +81,7 @@ manuscript, and they take different paths in the same run:
   One call per file, and a column whose name never appears verbatim is still read.
 - **too long** — the localized path (:func:`_localized_reads`): BM25 retrieval first
   places each column in the top ``_PROSE_READ_K`` chunks, and only those spans are
-  read. One call per retrieved chunk.
+  read, packed into passages of up to ``_PASSAGE_MAX_CHARS``. One call per passage.
 
 The localized path degrades the reader *silently*, for a reason worth stating
 plainly: **localization is lexical, and the whole reason to reach for a reader is
@@ -594,8 +594,8 @@ def _as_text_codebook(
 # against the verbatim quote the reader cites:
 #
 #   1. **Localize** — a short file goes whole; a long one is BM25-ranked chunk by chunk
-#      on the column token, so the definition is found in a 20-page manuscript at a
-#      cost of (k chunks x reader), not document length.
+#      on the column token, so the definition is found in a 20-page manuscript and
+#      only the retrieved chunks are read, not the whole document.
 #   2. **Read** — the reader returns a description, units, and its supporting quote,
 #      or omits the column; abstention is first-class.
 #
@@ -611,14 +611,15 @@ def _as_text_codebook(
 # bundle, not once per table. Together these bound an expensive reader's cost to the
 # genuinely-opaque tail, read in one hoisted pass.
 #
-# **Call shape (batched + cached).** Within that pass a naive per-(column, chunk) loop
-# is still the worst pattern for an LLM: one round-trip per column per chunk. But
-# definitions cluster — a manuscript's Methods section defines many columns in the same
-# paragraphs — so the retriever is **chunk-major**: it maps each distinct retrieved
-# chunk to the columns that reached it and calls the reader **once per chunk** over all
-# of them (`ProseReader.read_many`). Cost scales with *distinct retrieved chunks*, not
-# column count. `CachedProseReader` memoizes by (column, chunk) — negatives included —
-# so re-runs are free.
+# **Call shape (packed + cached).** Within that pass a naive per-(column, chunk) loop
+# is the worst pattern for an LLM: one round-trip per column per chunk. One call per
+# retrieved chunk is not much better — a 34k-character README retrieved 19 distinct
+# paragraphs for 23 columns, 19 calls sending as much text as the whole file. So the
+# retrieved chunks are **packed** in document order into passages of up to
+# `_PASSAGE_MAX_CHARS`, and the reader is called **once per passage** over every column
+# that retrieved a chunk in it (`ProseReader.read_many`). Cost scales with the *text
+# retrieved*, not with chunk or column count. `CachedProseReader` memoizes by
+# (column, passage) — negatives included — so re-runs are free.
 
 
 @dataclass(frozen=True)
@@ -864,8 +865,40 @@ def _ground_read(
 
 
 # Chunks retrieved per column before reading — enough to survive a mis-ranked top
-# hit, small enough to stay doc-scale (cost is k reads per unresolved column).
+# hit, small enough to stay doc-scale.
 _PROSE_READ_K = 3
+
+# Most text handed to the reader in one localized call. Retrieved chunks are packed
+# into passages up to this, so a manuscript costs calls in proportion to the text
+# retrieved, not to its column count. The same size as a file read whole: a passage
+# is never larger than a document the reader would take in one go.
+_PASSAGE_MAX_CHARS = 20_000
+
+# Between packed chunks. They need not be adjacent in the document, so a blank line
+# keeps one from running into the next.
+_PASSAGE_SEPARATOR = "\n\n"
+
+
+def _pack_passages(indices: List[int], chunks: List[TextChunk]) -> List[List[int]]:
+    """Group chunk ``indices``, in order, into runs whose joined text fits the budget.
+
+    A chunk longer than :data:`_PASSAGE_MAX_CHARS` is a passage on its own. It is not
+    split: a chunk is the span a citation's offsets point into.
+    """
+    passages: List[List[int]] = []
+    current: List[int] = []
+    size = 0
+    for i in indices:
+        added = len(chunks[i].text) + (len(_PASSAGE_SEPARATOR) if current else 0)
+        if current and size + added > _PASSAGE_MAX_CHARS:
+            passages.append(current)
+            current, added = [], len(chunks[i].text)
+            size = 0
+        current.append(i)
+        size += added
+    if current:
+        passages.append(current)
+    return passages
 
 
 def _batch_prose_reads(
@@ -875,15 +908,24 @@ def _batch_prose_reads(
     *,
     k: int = _PROSE_READ_K,
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Retrieve each column's top-``k`` chunks, then read them **chunk-major**.
+    """Retrieve each column's top-``k`` chunks, then read them **packed into passages**.
 
     Retrieval is per column (BM25 over every chunk of every document by the column
-    token), but reading is grouped: each distinct retrieved chunk is read **once**,
-    over all columns that reached it (:meth:`ProseReader.read_many`), so an expensive
-    backend pays one call per chunk rather than per (column, chunk). Returns, per
-    column, the ranked candidate reads (description/units/confidence + the chunk's own
-    offset as citation) — the exact shape :func:`_resolve_column` folds in as
-    ``prose_read`` candidates, so ordering and content match the per-column path.
+    token). Reading is not: the distinct retrieved chunks are packed, in document
+    order, into passages of up to :data:`_PASSAGE_MAX_CHARS`
+    (:func:`_pack_passages`), and each passage is read once over every column that
+    retrieved a chunk in it (:meth:`ProseReader.read_many`). An expensive backend pays
+    per retrieved text, not per chunk or per column, and a column is read at most once
+    per passage.
+
+    A read is grounded in the chunk its quote is found in — the column's own retrieved
+    chunks first, in rank order — so a citation's offsets stay offsets into the
+    document. A quote found in none of them (paraphrased, or spanning two packed
+    chunks) is cited to the column's best-ranked chunk in the passage, unconfirmed.
+
+    Returns, per column, its candidate reads ordered by the best retrieval rank each
+    passage held for it — the shape :func:`_resolve_column` folds in as ``prose_read``
+    candidates.
     """
     # Chunk once per document and reuse the tokenization across every column's query.
     chunks: List[TextChunk] = [c for source in sources for c in source.chunks()]
@@ -891,50 +933,50 @@ def _batch_prose_reads(
         return {}
     tokenized = [tokenize(c.text) for c in chunks]
 
-    # Per column: its top-k chunk indices (ranked). Per chunk: the columns that reached
-    # it — the batch each read_many call covers.
+    # Per column: its top-k chunk indices, best first.
     ranked_for: Dict[str, List[int]] = {}
-    cols_by_chunk: Dict[int, List[Tuple[str, str]]] = {}
-    for name, dtype in fields:
+    for name, _ in fields:
         query = content_terms(name)
         if not query:                  # opaque/stopword-only names (``la``) can't retrieve
             continue
         scores = bm25_scores(query, tokenized)
         top = sorted((i for i, s in enumerate(scores) if s > 0), key=lambda i: scores[i], reverse=True)[:k]
-        if not top:
-            continue
-        ranked_for[name] = top
-        for i in top:
-            bucket = cols_by_chunk.setdefault(i, [])
-            if (name, dtype) not in bucket:
-                bucket.append((name, dtype))
+        if top:
+            ranked_for[name] = top
 
-    # One batched read per distinct retrieved chunk.
-    reads_by_chunk: Dict[int, Dict[str, ReadResult]] = {
-        i: reader.read_many(columns=cols, chunk=chunks[i].text) for i, cols in cols_by_chunk.items()
+    # Chunks are pooled source by source, in order, so sorting indices is document order.
+    retrieved = sorted({i for top in ranked_for.values() for i in top})
+    found: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {}
+    for members in _pack_passages(retrieved, chunks):
+        inside = set(members)
+        columns = [(name, dtype) for name, dtype in fields if inside.intersection(ranked_for.get(name, ()))]
+        passage = _PASSAGE_SEPARATOR.join(chunks[i].text for i in members)
+        results = reader.read_many(columns=columns, chunk=passage)
+        for name, _ in columns:
+            result = results.get(name)
+            if not result:
+                continue
+            own = [i for i in ranked_for[name] if i in inside]
+            home = next(
+                (chunks[i] for i in own + [i for i in members if i not in own]
+                 if _locate(result.quote, chunks[i].text) is not None),
+                chunks[own[0]],
+            )
+            evidence, confidence, conflict, quote = _ground_read(
+                result, name, home.resource, home.start_offset, home.text
+            )
+            candidate = {
+                "description": result.description, "units": result.units,
+                "confidence": confidence, "evidence": evidence, "quote": quote,
+            }
+            if conflict:
+                candidate["conflict"] = conflict
+            found.setdefault(name, []).append((ranked_for[name].index(own[0]), candidate))
+
+    return {
+        name: [candidate for _, candidate in sorted(reads, key=lambda read: read[0])]
+        for name, reads in found.items()
     }
-
-    # Assemble each column's candidates in retrieval-rank order.
-    out: Dict[str, List[Dict[str, Any]]] = {}
-    for name, indices in ranked_for.items():
-        found: List[Dict[str, Any]] = []
-        for i in indices:
-            result = reads_by_chunk.get(i, {}).get(name)
-            if result:
-                chunk = chunks[i]
-                evidence, confidence, conflict, quote = _ground_read(
-                    result, name, chunk.resource, chunk.start_offset, chunk.text
-                )
-                candidate = {
-                    "description": result.description, "units": result.units,
-                    "confidence": confidence, "evidence": evidence, "quote": quote,
-                }
-                if conflict:
-                    candidate["conflict"] = conflict
-                found.append(candidate)
-        if found:
-            out[name] = found
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1170,8 +1212,8 @@ def _localized_reads(
 
     A manuscript cannot be handed to the reader whole (cost, and the definition is a
     needle in many pages), so the definition must be found first. Today this is token
-    BM25 retrieval (:func:`_batch_prose_reads`) — chunk-major and cheap, but it misses a
-    definition phrased without the column's literal name.
+    BM25 retrieval (:func:`_batch_prose_reads`), its hits packed into a few passages —
+    cheap, but it misses a definition phrased without the column's literal name.
 
     Deferred (sketch): a stronger localizer for a manuscript —
       * embedding retrieval with the query expanded by dtype and the value profile, so a
@@ -1361,7 +1403,7 @@ def _resolve_column(name, dtype, resource, profile, dictionaries, prose_reads=()
     ``dictionaries`` are the recognised codebooks, table and text alike; each proposes
     at its own method and base confidence. ``prose_reads`` are this column's reader
     candidates, precomputed in one batched pass (:func:`_read_residuals`) so an
-    expensive reader is called per chunk, not per column; empty when no reader ran.
+    expensive reader is called per passage, not per column; empty when no reader ran.
     """
     label = profile.get("label")
     candidates: List[_Candidate] = []
@@ -1424,27 +1466,36 @@ def _decide(name, dtype, resource, label, profile, candidates, ground_conflicts=
 
     top_rank = max(_TIER_RANK[c.method] for c in candidates)
     top = [c for c in candidates if _TIER_RANK[c.method] == top_rank]
+    ground_conflicts = ground_conflicts or {}
 
     def refuted(c: _Candidate) -> List[str]:
         return _cross_check(c.description, c.units, profile)
 
+    def unconfirmed(c: _Candidate) -> bool:
+        """A read whose supporting quote could not be found in its source."""
+        return c.evidence in ground_conflicts
+
     # The value profile is the referee: prefer candidates the values don't refute.
+    # Among those, a read whose quote was found beats one whose quote was not; source
+    # order breaks a remaining tie (the sort is stable).
     consistent = [c for c in top if not refuted(c)]
-    pool = consistent or top
-    chosen = pool[0]                       # source order breaks a remaining tie
+    pool = sorted(consistent or top, key=unconfirmed)
+    chosen = pool[0]
 
     # Corroboration is the positive counterpart of a conflict: any source, any
     # tier, that makes the *same* claim as the chosen one (verbatim for now;
     # semantic agreement of differently-worded descriptions needs an LLM). Its
     # citations are recorded so provenance can show who confirmed the resolution.
+    # A read with unconfirmed evidence repeats a claim without supporting it, so it
+    # does not corroborate.
     def agrees(c: _Candidate) -> bool:
         return (_norm(c.description), _norm(c.units)) == (_norm(chosen.description), _norm(chosen.units))
 
-    corroborators = [c for c in candidates if c is not chosen and agrees(c)]
+    corroborators = [c for c in candidates if c is not chosen and agrees(c) and not unconfirmed(c)]
     corroborated_by = [c.evidence for c in corroborators]
 
     conflicts: List[str] = list(refuted(chosen))   # the chosen claim's own value conflicts
-    if ground_conflicts and chosen.evidence in ground_conflicts:
+    if unconfirmed(chosen):
         conflicts.append(ground_conflicts[chosen.evidence])   # chosen read's quote unconfirmed
     for c in top:                                  # a same-tier claim the values rejected
         if c is not chosen:
@@ -1459,6 +1510,8 @@ def _decide(name, dtype, resource, label, profile, candidates, ground_conflicts=
 
     if refuted(chosen):
         confidence = "low"                 # the chosen claim is contradicted by the data
+    elif unconfirmed(chosen):
+        confidence = "low"                 # its evidence was not found; other reads cannot vouch for it
     elif any(c is not chosen and refuted(c) for c in top):
         confidence = "medium"              # the values adjudicated a same-tier conflict
     elif contested:

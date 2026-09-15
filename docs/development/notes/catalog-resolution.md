@@ -109,9 +109,11 @@ above a long README so the common natural-language case skips retrieval):
   unnecessary and harmful.
 - **A manuscript → `_localized_reads`**, today a pass-through to `_batch_prose_reads`:
   BM25 over every chunk of every document by the column token, top `_PROSE_READ_K` (3)
-  chunks per column, then reading grouped **chunk-major** — each distinct retrieved chunk
-  is read once over all columns that reached it, so an expensive backend pays one call per
-  chunk rather than per (column, chunk). A column whose name is opaque or stopword-only
+  chunks per column. The distinct retrieved chunks are then **packed** in document order
+  into passages of up to `_PASSAGE_MAX_CHARS` (20 000), and each passage is read once over
+  every column that retrieved a chunk in it — an expensive backend pays per retrieved
+  text, not per chunk or column. Each read is grounded in the chunk its quote is found in,
+  so citations stay document offsets. A column whose name is opaque or stopword-only
   (`la`) retrieves nothing and is skipped. A stronger localizer (embedding retrieval with
   the query expanded by dtype and value profile, heading-aware section preference) is
   deferred and marked `TODO(long-doc)`; the token retriever is the honest, limited stand-in.
@@ -124,6 +126,11 @@ citation (`resource#start-end`), the text as found in the document, and a grade 
 description's content words, else `medium`). A quote that cannot be located yields the
 coarse citation, `low` confidence, and a recorded conflict: the read may still be right, but
 its evidence is unconfirmed.
+
+When a column has several reads, `_decide` keeps that grade from being overridden: a read
+whose quote was found is chosen over one whose quote was not; a chosen unconfirmed read
+stays `low` even if other reads disagree or repeat it; and an unconfirmed read never counts
+as corroboration.
 
 ## Phase 3 — re-decide the residuals
 
