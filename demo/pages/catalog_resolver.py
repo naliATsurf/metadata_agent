@@ -83,8 +83,8 @@ def main() -> None:
     )
 
 
-def _render(resolved: ResolvedBundle) -> None:
-    render_catalog_view(resolved.catalog, key=KEY)
+def _render(resolved: ResolvedBundle, llm_calls: int) -> None:
+    render_catalog_view(resolved.catalog, key=KEY, llm_calls=llm_calls)
     st.download_button(
         "Download resolution",
         data=json.dumps(resolved.to_dict(), indent=1, default=str),

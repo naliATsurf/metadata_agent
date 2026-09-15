@@ -73,7 +73,7 @@ _ROUTING_COLUMNS = {
 }
 
 
-def render_router_view(result: Any, *, key: str) -> None:
+def render_router_view(result: Any, *, key: str, llm_calls: int = 0) -> None:
     """Render coverage, the per-field routing, and the compiled plan.
 
     The catalog routed over is not repeated here; it is the catalog resolver page's.
@@ -81,9 +81,10 @@ def render_router_view(result: Any, *, key: str) -> None:
     Args:
         result: The example's ``RouterResult``.
         key: Prefix for this view's widget keys.
+        llm_calls: LLM calls the routing made; shown among the tallies when any.
     """
     coverage = result.field_plan.coverage()
-    _render_coverage(coverage, result)
+    _render_coverage(coverage, result, llm_calls)
 
     # Keyed, because st.tabs resets to the first tab on every rerun otherwise — so
     # changing a filter inside a tab would bounce the view back to the first one.
@@ -98,13 +99,17 @@ def render_router_view(result: Any, *, key: str) -> None:
         _render_plan(result.plan, key)
 
 
-def _render_coverage(coverage: dict[str, Any], result: Any) -> None:
+def _render_coverage(coverage: dict[str, Any], result: Any, llm_calls: int) -> None:
     """The headline: how much of the standard the bundle can answer."""
     total = coverage["total"]
     routed = coverage["routed"]
     unanswered = coverage["unanswered"]
 
-    routed_col, unanswered_col, standard_col, tasks_col = st.columns(4)
+    routed_col, unanswered_col, standard_col, tasks_col, *llm_col = st.columns(
+        5 if llm_calls else 4
+    )
+    if llm_col:
+        llm_col[0].metric("LLM calls", llm_calls)
     routed_col.metric("Routed", f"{routed}/{total}")
     unanswered_col.metric(
         "Unanswered", len(unanswered),

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -266,8 +267,14 @@ class LLMCandidateJudge(CandidateJudge):
         if self._max_workers == 1 or len(groups) == 1:
             results = [self._run_group(group) for group in groups]
         else:
+            # Each group runs in a copy of the caller's context, so whatever the caller
+            # scoped around the judge (an LLM call count, a tracer) sees these calls.
+            contexts = [copy_context() for _ in groups]
             with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
-                results = list(pool.map(self._run_group, groups))
+                results = list(pool.map(
+                    lambda context, group: context.run(self._run_group, group),
+                    contexts, groups,
+                ))
         merged: Dict[str, Verdict] = {}
         for result in results:
             merged.update(result)

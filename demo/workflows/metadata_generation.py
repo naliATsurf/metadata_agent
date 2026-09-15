@@ -14,6 +14,7 @@ from src.config import (
     DEFAULT_TOPOLOGY,
 )
 from src.context import create_context
+from src.llm_calls import count_llm_calls
 from src.orchestrator import Orchestrator
 from src.standards import METADATA_STANDARDS, load_metadata_standard
 from src.topology import EXECUTION_TOPOLOGIES
@@ -116,7 +117,7 @@ def generate_metadata(
 
     temp_path = _write_upload_to_temp(file_name, file_bytes)
     try:
-        with _configured(environment):
+        with _configured(environment), count_llm_calls() as llm_calls:
             dataset_name = Path(file_name).stem
             metadata_standard = load_metadata_standard(standard_name)
             _publish_progress(progress_callback, "creating_context")
@@ -155,6 +156,7 @@ def generate_metadata(
 
             displayable_result = _to_displayable(result)
             displayable_result["generated_plan"] = plan_steps
+            displayable_result["llm_calls"] = llm_calls.calls
             _publish_progress(progress_callback, "execution_complete", displayable_result)
             return displayable_result
     finally:

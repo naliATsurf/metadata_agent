@@ -30,6 +30,7 @@ from demo.components.console_view import (
     recording_console,
     render_console_html,
 )
+from src.llm_calls import count_llm_calls
 
 
 def run_example(
@@ -42,7 +43,7 @@ def run_example(
     overrides: dict[str, WidgetOverride] | None = None,
     defaults: Defaults | None = None,
     columns: int = 2,
-    render: Callable[[Any], None] | None = None,
+    render: Callable[[Any, int], None] | None = None,
     inputs: dict[str, Any] | None = None,
     preceding_command: str | None = None,
     layout: list[list[str]] | None = None,
@@ -61,7 +62,8 @@ def run_example(
         defaults: Starting values for arguments the app already has an answer
             for, replacing the parser's own defaults.
         columns: How many columns to lay the argument widgets out in.
-        render: Optional renderer for whatever ``run()`` returned. Given one,
+        render: Optional renderer for whatever ``run()`` returned, called with that
+            result and the number of LLM calls the run made. Given one,
             the page shows it and keeps the printed output as a fallback;
             without one, the printed output is all there is to show.
         inputs: Values handed to ``run()`` as keyword arguments rather than parsed
@@ -311,7 +313,7 @@ def _execute(
     console = recording_console(width=width)
     error: str | None = None
     result: Any = None
-    with st.spinner("Running…"):
+    with st.spinner("Running…"), count_llm_calls() as llm_calls:
         try:
             result = module.run(args, console, **inputs)
         except SystemExit as exc:
@@ -324,6 +326,7 @@ def _execute(
         "html": console_html(console),
         "text": console_text(console),
         "error": error,
+        "llm_calls": llm_calls.calls,
     }
 
 
@@ -331,7 +334,7 @@ def _render_output(
     output: dict[str, Any] | None,
     *,
     key: str,
-    render: Callable[[Any], None] | None,
+    render: Callable[[Any, int], None] | None,
 ) -> None:
     """Show the last run's output, or a hint when there has not been one."""
     if output is None:
@@ -342,10 +345,13 @@ def _render_output(
         st.error(output["error"])
 
     if render is not None and output["result"] is not None:
-        render(output["result"])
+        render(output["result"], output.get("llm_calls", 0))
         with st.expander("Terminal output"):
             render_console_html(output["html"])
     else:
+        # No renderer to put the count among its tallies, so it goes above the output.
+        if output.get("llm_calls"):
+            st.metric("LLM calls", output["llm_calls"])
         render_console_html(output["html"])
 
     st.download_button(

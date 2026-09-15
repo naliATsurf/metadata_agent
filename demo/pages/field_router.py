@@ -59,7 +59,7 @@ def main() -> None:
         ),
         inputs={"resolved": resolved},
         preceding_command=f"{resolver_command} --out {catalog_resolver.RESOLUTION_FILE}",
-        render=lambda result: _render(result, resolved),
+        render=lambda result, llm_calls: _render(result, resolved, llm_calls),
         layout=[["Input", "Metadata standard", "Routing"], ["LLM candidate judge model"]],
         enabled_by={"LLM candidate judge model": "llm_candidate_judge"},
     )
@@ -82,13 +82,15 @@ def _catalog_input(resolved: ResolvedBundle):
     return widget
 
 
-def _render(result: field_router_plan.RouterResult, current: ResolvedBundle) -> None:
+def _render(
+    result: field_router_plan.RouterResult, current: ResolvedBundle, llm_calls: int
+) -> None:
     if result.resolved is not current:
         st.warning(
             "The catalog has been resolved again since this routing ran. "
             "Run again to route the current catalog."
         )
-    render_router_view(result, key=KEY)
+    render_router_view(result, key=KEY, llm_calls=llm_calls)
 
 
 if __name__ == "__main__":

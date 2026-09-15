@@ -316,11 +316,12 @@ def render_result(result: dict[str, Any]) -> None:
     step_results = result.get("step_results") or []
     with details_tab:
         timing = result.get("generation_timing") or {}
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("Plan steps", result.get("plan_steps_count", 0))
         col2.metric("Completed", result.get("steps_completed", 0))
         col3.metric("Success", "Yes" if result.get("success") else "No")
         col4.metric("Workflow time", f"{timing.get('total_seconds', 0):.1f}s")
+        col5.metric("LLM calls", result.get("llm_calls", "—"))
 
         if timing.get("steps"):
             st.dataframe(

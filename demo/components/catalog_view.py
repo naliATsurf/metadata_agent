@@ -23,19 +23,20 @@ _CONFIDENCE_MARK = {"high": "🟢 high", "medium": "🟡 medium", "low": "🟠 l
 _UNRESOLVED = "— unresolved"
 
 
-def render_catalog_view(catalog: Catalog, *, key: str) -> None:
+def render_catalog_view(catalog: Catalog, *, key: str, llm_calls: int = 0) -> None:
     """Render the summary, the filterable column table, and the conflicts.
 
     Args:
         catalog: The resolved catalog to display.
         key: Prefix for this view's widget keys.
+        llm_calls: LLM calls the resolution made; shown among the tallies when any.
     """
     columns = catalog.columns
     if not columns:
         st.info("The catalog resolved no columns.")
         return
 
-    _render_summary(columns)
+    _render_summary(columns, llm_calls)
     matching = _render_filters(columns, key=key)
     if not matching:
         st.caption("No columns match the current filters.")
@@ -48,13 +49,17 @@ def render_catalog_view(catalog: Catalog, *, key: str) -> None:
     _render_conflicts(columns, key)
 
 
-def _render_summary(columns: list[ResolvedColumn]) -> None:
+def _render_summary(columns: list[ResolvedColumn], llm_calls: int) -> None:
     """Show the headline tallies: how much resolved, how well, how contested."""
     resolved = [c for c in columns if c.link_method != "none"]
     high = [c for c in resolved if c.link_confidence == "high"]
     contested = [c for c in columns if c.conflicts]
 
-    resolved_col, high_col, conflict_col, source_col = st.columns(4)
+    resolved_col, high_col, conflict_col, source_col, *llm_col = st.columns(
+        5 if llm_calls else 4
+    )
+    if llm_col:
+        llm_col[0].metric("LLM calls", llm_calls)
     resolved_col.metric("Resolved", f"{len(resolved)}/{len(columns)}")
     high_col.metric("High confidence", len(high))
     conflict_col.metric("Conflicts", len(contested))
