@@ -16,11 +16,11 @@ column into a *described* column so the router's search can reach it. See
 
 | Function | Scope |
 |---|---|
-| `resolve_catalog(target, resource, sources, prose_reader)` | one data table |
-| `resolve_bundle(targets, sources, prose_reader)` | many tables → **one** catalog spanning all their columns |
+| `resolve_catalog(target, resource, sources, prose_reader, claim_comparer)` | one data table |
+| `resolve_bundle(targets, sources, prose_reader, claim_comparer)` | many tables → **one** catalog spanning all their columns |
 
-Both take the same auxiliary `sources` (the rest of the bundle) and an optional
-`prose_reader`. `resolve_bundle` is the real-repository case: the fields of one schema
+Both take the same auxiliary `sources` (the rest of the bundle), an optional
+`prose_reader`, and an optional `claim_comparer`. `resolve_bundle` is the real-repository case: the fields of one schema
 are answered by columns in *different* tables, so every `ResolvedColumn` keeps its
 `resource` and the router ranks a field against all tables at once.
 
@@ -55,16 +55,15 @@ that one table's columns; `resolve_bundle` passes *the whole bundle's* column na
 that, a bundle-wide codebook is mostly *other* tables' names from any single table's point of
 view and falls under the precision floor — so one shared codebook would be recognised nowhere.
 
-## Phase 1 — deterministic resolution, per table
+## Phase 1 — deterministic candidates, per table
 
-`_resolve_table_deterministic`, no LLM involved. It reads a **sample** of the table
+`_gather_table`, no LLM involved. It reads a **sample** of the table
 (`_PROFILE_SAMPLE` = 1000 rows — approximate stats are enough for a prior and for the
 refutation cross-check, and this keeps cost following the schema and the docs, not the
-row count), then for each column computes a value profile (`_value_profile`) and calls
-`_resolve_column`.
-
-`_resolve_column` **gathers every candidate before choosing any** — three assurance
-tiers, ranked by `_TIER_RANK`:
+row count), then for each column computes a value profile (`_value_profile`) and
+gathers its candidates (`_deterministic_candidates`). **Nothing is chosen yet**: every
+column is decided once, at the end (Phase 3), after the reader has added what it reads.
+Three assurance tiers, ranked by `_TIER_RANK`:
 
 | Tier | Rank | Source |
 |---|---|---|
@@ -72,26 +71,14 @@ tiers, ranked by `_TIER_RANK`:
 | `text_codebook` | 2 | an entry of an accepted glossary run, cited as a `resource#start-end` span; base confidence `medium`. Ranked below a table because a parse of text can split an entry wrongly where a cell cannot — the table wins a disagreement, and the text can only corroborate it |
 | `value_prior` | 1 | only the `_SELF_EVIDENT` labels — coordinates, parseable dates. Values genuinely identify nothing else: "numeric, [0.3, 8.7]" names neither pH nor biomass. The coordinate prior additionally requires the *name* to corroborate (`_looks_like_coordinate_name`), turning a guess into a name-plus-value agreement. |
 
-`_decide` then adjudicates:
-
-1. keep only the **highest tier present**;
-2. **the value profile referees** — drop any candidate `_cross_check` refutes; source
-   order breaks a remaining tie;
-3. record verbatim agreement from *any* source, any tier, as `corroborated_by`;
-   disagreement as `conflicts`; every loser as `alternatives`;
-4. grade confidence — refuted → `low`; values adjudicated a same-tier conflict, or
-   differing claims left unadjudicated → `medium`; corroborated → `high`; otherwise the
-   chosen source's own tier base.
-
-With **no candidates at all** the column **abstains** (`link_method="none"`, description
-left empty). This is a first-class outcome, not a failure path: a fabricated label is worse
-than an honest gap, and the abstention is exactly what gates the next phase.
+A column this leaves with **no candidates at all** is a *residual*: nothing describes it
+and its values cannot name it. It is what gates the next phase.
 
 ## Phase 2 — the reader pass, on residuals only
 
 `_read_residuals`, skipped entirely when no `prose_reader` was supplied.
 
-**Residual gating.** Only columns left `link_method == "none"` by Phase 1 are read, which
+**Residual gating.** Only columns Phase 1 left without a candidate are read, which
 keeps an expensive reader off every column a codebook, table or text, already resolved.
 
 **Bundle-level hoist.** Residual columns from *all* tables are unioned into a single pass,
@@ -127,19 +114,42 @@ description's content words, else `medium`). A quote that cannot be located yiel
 coarse citation, `low` confidence, and a recorded conflict: the read may still be right, but
 its evidence is unconfirmed.
 
-When a column has several reads, `_decide` keeps that grade from being overridden: a read
-whose quote was found is chosen over one whose quote was not; a chosen unconfirmed read
-stays `low` even if other reads disagree or repeat it; and an unconfirmed read never counts
-as corroboration.
+When a column has several reads, `_decide` (Phase 3) keeps that grade from being
+overridden: a read whose quote was found is chosen over one whose quote was not; a chosen
+unconfirmed read stays `low` even if other reads disagree or repeat it; and an unconfirmed
+read never counts as corroboration. Reads are fanned back out on `_read_key`, so a single
+read reaches every spelling of the column across the bundle.
 
-## Phase 3 — re-decide the residuals
+## Phase 3 — compare claims, then decide
 
-Each residual column goes back through `_resolve_column`, now with **no** codebooks
-(it had no deterministic candidate, by definition) plus its `prose_read` candidates — and
-**its value profile still referees the claim**. A grounding conflict is keyed by the read's
-evidence, so it attaches only if that read is the one chosen. Reads are
-fanned back out on `_read_key`, so a single read reaches every spelling of the column across
-the bundle.
+**Comparing claims.** `_compare_claims` groups each column's candidates by the meaning they
+state, in one pass over the bundle. Only a column whose candidates differ in wording (case
+and spacing aside) is compared; a column name that recurs across tables with the same
+claims is compared once. The `ClaimComparer` decides the groups: the default groups on
+identical wording, so "fish mass" and "the mass of the fish" disagree; `LLMClaimComparer`
+sends every such column in **one** call, each claim with its description, units and source
+text, and asks for a partition into same-meaning groups (same quantity, same or equivalent
+units; related, broader or narrower is different; when unsure, apart). A failed call, or an
+answer for a column that is not a partition of its claims, falls back to identical wording
+for that column — in doubt, claims disagree rather than corroborate. The comparer only
+groups; it never chooses.
+
+`_decide` then adjudicates each column:
+
+1. keep only the **highest tier present**;
+2. **the value profile referees** — drop any candidate `_cross_check` refutes; then a read
+   whose quote was found beats one whose was not; source order breaks a remaining tie;
+3. record agreement from *any* source, any tier, as `corroborated_by` — a candidate in the
+   chosen claim's group, unless its evidence is unconfirmed or it is a read quoting the
+   same sentence as the chosen read (a copy, not a second source); a pool spanning more
+   than one group as `conflicts`; every loser as `alternatives`;
+4. grade confidence — refuted, or the chosen read's evidence unconfirmed → `low`; values
+   adjudicated a same-tier conflict, or differing claims left unadjudicated → `medium`;
+   corroborated → `high`; otherwise the chosen source's own tier base.
+
+With **no candidates at all** the column **abstains** (`link_method="none"`, description
+left empty). This is a first-class outcome, not a failure path: a fabricated label is worse
+than an honest gap.
 
 `prose_read` shares rank 2 with `text_codebook`, but under residual gating the two never
 compete for one column: a read only reaches a column no codebook answered. The rank only
@@ -174,14 +184,14 @@ Three, worth stating separately because they are what the design buys:
 
 Catalog resolution classifies the bundle's other resources into codebooks (recognised
 structurally — a table column, or a run of glossary entries, whose keys are the schema's names)
-and documents; resolves each
-table's columns deterministically by gathering candidates from three assurance tiers —
+and documents; gathers each table's candidates from three deterministic assurance tiers —
 codebook table, text codebook (a glossary run accepted on its structure, not its
-separators), self-evident value prior — and choosing the top tier
-with the sampled value profile as referee, recording corroboration, conflicts, and losing
-alternatives; abstains where nothing describes a column; then, only for those abstentions and
-only once for the whole bundle, invokes an optional prose reader, handing it whole documents
-when they are small and BM25-localized chunks when they are a manuscript, grounding every read
-against its own verbatim quote before re-deciding the column with its value profile still
-refereeing; and finally concatenates every table's resolved columns into one catalog whose
-enriched per-column documents are what the field router actually searches.
+separators), self-evident value prior; then, only for the columns left without any and only
+once for the whole bundle, invokes an optional prose reader, handing it whole documents when
+they are small and BM25-localized chunks packed into passages when they are a manuscript,
+grounding every read against its own verbatim quote; groups every column's differing claims
+by meaning with a claim comparer (one LLM call for the bundle, or identical wording without
+one); decides each column once — top tier, value profile as referee, recording
+corroboration, conflicts and losing alternatives, abstaining where nothing describes it; and
+finally concatenates every table's resolved columns into one catalog whose enriched
+per-column documents are what the field router actually searches.

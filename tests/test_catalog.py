@@ -14,6 +14,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from src.context import create_context
 from src.router import (
     CachedProseReader,
+    Claim,
+    ClaimComparer,
+    LLMClaimComparer,
     LLMProseReader,
     ProseReader,
     ReadResult,
@@ -958,15 +961,82 @@ class ProseReaderTierTest(unittest.TestCase):
 
     # --- several reads of one column: unconfirmed evidence stays low -------------
 
-    def _two_reads(self, first, second):
+    def _two_reads(self, first, second, comparer=None, texts=None):
         """Resolve 'mass' from two short files, read in order, with scripted replies."""
-        docs = [
-            self._doc("a.txt", "Mass is the fish mass in grams.\n"),
-            self._doc("b.txt", "Mass was weighed to the nearest gram.\n"),
-        ]
+        texts = texts or ("Mass is the fish mass in grams.\n", "Mass was weighed to the nearest gram.\n")
+        docs = [self._doc("a.txt", texts[0]), self._doc("b.txt", texts[1])]
         replies = iter([{"mass": first}, {"mass": second}])
         reader = LLMProseReader(lambda prompt: json.dumps(next(replies)))
-        return resolve_catalog(self.tab, sources=docs, prose_reader=reader).get("mass")
+        return resolve_catalog(
+            self.tab, sources=docs, prose_reader=reader, claim_comparer=comparer
+        ).get("mass")
+
+    # --- claim comparison: agreement by meaning, not wording ----------------
+
+    _PARAPHRASES = (
+        {"description": "fish mass", "units": "g", "quote": "Mass is the fish mass in grams."},
+        {"description": "body weight of the fish", "units": "grams",
+         "quote": "Mass was weighed to the nearest gram."},
+    )
+
+    def test_paraphrases_judged_the_same_corroborate(self):
+        stub = _StubLLM({"c1": [[1, 2]]})
+        col = self._two_reads(*self._PARAPHRASES, comparer=LLMClaimComparer(stub))
+        self.assertEqual(stub.calls, 1)
+        self.assertEqual(col.link_confidence, "high")
+        self.assertEqual(len(col.corroborated_by), 1)
+        self.assertFalse(any("sources disagree" in m for m in col.conflicts))
+
+    def test_claims_judged_different_disagree(self):
+        col = self._two_reads(*self._PARAPHRASES, comparer=LLMClaimComparer(_StubLLM({"c1": [[1], [2]]})))
+        self.assertEqual(col.link_confidence, "medium")
+        self.assertEqual(col.corroborated_by, [])
+        self.assertTrue(any("sources disagree" in m for m in col.conflicts))
+
+    def test_without_a_comparer_paraphrases_disagree(self):
+        col = self._two_reads(*self._PARAPHRASES)
+        self.assertTrue(any("sources disagree" in m for m in col.conflicts))
+
+    def test_identical_claims_need_no_comparison(self):
+        stub = _StubLLM({})
+        same = {"description": "fish mass", "units": "g"}
+        col = self._two_reads(
+            {**same, "quote": "Mass is the fish mass in grams."},
+            {**same, "quote": "Mass was weighed to the nearest gram."},
+            comparer=LLMClaimComparer(stub),
+        )
+        self.assertEqual(stub.calls, 0)
+        self.assertEqual(col.link_confidence, "high")
+
+    def test_a_read_quoting_the_same_sentence_does_not_corroborate(self):
+        # The same README text in two files states the meaning once, not twice.
+        sentence = "Mass is the fish mass in grams."
+        read = {"description": "fish mass", "units": "g", "quote": sentence}
+        col = self._two_reads(read, read, texts=(sentence + "\n", "Intro.\n\n" + sentence + "\n"))
+        self.assertEqual(col.corroborated_by, [])
+        self.assertEqual(col.link_confidence, "high")         # its own grounding grade
+
+    def test_llm_comparer_groups_every_column_in_one_call(self):
+        stub = _StubLLM({"c1": [[1, 2]], "c2": [[2], [1]]})
+        requests = [
+            ("mass", [Claim("fish mass", "g"), Claim("body weight", "grams")]),
+            ("epoc", [Claim("oxygen debt", None), Claim("recovery time", "min")]),
+        ]
+        labels = LLMClaimComparer(stub).group_many(requests=requests)
+        self.assertEqual(stub.calls, 1)
+        self.assertEqual(labels[0][0], labels[0][1])
+        self.assertNotEqual(labels[1][0], labels[1][1])
+
+    def test_llm_comparer_falls_back_to_exact_wording_on_a_bad_answer(self):
+        claims = [Claim("fish mass", "g"), Claim("Fish mass ", "g"), Claim("body weight", "g")]
+        exact = ClaimComparer().group(column="mass", claims=claims)
+        for answer in ({"c1": [[1, 2]]}, {"c1": [[1, 2, 3], [3]]}, {"c1": "all"}, {}):
+            labels = LLMClaimComparer(_StubLLM(answer)).group_many(requests=[("mass", claims)])
+            self.assertEqual(labels, [exact], answer)
+
+        def broken(prompt):
+            raise RuntimeError("timeout")
+        self.assertEqual(LLMClaimComparer(broken).group_many(requests=[("mass", claims)]), [exact])
 
     def test_a_found_quote_is_chosen_over_an_unconfirmed_one(self):
         col = self._two_reads(

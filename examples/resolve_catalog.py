@@ -54,6 +54,8 @@ from src.context import create_context
 from src.router import (
     Bundle,
     CachedProseReader,
+    ClaimComparer,
+    LLMClaimComparer,
     LLMProseReader,
     NONE,
     ProseReader,
@@ -78,14 +80,16 @@ def resolve(
     docs: List[Path],
     prose_reader: ProseReader | None = None,
     reader_label: str = "off",
+    claim_comparer: ClaimComparer | None = None,
 ) -> ResolvedBundle:
     """Resolve the bundle's data tables against the chosen codebooks / documents."""
     table_ctx = [create_context(str(p), name=p.stem) for p in bundle.tables]
     sources = [create_context(str(p), name=p.stem) for p in (*dicts, *docs)]
+    models = {"prose_reader": prose_reader, "claim_comparer": claim_comparer}
     if len(table_ctx) == 1:
-        catalog = resolve_catalog(table_ctx[0], sources=sources, prose_reader=prose_reader)
+        catalog = resolve_catalog(table_ctx[0], sources=sources, **models)
     else:
-        catalog = resolve_bundle(table_ctx, sources=sources, prose_reader=prose_reader)
+        catalog = resolve_bundle(table_ctx, sources=sources, **models)
     return ResolvedBundle(bundle.root, bundle.tables, dicts, docs, reader_label, catalog)
 
 
@@ -112,16 +116,20 @@ def _logging_invoke(model, console: Console):
     return invoke
 
 
-def build_reader(args, console: Console) -> Tuple[ProseReader | None, str]:
-    """Pick the prose reader from the flags: the LLM reader with --llm-reader, else none.
+def build_reader(
+    args, console: Console
+) -> Tuple[ProseReader | None, ClaimComparer | None, str]:
+    """Pick the models from the flags: with --llm-reader, an LLM prose reader and an LLM
+    claim comparer on the same model; else neither.
 
-    The LLM reader is built from the provider, model, and temperature on ``args``
-    (each defaulting to the repo's configuration) and wrapped in CachedProseReader
-    so a document is read once across the bundle's tables. With --debug the model's
+    The model is built from the provider, model, and temperature on ``args`` (each
+    defaulting to the repo's configuration). The reader is wrapped in CachedProseReader
+    so a document is read once across the bundle's tables; the comparer judges which
+    differently worded claims about a column mean the same. With --debug the model's
     invoke is wrapped to log prompts and responses.
 
-    The returned label names the model that read, so a run's output records what
-    produced it rather than leaving it to the environment.
+    The returned label names the model, so a run's output records what produced it
+    rather than leaving it to the environment.
     """
     if args.llm_reader:
         from src.config import create_llm_for  # lazy: pulls provider SDKs when used
@@ -132,14 +140,18 @@ def build_reader(args, console: Console) -> Tuple[ProseReader | None, str]:
             temperature=args.temperature,
         )
         model = create_llm_for(LLM_MODULE, **vars(settings))
-        reader = (
-            LLMProseReader(_logging_invoke(model, console))
+        invoke = (
+            _logging_invoke(model, console)
             if args.debug
-            else LLMProseReader.from_chat_model(model)
+            else lambda prompt: model.invoke(prompt).content
         )
         label = f"llm {settings.describe()}"
-        return CachedProseReader(reader), f"{label} (debug)" if args.debug else label
-    return None, "off"
+        return (
+            CachedProseReader(LLMProseReader(invoke)),
+            LLMClaimComparer(invoke),
+            f"{label} (debug)" if args.debug else label,
+        )
+    return None, None, "off"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -169,7 +181,8 @@ def build_parser() -> argparse.ArgumentParser:
                          f"codebook found in the bundle; pass '{NONE}' to use none")
     tier.add_argument("--llm-reader", action="store_true",
                     help="enable the LLM prose reader (reads free narrative) using the "
-                         "configured model, for columns no codebook covers")
+                         "configured model, for columns no codebook covers; the same "
+                         "model judges which differently worded claims agree")
     source.add_argument("--doc", action="append", default=None,
                     help="documents to use, by filename (repeatable). Omit to use every "
                          f"document found in the bundle; pass '{NONE}' to use none")
@@ -212,7 +225,7 @@ def run(args: argparse.Namespace, console: Console) -> ResolvedBundle:
     tables, codebooks, documents = bundle.tables, bundle.codebooks, bundle.documents
     dicts = select(codebooks, args.dictionary)
     docs = select(documents, args.doc)
-    reader, reader_kind = build_reader(args, console)
+    reader, comparer, reader_kind = build_reader(args, console)
     console.print(f"[bold]bundle:[/] {args.bundle}")
     console.print(f"tables: {[p.name for p in tables]}   "
                   f"dictionaries: {[p.name for p in dicts] or 'none'}   "
@@ -223,7 +236,9 @@ def run(args: argparse.Namespace, console: Console) -> ResolvedBundle:
         console.print(f"[dim]discovered but not used: {excluded}[/]")
     console.print("")
 
-    resolved = resolve(bundle, dicts, docs, prose_reader=reader, reader_label=reader_kind)
+    resolved = resolve(
+        bundle, dicts, docs, prose_reader=reader, reader_label=reader_kind, claim_comparer=comparer
+    )
     render_catalog(resolved.catalog, console)
     return resolved
 

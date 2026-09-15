@@ -32,10 +32,12 @@ assurance tier, with the value profile as referee for conflicts:
 Sources that **agree** raise confidence and are recorded in ``corroborated_by``
 (the citations that confirm the resolution — the positive counterpart of a
 conflict); sources that **disagree** are surfaced in ``conflicts`` with the losing
-candidates kept in ``alternatives``; nothing is decided by list order. Semantic
-reconciliation of differing free-text descriptions needs an LLM and is deferred;
-deterministically this adjudicates units, value-refutable claims, and verbatim
-agreement.
+candidates kept in ``alternatives``; nothing is decided by list order. Whether two
+differently worded claims agree is a judgment of meaning, made by a pluggable
+:class:`ClaimComparer`: the default agrees only on identical wording, and
+:class:`LLMClaimComparer` groups every column's claims by meaning in one call per
+bundle (``claim_comparer=``). The comparer only groups; value refutation and grounding
+still decide what is chosen and how far it is trusted.
 
 **The value profile is a referee, not a guesser.** Values genuinely identify only
 a few kinds (coordinates, dates); for the long tail — pH, biomass, a trait score —
@@ -103,7 +105,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -864,6 +866,16 @@ def _ground_read(
     return evidence, _grounding_grade(column, result.description, quote), None, quote
 
 
+def _read_candidate(
+    result: "ReadResult", column: str, resource: str, base_offset: int, text: str
+) -> "_Candidate":
+    """A read, grounded in ``text``, as a ``prose_read`` candidate."""
+    evidence, confidence, conflict, quote = _ground_read(result, column, resource, base_offset, text)
+    return _Candidate(
+        result.description, result.units, "prose_read", confidence, evidence, quote, conflict
+    )
+
+
 # Chunks retrieved per column before reading — enough to survive a mis-ranked top
 # hit, small enough to stay doc-scale.
 _PROSE_READ_K = 3
@@ -907,7 +919,7 @@ def _batch_prose_reads(
     reader: ProseReader,
     *,
     k: int = _PROSE_READ_K,
-) -> Dict[str, List[Dict[str, Any]]]:
+) -> Dict[str, List["_Candidate"]]:
     """Retrieve each column's top-``k`` chunks, then read them **packed into passages**.
 
     Retrieval is per column (BM25 over every chunk of every document by the column
@@ -923,9 +935,8 @@ def _batch_prose_reads(
     document. A quote found in none of them (paraphrased, or spanning two packed
     chunks) is cited to the column's best-ranked chunk in the passage, unconfirmed.
 
-    Returns, per column, its candidate reads ordered by the best retrieval rank each
-    passage held for it — the shape :func:`_resolve_column` folds in as ``prose_read``
-    candidates.
+    Returns, per column, its ``prose_read`` candidates ordered by the best retrieval
+    rank each passage held for it.
     """
     # Chunk once per document and reuse the tokenization across every column's query.
     chunks: List[TextChunk] = [c for source in sources for c in source.chunks()]
@@ -946,7 +957,7 @@ def _batch_prose_reads(
 
     # Chunks are pooled source by source, in order, so sorting indices is document order.
     retrieved = sorted({i for top in ranked_for.values() for i in top})
-    found: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {}
+    found: Dict[str, List[Tuple[int, _Candidate]]] = {}
     for members in _pack_passages(retrieved, chunks):
         inside = set(members)
         columns = [(name, dtype) for name, dtype in fields if inside.intersection(ranked_for.get(name, ()))]
@@ -962,15 +973,7 @@ def _batch_prose_reads(
                  if _locate(result.quote, chunks[i].text) is not None),
                 chunks[own[0]],
             )
-            evidence, confidence, conflict, quote = _ground_read(
-                result, name, home.resource, home.start_offset, home.text
-            )
-            candidate = {
-                "description": result.description, "units": result.units,
-                "confidence": confidence, "evidence": evidence, "quote": quote,
-            }
-            if conflict:
-                candidate["conflict"] = conflict
+            candidate = _read_candidate(result, name, home.resource, home.start_offset, home.text)
             found.setdefault(name, []).append((ranked_for[name].index(own[0]), candidate))
 
     return {
@@ -1074,30 +1077,39 @@ def _cross_check(description: Optional[str], units: Optional[str], profile: Dict
 
 
 @dataclass
-class _TableResolution:
-    """One table resolved by the deterministic tiers, plus what re-deciding needs.
+class _ColumnEvidence:
+    """Everything proposed for one column, before a resolution is decided.
 
-    ``profiles``/``dtypes`` are kept per column so a *residual* (unresolved) column can
-    be re-decided after a reader reads it — the value profile still referees the read,
-    and the read carries the column's dtype.
+    ``groups`` labels each candidate with the meaning it states, aligned with
+    ``candidates``: two candidates with the same label make the same claim. It is set by
+    :func:`_compare_claims`; ``None`` means exact wording decides.
     """
 
+    name: str
+    dtype: str
+    profile: Dict[str, Any]
+    candidates: List["_Candidate"]
+    groups: Optional[List[int]] = None
+
+
+@dataclass
+class _TableEvidence:
+    """One table's columns with their candidates, and the documents offered to it."""
+
     resource: str
-    columns: List[ResolvedColumn]
-    profiles: Dict[str, Dict[str, Any]]
-    dtypes: Dict[str, str]
+    columns: List[_ColumnEvidence]
     docs: List[TextContext]
 
 
-def _resolve_table_deterministic(
+def _gather_table(
     target: TabularContext,
     resource: str,
     sources: List[ExecutionContext],
     vocabulary: Optional[List[str]] = None,
-) -> _TableResolution:
-    """Resolve one table with the deterministic tiers only (codebook tables, text
-    codebooks, value prior) — no reader. The reader pass is applied afterwards, and only
-    to the columns this leaves unresolved (:func:`_read_residuals`).
+) -> _TableEvidence:
+    """Gather one table's candidates from the deterministic tiers only (codebook tables,
+    text codebooks, value prior) — no reader. The reader pass adds candidates afterwards,
+    and only to the columns this leaves without any (:func:`_read_residuals`).
 
     ``vocabulary`` is the set of column names a source is judged against when deciding
     whether it is a codebook, table or text. It defaults to this table's own columns;
@@ -1121,15 +1133,14 @@ def _resolve_table_deterministic(
         if d is not None
     ]
 
-    columns: List[ResolvedColumn] = []
-    profiles: Dict[str, Dict[str, Any]] = {}
-    dtypes: Dict[str, str] = {}
+    columns: List[_ColumnEvidence] = []
     for f in info.fields:
         profile = _value_profile(frame[f.name]) if f.name in frame.columns else {"numeric": False}
-        profiles[f.name] = profile
-        dtypes[f.name] = f.dtype
-        columns.append(_resolve_column(f.name, f.dtype, resource, profile, dictionaries))
-    return _TableResolution(resource, columns, profiles, dtypes, docs)
+        columns.append(_ColumnEvidence(
+            f.name, f.dtype, profile,
+            _deterministic_candidates(f.name, f.dtype, profile, dictionaries),
+        ))
+    return _TableEvidence(resource, columns, docs)
 
 
 # A README/codebook is small enough to hand to a reader whole; past this, a document is
@@ -1174,7 +1185,7 @@ def _split_by_length(
 
 def _whole_doc_reads(
     residual: List[Tuple[str, str]], sources: List[_DocResource], reader: ProseReader
-) -> Dict[str, List[Dict[str, Any]]]:
+) -> Dict[str, List["_Candidate"]]:
     """Short-doc path: **skip retrieval**, hand one whole file plus *all* residual
     columns to the reader, one call per file.
 
@@ -1187,27 +1198,20 @@ def _whole_doc_reads(
     ``sources`` are the files that individually fit (:func:`_split_by_length`), so a
     long neighbour in the same bundle does not drag them onto the localized path.
     """
-    out: Dict[str, List[Dict[str, Any]]] = {}
+    out: Dict[str, List[_Candidate]] = {}
     for source in sources:
         text = source.text()
         results = reader.read_many(columns=residual, chunk=text)
         for name, result in results.items():
-            evidence, confidence, conflict, quote = _ground_read(
-                result, name, source.resource, 0, text
+            out.setdefault(name, []).append(
+                _read_candidate(result, name, source.resource, 0, text)
             )
-            candidate = {
-                "description": result.description, "units": result.units,
-                "confidence": confidence, "evidence": evidence, "quote": quote,
-            }
-            if conflict:
-                candidate["conflict"] = conflict
-            out.setdefault(name, []).append(candidate)
     return out
 
 
 def _localized_reads(
     residual: List[Tuple[str, str]], sources: List[_DocResource], reader: ProseReader
-) -> Dict[str, List[Dict[str, Any]]]:
+) -> Dict[str, List["_Candidate"]]:
     """Long-doc path: **localize** each column's definition, then read only those spans.
 
     A manuscript cannot be handed to the reader whole (cost, and the definition is a
@@ -1229,10 +1233,10 @@ def _localized_reads(
 
 
 def _read_residuals(
-    tables: List[_TableResolution], docs: List[TextContext], reader: ProseReader
+    tables: List[_TableEvidence], docs: List[TextContext], reader: ProseReader
 ) -> None:
-    """Run ``reader`` **only on the columns the deterministic tiers left unresolved**,
-    once for the whole bundle, and fold the reads back into ``tables`` in place.
+    """Run ``reader`` **only on the columns the deterministic tiers left without a
+    candidate**, once for the whole bundle, and add the reads to ``tables`` in place.
 
     Residual gating keeps an expensive reader off columns a codebook or glossary already
     resolved. The bundle-level hoist unions every table's residual columns (deduped by
@@ -1243,10 +1247,9 @@ def _read_residuals(
     **whole** (:func:`_whole_doc_reads`, no retrieval, so a column whose name never
     appears verbatim is still read), and only the files that are genuinely long are
     **localized** (:func:`_localized_reads`). Both sets contribute, so a README sitting
-    beside a manuscript keeps the high-recall path it qualifies for. Each residual
-    column is re-decided
-    with *no* codebooks (it had no deterministic candidate, by definition) plus its
-    reads, its value profile still refereeing the claim.
+    beside a manuscript keeps the high-recall path it qualifies for. The reads become
+    the column's only candidates (it had none, by definition), its value profile still
+    refereeing them when the column is decided.
     """
     residual: List[Tuple[str, str]] = []
     seen: set = set()
@@ -1257,34 +1260,25 @@ def _read_residuals(
             # and a document defines it once — so reading each spelling separately
             # both wastes calls and leaves the odd spelling unresolved.
             key = _read_key(col.name)
-            if col.link_method == "none" and key not in seen:
+            if not col.candidates and key not in seen:
                 seen.add(key)
-                residual.append((_match_key(col.name), t.dtypes[col.name]))
+                residual.append((_match_key(col.name), col.dtype))
     if not residual:
         return
     short, long = _split_by_length(_doc_resources(docs))
-    reads: Dict[str, List[Dict[str, Any]]] = {}
     # Whole-doc reads first: same tier as localized ones, and source order breaks a
     # remaining tie in _decide, so the higher-recall path is preferred on equal terms.
+    # Keyed on the normalized name, so a read reaches every spelling.
+    by_key: Dict[str, List[_Candidate]] = {}
     for name, candidates in (
         *_whole_doc_reads(residual, short, reader).items(),
         *_localized_reads(residual, long, reader).items(),
     ):
-        reads.setdefault(name, []).extend(candidates)
-    if not reads:
-        return
-    # Fold back on the same normalized key, so a read reaches every spelling.
-    by_key: Dict[str, List[Dict[str, Any]]] = {}
-    for name, candidates in reads.items():
         by_key.setdefault(_read_key(name), []).extend(candidates)
     for t in tables:
-        for i, col in enumerate(t.columns):
-            candidates = by_key.get(_read_key(col.name))
-            if col.link_method == "none" and candidates:
-                t.columns[i] = _resolve_column(
-                    col.name, t.dtypes[col.name], t.resource,
-                    t.profiles[col.name], [], candidates,
-                )
+        for col in t.columns:
+            if not col.candidates:
+                col.candidates = list(by_key.get(_read_key(col.name), ()))
 
 
 def looks_like_dictionary(source: TabularContext, columns: List[str]) -> bool:
@@ -1302,6 +1296,7 @@ def resolve_catalog(
     resource: str = "",
     sources: Optional[List[ExecutionContext]] = None,
     prose_reader: Optional[ProseReader] = None,
+    claim_comparer: Optional["ClaimComparer"] = None,
 ) -> Catalog:
     """Enrich ``target``'s columns with meanings harvested from ``sources``.
 
@@ -1311,18 +1306,22 @@ def resolve_catalog(
     them are parsed as a text codebook. Value priors, computed from the target's own values, are
     the floor when neither yields a link, and the basis for cross-checking any
     link that does. An optional ``prose_reader`` reads the still-unresolved columns
-    (residual gating; see :func:`_read_residuals`).
+    (residual gating; see :func:`_read_residuals`). An optional ``claim_comparer``
+    decides which differently worded claims about a column mean the same; without
+    one, only identical wording agrees.
     """
-    tr = _resolve_table_deterministic(target, resource, sources or [])
-    if prose_reader is not None:
-        _read_residuals([tr], tr.docs, prose_reader)
-    return Catalog(resource=tr.resource, columns=tr.columns)
+    table = _gather_table(target, resource, sources or [])
+    return Catalog(
+        resource=table.resource,
+        columns=_resolve_tables([table], table.docs, prose_reader, claim_comparer),
+    )
 
 
 def resolve_bundle(
     targets: List[TabularContext],
     sources: Optional[List[ExecutionContext]] = None,
     prose_reader: Optional[ProseReader] = None,
+    claim_comparer: Optional["ClaimComparer"] = None,
 ) -> Catalog:
     """Resolve several data tables into one catalog spanning all their columns.
 
@@ -1342,19 +1341,36 @@ def resolve_bundle(
     """
     sources = sources or []
     # A codebook for the bundle is judged against the bundle's columns, not each
-    # table's — see _resolve_table_deterministic.
+    # table's — see _gather_table.
     vocabulary = [
         name
         for t in targets
         for name in t.get_resource_info(t.resources[0]).field_names
     ]
-    tables = [_resolve_table_deterministic(t, "", sources, vocabulary) for t in targets]
-    if prose_reader is not None and tables:
-        docs = [src for src in sources if isinstance(src, TextContext)]
-        _read_residuals(tables, docs, prose_reader)   # one hoisted, residual-only pass
-    columns = [c for tr in tables for c in tr.columns]
+    tables = [_gather_table(t, "", sources, vocabulary) for t in targets]
+    docs = [src for src in sources if isinstance(src, TextContext)]
     resource = targets[0].resources[0] if targets else ""
-    return Catalog(resource=resource, columns=columns)
+    return Catalog(
+        resource=resource,
+        columns=_resolve_tables(tables, docs, prose_reader, claim_comparer),
+    )
+
+
+def _resolve_tables(
+    tables: List[_TableEvidence],
+    docs: List[TextContext],
+    reader: Optional[ProseReader],
+    comparer: Optional["ClaimComparer"],
+) -> List[ResolvedColumn]:
+    """Read the residual columns, compare every column's claims, then decide each.
+
+    Reading and comparing are both one hoisted pass over the whole bundle, so an LLM
+    behind either is called per passage or once, never per column or per table.
+    """
+    if reader is not None:
+        _read_residuals(tables, docs, reader)
+    _compare_claims(tables, comparer or ClaimComparer())
+    return [_decide(t.resource, col) for t in tables for col in t.columns]
 
 
 # Assurance tiers, most authoritative first. A text codebook sits below a codebook table:
@@ -1381,6 +1397,7 @@ class _Candidate:
     confidence: str          # the tier's base confidence
     evidence: str
     quote: Optional[str] = None   # the cited text, for candidates that quote a document
+    conflict: Optional[str] = None   # why its evidence is unconfirmed, when it is
 
     def summary(self) -> str:
         return f"{self.method} '{self.description or self.units or '?'}'"
@@ -1389,7 +1406,7 @@ class _Candidate:
         return {
             "description": self.description, "units": self.units,
             "method": self.method, "confidence": self.confidence,
-            "evidence": self.evidence, "quote": self.quote,
+            "evidence": self.evidence, "quote": self.quote, "conflict": self.conflict,
         }
 
 
@@ -1397,17 +1414,14 @@ def _norm(text: Optional[str]) -> str:
     return (text or "").strip().lower()
 
 
-def _resolve_column(name, dtype, resource, profile, dictionaries, prose_reads=()) -> ResolvedColumn:
-    """Gather every candidate resolution for the column, then decide among them.
+def _deterministic_candidates(name, dtype, profile, dictionaries) -> List[_Candidate]:
+    """What the codebooks and the value profile propose for one column.
 
     ``dictionaries`` are the recognised codebooks, table and text alike; each proposes
-    at its own method and base confidence. ``prose_reads`` are this column's reader
-    candidates, precomputed in one batched pass (:func:`_read_residuals`) so an
-    expensive reader is called per passage, not per column; empty when no reader ran.
+    at its own method and base confidence. The reader tier is added later, and only to
+    a column this leaves empty (:func:`_read_residuals`).
     """
-    label = profile.get("label")
     candidates: List[_Candidate] = []
-
     for d in dictionaries:
         entry = d.by_name.get(_read_key(name))
         if entry and (entry.description or entry.units):
@@ -1416,26 +1430,189 @@ def _resolve_column(name, dtype, resource, profile, dictionaries, prose_reads=()
                 entry.evidence, entry.quote,
             ))
 
-    # The reader tier. Precomputed and passed in (empty unless a reader ran); under
-    # residual gating these arrive only for columns with no deterministic candidate, so
-    # they stand alone.
-    for rc in prose_reads:
-        candidates.append(_Candidate(
-            rc["description"], rc["units"], "prose_read", rc["confidence"],
-            rc["evidence"], rc.get("quote"),
-        ))
-
+    label = profile.get("label")
     if label in _SELF_EVIDENT:
         description, confidence = _SELF_EVIDENT[label]
         candidates.append(_Candidate(
             description, None, "value_prior", confidence,
             f"value profile of '{name}' ({dtype})",
         ))
+    return candidates
 
-    # A read whose quote could not be located carries a grounding conflict, keyed by its
-    # (unique) evidence so _decide attaches it only if that read is the one chosen.
-    ground_conflicts = {rc["evidence"]: rc["conflict"] for rc in prose_reads if rc.get("conflict")}
-    return _decide(name, dtype, resource, label, profile, candidates, ground_conflicts)
+
+# ---------------------------------------------------------------------------
+# Comparing claims: which differently worded candidates state the same meaning
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Claim:
+    """What one or more candidates say a column means, as a comparer sees it.
+
+    ``quote`` is the sentence or row the claim was taken from, when there is one, so a
+    comparer can judge the claim in context rather than on a short noun phrase.
+    """
+
+    description: Optional[str]
+    units: Optional[str]
+    quote: Optional[str] = None
+
+
+class ClaimComparer:
+    """The seam: group a column's claims into those that state the same meaning.
+
+    Agreement and disagreement in :func:`_decide` follow these groups: a candidate in
+    the chosen claim's group corroborates it, and one in another group contests it.
+    This base class groups on exact wording (case and surrounding space aside), which
+    reads "fish mass" and "the mass of the fish" as a disagreement; an LLM comparer
+    (:class:`LLMClaimComparer`) overrides :meth:`group_many` to judge meaning.
+    """
+
+    def group(self, *, column: str, claims: Sequence[Claim]) -> List[int]:
+        """One group label per claim, aligned with ``claims``; equal labels agree."""
+        labels: Dict[Tuple[str, str], int] = {}
+        return [labels.setdefault((_norm(c.description), _norm(c.units)), len(labels)) for c in claims]
+
+    def group_many(self, *, requests: Sequence[Tuple[str, Sequence[Claim]]]) -> List[List[int]]:
+        """Group every ``(column, claims)`` request; one label list per request.
+
+        Default: loop :meth:`group`. A batched backend answers all of them at once.
+        """
+        return [self.group(column=column, claims=claims) for column, claims in requests]
+
+
+# The contract handed to the model: same meaning only, no partial credit, and an
+# explicit partition we can check.
+_LLM_COMPARER_INSTRUCTION = (
+    "You compare what different sources say a dataset column means. Each COLUMN below "
+    "has numbered CLAIMS: a description, units, and the text the claim was taken from.\n"
+    "Group the claims that state the same meaning: the same quantity or attribute, in "
+    "the same or equivalent units (g and grams are equivalent; g and kg are not). A "
+    "claim that is merely related, broader, or narrower is a different meaning — "
+    "'date' is not 'date of sampling', 'fish mass' is not 'fish length'. When unsure, "
+    "keep claims apart.\n"
+    'Return ONE JSON object mapping each column id to a list of groups, each group a '
+    'list of claim numbers, every claim in exactly one group, e.g. {{"c1": [[1, 3], [2]]}}. '
+    "No prose, no code fence.\n\n"
+    "COLUMNS:\n{columns}\n"
+)
+
+
+def _labels_from_partition(groups: Any, count: int) -> Optional[List[int]]:
+    """Turn a model's groups of 1-based claim numbers into labels, or ``None`` if the
+    groups are not a partition of exactly ``1..count``."""
+    if not isinstance(groups, list):
+        return None
+    labels: List[Optional[int]] = [None] * count
+    for label, members in enumerate(groups):
+        if not isinstance(members, list):
+            return None
+        for number in members:
+            if isinstance(number, bool) or not isinstance(number, int):
+                return None
+            if not 1 <= number <= count or labels[number - 1] is not None:
+                return None
+            labels[number - 1] = label
+    if any(label is None for label in labels):
+        return None
+    return [label for label in labels if label is not None]
+
+
+class LLMClaimComparer(ClaimComparer):
+    """LLM-backed comparer — judges whether differently worded claims mean the same.
+
+    Every column with differing claims in a bundle is compared in **one** call. The
+    model only groups claims; grounding and the value profile still decide which claim
+    is chosen and how far it is trusted. A failed call, or an answer for a column that
+    is not a partition of its claims, falls back to exact wording for that column — in
+    doubt, differing claims stay a disagreement and never become corroboration.
+
+    ``invoke`` is a callable ``prompt -> model text``; adapt a chat model with
+    :meth:`from_chat_model`.
+    """
+
+    def __init__(self, invoke: Callable[[str], str]) -> None:
+        self._invoke = invoke
+
+    @classmethod
+    def from_chat_model(cls, model: Any) -> "LLMClaimComparer":
+        """Adapt a chat model exposing ``.invoke(prompt) -> message.content``."""
+        return cls(lambda prompt: model.invoke(prompt).content)
+
+    def group_many(self, *, requests: Sequence[Tuple[str, Sequence[Claim]]]) -> List[List[int]]:
+        if not requests:
+            return []
+        payload = {
+            f"c{i}": {
+                "column": column,
+                "claims": {
+                    str(j): {"description": c.description, "units": c.units, "text": c.quote}
+                    for j, c in enumerate(claims, 1)
+                },
+            }
+            for i, (column, claims) in enumerate(requests, 1)
+        }
+        prompt = _LLM_COMPARER_INSTRUCTION.format(
+            columns=json.dumps(payload, indent=1, ensure_ascii=False)
+        )
+        try:
+            data = _extract_json_object(self._invoke(prompt)) or {}
+        except Exception:
+            data = {}                      # a failed call falls back to exact wording
+        out: List[List[int]] = []
+        for i, (column, claims) in enumerate(requests, 1):
+            labels = _labels_from_partition(data.get(f"c{i}"), len(claims))
+            out.append(labels if labels is not None else self.group(column=column, claims=claims))
+        return out
+
+
+def _claims_of(candidates: Sequence[_Candidate]) -> Tuple[List[Claim], List[int]]:
+    """The distinct claims among ``candidates`` by exact wording, and per candidate the
+    index of its claim. A claim carries the first quote any of its candidates has."""
+    claims: List[Claim] = []
+    index: List[int] = []
+    position: Dict[Tuple[str, str], int] = {}
+    for c in candidates:
+        key = (_norm(c.description), _norm(c.units))
+        if key not in position:
+            position[key] = len(claims)
+            claims.append(Claim(c.description, c.units, c.quote))
+        elif claims[position[key]].quote is None and c.quote:
+            claims[position[key]] = Claim(c.description, c.units, c.quote)
+        index.append(position[key])
+    return claims, index
+
+
+def _compare_claims(tables: List[_TableEvidence], comparer: ClaimComparer) -> None:
+    """Group every column's claims by meaning, in one pass over the bundle, in place.
+
+    Only a column whose candidates differ in wording needs comparing; the rest keep
+    their exact grouping and cost nothing. A column name that recurs across tables with
+    the same claims is compared once.
+    """
+    pending: Dict[Tuple[str, Tuple[Claim, ...]], List[Tuple[_ColumnEvidence, List[int]]]] = {}
+    for t in tables:
+        for col in t.columns:
+            claims, index = _claims_of(col.candidates)
+            col.groups = index
+            if len(claims) > 1:
+                pending.setdefault((_read_key(col.name), tuple(claims)), []).append((col, index))
+    if not pending:
+        return
+    keys = list(pending)
+    answers = comparer.group_many(
+        requests=[(pending[key][0][0].name, list(key[1])) for key in keys]
+    )
+    for key, labels in zip(keys, answers):
+        if len(labels) != len(key[1]):
+            continue                       # a malformed answer keeps exact wording
+        for col, index in pending[key]:
+            col.groups = [labels[i] for i in index]
+
+
+# ---------------------------------------------------------------------------
+# Deciding
+# ---------------------------------------------------------------------------
 
 
 def _value_range(profile: Dict[str, Any]) -> Optional[Tuple[float, float]]:
@@ -1454,8 +1631,15 @@ def _value_integral(profile: Dict[str, Any]) -> Optional[bool]:
     return profile.get("integral") if profile.get("numeric") else None
 
 
-def _decide(name, dtype, resource, label, profile, candidates, ground_conflicts=None) -> ResolvedColumn:
+def _same_text(a: Optional[str], b: Optional[str]) -> bool:
+    """Whether two quotes are the same text, spacing and case aside."""
+    return bool(a and b) and " ".join(a.split()).lower() == " ".join(b.split()).lower()
+
+
+def _decide(resource: str, column: _ColumnEvidence) -> ResolvedColumn:
     """Choose among candidates: top tier wins, the value profile referees conflicts."""
+    name, dtype, profile, candidates = column.name, column.dtype, column.profile, column.candidates
+    label = profile.get("label")
     if not candidates:
         # Abstain — nothing describes this column and its values cannot name it.
         # "Unresolved" is a first-class outcome; a fabricated label is worse.
@@ -1466,14 +1650,15 @@ def _decide(name, dtype, resource, label, profile, candidates, ground_conflicts=
 
     top_rank = max(_TIER_RANK[c.method] for c in candidates)
     top = [c for c in candidates if _TIER_RANK[c.method] == top_rank]
-    ground_conflicts = ground_conflicts or {}
+    groups = column.groups if column.groups is not None else _claims_of(candidates)[1]
+    group_of = {id(c): g for c, g in zip(candidates, groups)}
 
     def refuted(c: _Candidate) -> List[str]:
         return _cross_check(c.description, c.units, profile)
 
     def unconfirmed(c: _Candidate) -> bool:
         """A read whose supporting quote could not be found in its source."""
-        return c.evidence in ground_conflicts
+        return c.conflict is not None
 
     # The value profile is the referee: prefer candidates the values don't refute.
     # Among those, a read whose quote was found beats one whose quote was not; source
@@ -1482,27 +1667,34 @@ def _decide(name, dtype, resource, label, profile, candidates, ground_conflicts=
     pool = sorted(consistent or top, key=unconfirmed)
     chosen = pool[0]
 
-    # Corroboration is the positive counterpart of a conflict: any source, any
-    # tier, that makes the *same* claim as the chosen one (verbatim for now;
-    # semantic agreement of differently-worded descriptions needs an LLM). Its
-    # citations are recorded so provenance can show who confirmed the resolution.
-    # A read with unconfirmed evidence repeats a claim without supporting it, so it
-    # does not corroborate.
+    # Corroboration is the positive counterpart of a conflict: any source, any tier,
+    # that makes the same claim as the chosen one — the same group, as the claim
+    # comparer judged meaning. Its citations are recorded so provenance can show who
+    # confirmed the resolution. Two kinds of agreement support nothing and do not
+    # count: a read with unconfirmed evidence, and a read quoting the very same
+    # sentence as the chosen read (a README copied into a longer document states a
+    # meaning once, not twice). Codebook entries are exempt from the second: a row or
+    # glossary entry is the claim itself, so two sources agreeing quote the same text.
     def agrees(c: _Candidate) -> bool:
-        return (_norm(c.description), _norm(c.units)) == (_norm(chosen.description), _norm(chosen.units))
+        return group_of[id(c)] == group_of[id(chosen)]
 
-    corroborators = [c for c in candidates if c is not chosen and agrees(c) and not unconfirmed(c)]
+    def copied(c: _Candidate) -> bool:
+        return c.method == chosen.method == "prose_read" and _same_text(c.quote, chosen.quote)
+
+    corroborators = [
+        c for c in candidates
+        if c is not chosen and agrees(c) and not unconfirmed(c) and not copied(c)
+    ]
     corroborated_by = [c.evidence for c in corroborators]
 
     conflicts: List[str] = list(refuted(chosen))   # the chosen claim's own value conflicts
-    if unconfirmed(chosen):
-        conflicts.append(ground_conflicts[chosen.evidence])   # chosen read's quote unconfirmed
+    if chosen.conflict:
+        conflicts.append(chosen.conflict)          # chosen read's quote unconfirmed
     for c in top:                                  # a same-tier claim the values rejected
         if c is not chosen:
             conflicts += [f"{c.summary()}: {msg}" for msg in refuted(c)]
 
-    variants = {(_norm(c.description), _norm(c.units)) for c in pool}
-    contested = len(variants) > 1
+    contested = len({group_of[id(c)] for c in pool}) > 1
     if contested:
         conflicts.append(
             "sources disagree: " + "; ".join(sorted(c.summary() for c in pool))

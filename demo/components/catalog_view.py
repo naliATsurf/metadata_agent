@@ -198,6 +198,27 @@ def _row(
     return row
 
 
+_CONFLICT_BADGE = ":orange-badge[Conflict]"
+_CORROBORATION_BADGE = ":green-badge[Corroborated by]"
+
+
+def _tallies(column: ResolvedColumn) -> str:
+    """Coloured counts of a column's conflicts and corroborations, for its expander label."""
+    parts = []
+    if column.conflicts:
+        count = len(column.conflicts)
+        parts.append(f":orange[{count} conflict{'' if count == 1 else 's'}]")
+    if column.corroborated_by:
+        count = len(column.corroborated_by)
+        parts.append(f":green[{count} corroboration{'' if count == 1 else 's'}]")
+    return " · ".join(parts)
+
+
+def _escape(text: str) -> str:
+    """Keep resolver text literal in Markdown: descriptions carry ``*``, ``_``, ``[``."""
+    return "".join(f"\\{ch}" if ch in "\\`*_[]<>#|~$:" else ch for ch in text)
+
+
 def _render_conflicts(columns: list[ResolvedColumn], key: str) -> None:
     """Break out the columns where sources disagreed, agreed, or lost."""
     contested = [
@@ -213,19 +234,25 @@ def _render_conflicts(columns: list[ResolvedColumn], key: str) -> None:
         "system working, not an error."
     )
     for column in contested:
-        label = f"{column.resource}.{column.name} — {column.description or 'unresolved'}"
+        label = _escape(
+            f"{column.resource}.{column.name} — {column.description or 'unresolved'}"
+        )
+        tallies = _tallies(column)
+        if tallies:
+            label = f"{label} · {tallies}"
         with st.expander(label, expanded=bool(column.conflicts)):
             if column.link_quote:
                 st.caption(f"Cited from {column.link_evidence}")
                 st.markdown(f"> {column.link_quote}")
-            # Deliberately not st.error/st.success. A conflict is a finding — the
-            # value profile caught a claim the data refutes — not a failure, and
-            # alarm colouring pulls attention to the part that worked. Red is kept
-            # for a run that actually broke.
+            # Coloured so the two read apart at a glance, but deliberately not
+            # st.error/st.success and not red. A conflict is a finding — the value
+            # profile caught a claim the data refutes — not a failure, and alarm
+            # colouring pulls attention to the part that worked. Red is kept for a run
+            # that actually broke.
             for message in column.conflicts:
-                st.markdown(f"**Conflict** — {message}")
+                st.markdown(f"{_CONFLICT_BADGE} {_escape(message)}")
             for citation in column.corroborated_by:
-                st.markdown(f"**Corroborated by** {citation}")
+                st.markdown(f"{_CORROBORATION_BADGE} {_escape(citation)}")
             if column.alternatives:
                 st.caption("Candidates that lost")
                 st.dataframe(
