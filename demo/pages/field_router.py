@@ -19,7 +19,7 @@ from demo.components.example_runner import run_example
 from demo.components.router_view import render_router_view
 from demo.pages import catalog_resolver
 from examples import field_router_plan
-from src.router import ResolvedBundle
+from src.router import NONE, ResolvedBundle
 
 
 KEY = "field_router"
@@ -51,7 +51,10 @@ def main() -> None:
             "plan whose extraction is grouped per table. A field nothing can answer is "
             "flagged here, before extraction."
         ),
-        overrides={"catalog": _catalog_input(resolved)},
+        overrides={
+            "catalog": _catalog_input(resolved),
+            "search_doc": _document_picker(resolved),
+        },
         defaults=Defaults(
             settings.router_arguments(),
             token=settings.token(),
@@ -79,6 +82,35 @@ def _catalog_input(resolved: ResolvedBundle):
         )
         # What the command line names; the run itself is handed the resolution.
         return Path(catalog_resolver.RESOLUTION_FILE)
+    return widget
+
+
+def _document_picker(resolved: ResolvedBundle):
+    """The ``--search-doc`` widget: which of the resolution's documents are searched.
+
+    The options are the *resolution's* documents, not the bundle's, because the router
+    cannot route a file the resolver was never given — narrowing here re-routes in
+    memory, where narrowing on the resolver page would resolve the catalog again.
+
+    Everything is selected by default, which is the production behaviour. Turning some
+    off is how a bundle carrying rival variants of one README — a short one, a prose
+    rewrite, a whole methods section — is routed against one of them at a time.
+    """
+    def widget(action, key) -> list[str] | None:
+        options = [path.name for path in resolved.documents]
+        if not options:
+            st.caption(
+                "This resolution carries no documents — fields no column answers "
+                "have nothing to route against."
+            )
+            return [NONE]
+        chosen = st.multiselect(
+            "Documents", options, default=options, help=action.help,
+            # Keyed by resolution root for the same reason the resolver's picker is
+            # keyed by bundle: a selection belongs to the files it was made against.
+            key=f"{key}@{resolved.root}",
+        )
+        return chosen or [NONE]
     return widget
 
 

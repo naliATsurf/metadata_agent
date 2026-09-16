@@ -76,6 +76,30 @@ class RouterConsumesResolutionTest(unittest.TestCase):
         dests = {a.dest for a in field_router_plan.build_parser()._actions}
         self.assertTrue({"bundle", "dictionary", "doc", "llm_reader"}.isdisjoint(dests))
 
+    def test_search_doc_narrows_what_is_routed_without_re_resolving(self):
+        """``--search-doc`` is a routing choice, not a resolution one.
+
+        Deliberately not spelled ``--doc``: the resolver's ``--doc`` chooses what
+        *describes the columns*, and reusing the name for what is *searched* would
+        make two different decisions look like one.
+        """
+        resolved = _resolve()
+        self.assertTrue(resolved.documents, "fixture should carry a document to exclude")
+
+        args = field_router_plan.build_parser().parse_args(
+            ["--catalog", "unused.json", "--standard", "field_router_test",
+             "--search-doc", "none"]
+        )
+        without = field_router_plan.run(args, _quiet(), resolved=resolved)
+
+        self.assertIs(without.resolved, resolved)        # narrowed, not resolved again
+        self.assertEqual(resolved.documents, without.resolved.documents)
+        routed = without.field_plan.routings.values()
+        self.assertFalse(
+            [r for r in routed if r.bucket == "document"],
+            "with no document searched, nothing may route to the document bucket",
+        )
+
     def test_a_missing_resolution_says_how_to_make_one(self):
         with self.assertRaises(SystemExit) as caught:
             field_router_plan.run(_router_args(Path("/nonexistent/catalog.json")), _quiet())

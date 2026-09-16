@@ -23,7 +23,9 @@ Usage:
     python examples/field_router_plan.py --catalog catalog.json \\
         --standard field_router_test --llm-candidate-judge
 
-The documents routed against are the ones the catalog was resolved from.
+The documents routed against are the ones the catalog was resolved from; ``--search-doc``
+narrows that to a subset without resolving again, which is how a bundle carrying rival
+variants of one README is routed against one of them at a time.
 """
 
 from __future__ import annotations
@@ -46,10 +48,12 @@ from rich.console import Console
 from src.context import create_context
 from src.core.schemas import Plan
 from src.router import (
+    NONE,
     FieldPlan,
     ResolvedBundle,
     compile_field_plan,
     route_fields,
+    select,
 )
 from src.config import llm_settings, PROVIDER_CONFIGS
 from src.router.judge import CandidateJudge, LLMCandidateJudge
@@ -72,13 +76,23 @@ def build_plan(
     candidates: int = 5,
     judge: CandidateJudge | None = None,
     veto: bool = True,
+    documents: List[Path] | None = None,
 ) -> Tuple[FieldPlan, Plan]:
-    """The core: route the resolved catalog → compile."""
+    """The core: route the resolved catalog → compile.
+
+    ``documents`` narrows which of the resolution's documents are *routed*, without
+    resolving again. The two document choices answer different questions: the
+    resolver's picks what describes the columns, this picks what is searched for the
+    fields no column answers. A bundle carrying three variants of one README —
+    a short one, a prose rewrite, a whole methods section — routes them as three
+    rival sources unless one is named here.
+    """
     schema = get_schema_for_standard(standard)
     if schema is None:
         raise SystemExit(f"Unknown standard {standard!r}.")
 
-    doc_ctx = [create_context(str(p), name=p.stem) for p in resolved.documents]
+    routed = resolved.documents if documents is None else documents
+    doc_ctx = [create_context(str(p), name=p.stem) for p in routed]
     field_plan = route_fields(                                     # layer 4 (+ 4b)
         schema, catalog=resolved.catalog, docs=doc_ctx, k=candidates,
         judge=judge, veto=veto,
@@ -160,6 +174,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     source.add_argument("--catalog", type=Path, required=True,
                         help="a resolution saved by examples/resolve_catalog.py --out")
+    source.add_argument("--search-doc", action="append", default=None,
+                        help=f"search only these of the resolution's documents by "
+                             f"filename (repeatable); '{NONE}' for none. Deliberately "
+                             "not the resolver's --doc: that chose what *described the "
+                             "columns*, this chooses what is *searched to answer* the "
+                             "fields no column answers. Narrowing here re-routes; it "
+                             "does not resolve again")
     target.add_argument("--standard", default=DEFAULT_STANDARD,
                         choices=sorted(METADATA_STANDARDS),
                         help="metadata standard whose fields are routed")
@@ -245,13 +266,17 @@ def run(
         f"catalog:  {len(resolved.catalog.columns)} columns from "
         f"{[p.name for p in resolved.tables]}  (prose reader: {resolved.reader})"
     )
+    routed_docs = select(resolved.documents, args.search_doc)
+    held_back = [p.name for p in resolved.documents if p not in routed_docs]
     console.print(
-        f"docs:     {[p.name for p in resolved.documents] or 'none'}  "
+        f"docs:     {[p.name for p in routed_docs] or 'none'}  "
         f"candidates={args.candidates}  candidate-judge={judge_label}"
+        + (f"  (not routed: {held_back})" if held_back else "")
     )
 
     field_plan, plan = build_plan(
         resolved, args.standard, candidates=args.candidates, judge=judge,
+        documents=routed_docs,
     )
     print_routing(field_plan, console)
     print_plan(plan, console)
