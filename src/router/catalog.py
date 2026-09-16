@@ -798,7 +798,7 @@ class LLMProseReader(ProseReader):
         return out
 
 
-def _locate(quote: Optional[str], text: str) -> Optional[Tuple[int, int]]:
+def locate_quote(quote: Optional[str], text: str) -> Optional[Tuple[int, int]]:
     """Find a reader's verbatim ``quote`` in ``text`` and return its ``(start, end)``.
 
     Turns a document-level citation into a real quoted span. Tries an exact match, then
@@ -853,7 +853,7 @@ def _ground_read(
     is absent or paraphrased yields the coarse citation, ``low`` confidence, and a
     recorded conflict — the read may still be right, but its evidence is unconfirmed.
     """
-    span = _locate(result.quote, text)
+    span = locate_quote(result.quote, text)
     if span is None:
         reason = "not found verbatim" if result.quote else "no supporting quote"
         return (
@@ -970,7 +970,7 @@ def _batch_prose_reads(
             own = [i for i in ranked_for[name] if i in inside]
             home = next(
                 (chunks[i] for i in own + [i for i in members if i not in own]
-                 if _locate(result.quote, chunks[i].text) is not None),
+                 if locate_quote(result.quote, chunks[i].text) is not None),
                 chunks[own[0]],
             )
             candidate = _read_candidate(result, name, home.resource, home.start_offset, home.text)

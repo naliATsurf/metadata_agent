@@ -56,7 +56,7 @@ def report(
 
     answerable = [s for s in scored if s.answerable]
     unanswerable = [s for s in scored if not s.answerable]
-    hit_at_k = sum(1 for s in answerable if set(s.truth) & set(s.ranked))
+    hit_at_k = sum(1 for s in answerable if s.ranked_correct)
     hit_at_1 = sum(1 for s in answerable if s.top1_correct)
     over = [s for s in unanswerable if s.routed]
     missed = [s for s in answerable if not s.routed]

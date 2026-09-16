@@ -26,6 +26,13 @@ the judge cited, already validated against the card — was computed, graded, an
   included). For a document field it is the nearest thing to the answer the router holds,
   and re-deriving it downstream means re-reading the whole document.
 - **`_locatable`** now delegates to a shared `_contains`; behaviour unchanged.
+- **`_cite` + `FieldRouting.citation`**: `locate_quote` (layer 3's `_locate`, made public)
+  finds the judge's quote inside the chunk, and the routing carries
+  `readme_long#1936-2022` — the sentence, not the chunk. `candidates[0]` is narrowed to
+  that span and its snippet becomes the cited sentence, so the compiler seeds a task with
+  86 characters where it used to seed 2 225. A quote that cannot be located gets **no**
+  citation: `grounded=False` already grades it, and inventing a span for a paraphrase
+  would be worse than leaving it at chunk width.
 
 ## Evaluation
 
@@ -37,21 +44,35 @@ the judge cited, already validated against the card — was computed, graded, an
 - **`cited correctly N/M`** and an ungrounded-quote warning in `eval/score.py`, and the
   quote itself as a column in *Where rank 1 is wrong* — two routings naming the same file
   are told apart only by what they cited.
+- **`points_at`** (`eval/labels.py`) grades a document candidate on its *passage*: where
+  the sheet labels the evidence, a chunk of the right file only counts if it actually
+  contains it. This is what recall@k was missing — with `doc::readme_long` as one label
+  for 34 000 characters, any chunk of that file scored as the answer, so recall measured
+  which *file* was retrieved. In a three-document bundle that is close to free.
 
 ## Measured (`sharetrait_basic_no_trait__TRADAT031`, judge on)
 
-| | before | after |
-|---|---|---|
-| precision@1 | 3/12 | 5/12 |
-| accuracy | 20/30 | 21/30 |
-| abstained with an answer present | 8 | 6 |
+| | before | passage to the judge | + passage-level labels |
+|---|---|---|---|
+| recall@5 | 10/12 | 10/12 | **7/12** |
+| precision@1 | 3/12 | 5/12 | 4/12 |
+| accuracy | 20/30 | 21/30 | 19/30 |
+| abstained with an answer present | 8 | 6 | 6 |
 
-`temperature` and `duration` flipped from abstention to a correct, grounded citation. The
-span metric immediately earned itself: `temperature` had been scoring as a document-level
-**hit** while quoting *"Samples were analysed at 22°C."* — the bench, not the tank — with
-`grounded=False` already flagging it. Conversely `title_dataset` scored a **miss** while
-quoting the right sentence, because `readme_long.txt` has the readme's text appended
-inside it. Both directions of error were invisible at file granularity.
+`temperature` and `duration` flipped from abstention to a grounded citation. **The numbers
+in the last column are lower and they are the honest ones**: three fields had been scoring
+as recall hits because *some* chunk of `readme_long` was retrieved, while the paragraph
+that answers them never was.
+
+The span metric earned itself immediately. `temperature` had been scoring as a
+document-level **hit** while quoting *"Samples were analysed at 22°C."* — the bench, not
+the tank — and that quote turns out not to be locatable in its own chunk at all, so it now
+takes no citation and counts as the miscitation it is. Conversely `title_dataset` scored a
+**miss** while quoting the right sentence, because `readme_long.txt` has the readme's text
+appended inside it. Both directions of error were invisible at file granularity.
+
+Chunk width → citation width for the three located fields: 2 225 → 86 characters
+(`duration`), 1 645 → 68 (`trait_error_type`), 506 → 196 (`title_dataset`).
 
 ## Not fixed
 

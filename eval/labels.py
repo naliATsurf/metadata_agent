@@ -12,7 +12,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from src.context.base_context import EvidenceRef, content_terms, tokenize
 from src.router.judge import candidate_ref
@@ -114,22 +114,71 @@ class Scored:
     quote: str = ""                      # the sentence the judge cited
     grounded: Optional[bool] = None      # was that quote found in the chosen material?
 
+    #: Set by :func:`score` when the sheet labels this field's evidence: the ref
+    #: matched *and* the passage actually contains it. ``None`` means ref-level only.
+    top1_precise: Optional[bool] = None
+    ranked_precise: Optional[bool] = None
+
     @property
     def answerable(self) -> bool:
         return bool(self.truth)
 
     @property
     def top1_correct(self) -> bool:
+        if self.top1_precise is not None:
+            return self.top1_precise
         return self.top1 is not None and self.top1 in self.truth
 
+    @property
+    def ranked_correct(self) -> bool:
+        """Did retrieval surface the answer anywhere in the ranked set?"""
+        if self.ranked_precise is not None:
+            return self.ranked_precise
+        return bool(set(self.truth) & set(self.ranked))
 
-def score(field_plan: FieldPlan, labels: Dict[str, List[str]]) -> List[Scored]:
-    """Join a routed FieldPlan to the labels, field by field."""
+
+def points_at(
+    candidate: EvidenceRef, truth: Sequence[str], evidence: str, passage
+) -> bool:
+    """Does this candidate point at the labeled answer — the passage, not just the file?
+
+    For a column or a tool the ref settles it: ``growth::pH`` names one place. For a
+    document it does not. ``doc::readme_long`` is one label for 34 000 characters, so
+    *any* chunk of that file counts as the right answer and recall@k degrades into
+    "was the right file retrieved" — which, in a three-document bundle, is no
+    measurement at all. Where the sheet labels the evidence, the passage must actually
+    contain it.
+    """
+    if ref_of(candidate) not in truth:
+        return False
+    if not evidence or candidate.kind != "quoted_span" or passage is None:
+        return True
+    return cites(passage(candidate) or "", evidence)
+
+
+def score(
+    field_plan: FieldPlan,
+    labels: Dict[str, List[str]],
+    evidence: Optional[Dict[str, str]] = None,
+    passage=None,
+) -> List[Scored]:
+    """Join a routed FieldPlan to the labels, field by field.
+
+    ``evidence`` and ``passage`` together sharpen a document label from the file to
+    the passage; without them the join is ref-level, as before.
+    """
+    evidence = evidence or {}
     scored: List[Scored] = []
     for path, routing in field_plan.routings.items():
         if path not in labels:
             continue
         ranked = [ref_of(c) for c in routing.candidates]
+        want = evidence.get(path, "")
+        precise = (
+            [points_at(c, labels[path], want, passage) for c in routing.candidates]
+            if want and passage is not None
+            else []
+        )
         routed = routing.status != "unanswered" and bool(ranked)
         by = None
         if not routed:
@@ -148,6 +197,8 @@ def score(field_plan: FieldPlan, labels: Dict[str, List[str]]) -> List[Scored]:
                 abstained_by=by,
                 quote=routing.judge_quote or "",
                 grounded=routing.judge_grounded,
+                top1_precise=(precise[0] and routed) if precise else None,
+                ranked_precise=any(precise) if precise else None,
             )
         )
     return scored

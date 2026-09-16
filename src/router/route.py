@@ -61,7 +61,7 @@ from src.context.base_context import (
     content_terms,
     tokenize,
 )
-from src.router.catalog import Catalog
+from src.router.catalog import Catalog, locate_quote
 from src.router.judge import CandidateJudge, Verdict, describe, promote, weaker
 from src.router.veto import apply_veto
 from src.router.schema import FieldSpec, walk_schema
@@ -82,6 +82,7 @@ class FieldRouting:
     judge_note: Optional[str] = None       # why it picked that one, or why none
     judge_quote: Optional[str] = None      # the sentence it cited from that candidate
     judge_grounded: Optional[bool] = None  # could its quote be found in the material?
+    citation: Optional[str] = None         # resource#start-end of the cited sentence
     vetoed: List[str] = field(default_factory=list)   # candidates ruled out, and why
     # Populated by the M4 compiler, not the router:
     extractor_role: Optional[str] = None
@@ -98,6 +99,7 @@ class FieldRouting:
             "judge_note": self.judge_note,
             "judge_quote": self.judge_quote,
             "judge_grounded": self.judge_grounded,
+            "citation": self.citation,
             "vetoed": self.vetoed,
             "candidates": [c.to_dict() for c in self.candidates],
             "extractor_role": self.extractor_role,
@@ -177,6 +179,37 @@ def _passage_reader(docs: List[Searchable]):
         return doc.read_text(candidate.resource)[start:end]
 
     return read
+
+
+def _cite(
+    candidate: EvidenceRef, quote: str, passage
+) -> Tuple[EvidenceRef, Optional[str]]:
+    """Narrow a span candidate to the sentence the judge actually cited.
+
+    The chunk is where *retrieval* stopped; the quote is where the answer is. Locating
+    one inside the other is the same proposes/disposes move layer 3 makes for a prose
+    read (:func:`~src.router.catalog.locate_quote`): the model proposes a verbatim
+    sentence, and finding it in the source disposes of it — yielding a citation a
+    verifier can check by reading, instead of a 2 000-character chunk whose boundaries
+    are an artifact of the chunker.
+
+    A paraphrase that cannot be located leaves the candidate at chunk width. The
+    routing still carries ``judge_grounded=False``, so an unlocatable quote is already
+    graded; this only declines to invent a span for it.
+    """
+    text = passage(candidate) if passage else None
+    span = locate_quote(quote, text) if text else None
+    if span is None or not isinstance(candidate.locator, (tuple, list)):
+        return candidate, None
+    base = candidate.locator[0]
+    start, end = base + span[0], base + span[1]
+    located = EvidenceRef(
+        resource=candidate.resource, locator=(start, end), kind=candidate.kind,
+        # The snippet becomes the cited sentence itself: a preview of a chunk is a
+        # worse handoff than the one sentence that was judged to answer the field.
+        snippet=text[span[0] : span[1]], score=candidate.score,
+    )
+    return located, f"{candidate.resource}#{start}-{end}"
 
 
 def _answer_tools():
@@ -287,6 +320,10 @@ def _settle(
         candidates = promote(candidates, decision, passage)
 
     top = candidates[0]
+    citation = None
+    if judge is not None and decision.quote and top.kind == "quoted_span":
+        top, citation = _cite(top, decision.quote, passage)
+        candidates = [top] + candidates[1:]
     bucket = _bucket_of(top)
     assurance = _assurance(bucket, top, catalog)
     if judge is not None:
@@ -304,6 +341,7 @@ def _settle(
         # document — so it travels on the routing rather than being recomputed.
         judge_quote=decision.quote or None,
         judge_grounded=decision.grounded if judge is not None else None,
+        citation=citation,
         vetoed=vetoed,
     )
 

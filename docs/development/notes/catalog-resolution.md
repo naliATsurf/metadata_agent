@@ -107,7 +107,8 @@ above a long README so the common natural-language case skips retrieval):
 
 **Every read is then grounded** by `_ground_read`. The LLM *proposes* a verbatim quote;
 locating it *disposes* of it — exact match, then case-insensitive, then whitespace-tolerant
-(`_locate`), so only a genuine paraphrase misses. A located quote yields a real span
+(`locate_quote`, shared with the router's citation grounding), so only a genuine
+paraphrase misses. A located quote yields a real span
 citation (`resource#start-end`), the text as found in the document, and a grade from
 `_grounding_grade` (`high` when the quote both mentions the column and carries the
 description's content words, else `medium`). A quote that cannot be located yields the

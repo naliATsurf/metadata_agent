@@ -29,7 +29,9 @@ from examples.field_router_plan import (
 )
 from examples.resolve_catalog import DEFAULT_BUNDLE, resolve
 from src.config import PROVIDER_CONFIGS, llm_settings
+from src.context import create_context
 from src.router.bundle import NONE, discover_bundle, select
+from src.router.route import _passage_reader
 from src.standards import METADATA_STANDARDS
 
 DATA = Path(__file__).resolve().parent / "data"
@@ -101,11 +103,17 @@ def run(args: argparse.Namespace, console: Console) -> Path:
         console.print(
             f"[dim]veto: {'off' if args.no_veto else 'on'}   candidate judge: {label}[/]"
         )
+        # The passage reader is what lets a document label be graded at the passage
+        # rather than at the file; without it the sheet's `evidence` column is inert.
+        passage = _passage_reader(
+            [create_context(str(p), name=p.stem) for p in resolved.documents]
+        )
+        evidence = load_evidence(sheet)
         report(
-            score(field_plan, load_labels(sheet)),
+            score(field_plan, load_labels(sheet), evidence, passage),
             console,
             args.candidates,
-            load_evidence(sheet),
+            evidence,
         )
         return sheet
 
