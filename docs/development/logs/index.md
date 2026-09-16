@@ -8,6 +8,10 @@ records findings from an investigation that changed no code.
 ## 2026-09
 
 - -
+  **[2026-09-16 — The document tier offers whole passages, not its best three chunks](2026-09-16_document-passages.change.md)**
+  — retrieval becomes an ordering rather than a filter, gated on a judge that can refuse;
+  recall@5 5/12 → 12/12. Records why chunk enrichment was rejected and embeddings deferred.
+- -
   **[2026-09-16 — A document routing carries the passage it cited, not the file's name](2026-09-16_span-level-routing.change.md)**
   — the judge was shown a 200-character preview of a 2 000-character chunk and abstained
   for want of withheld evidence; it now reads the whole passage, its quote rides on the

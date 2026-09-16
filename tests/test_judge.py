@@ -293,10 +293,16 @@ class RoutingIntegrationTest(unittest.TestCase):
     def test_rejecting_the_structured_tier_falls_through_to_documents(self):
         """A judge that dismisses lexical coincidences still gets to read the prose."""
         def reply(prompt: str) -> str:
-            if "Foo Survey" in prompt:
-                return _reply(choice="doc::doc", confidence="medium",
-                              quote="The dataset title is Foo Survey")
-            return _reply(choice=None, because="no column holds a title")
+            if "Foo Survey" not in prompt:
+                return _reply(choice=None, because="no column holds a title")
+            verdict = dict(choice="doc::doc", confidence="medium",
+                           quote="The dataset title is Foo Survey")
+            # The document tier offers whole passages, so one passage serves every
+            # pending field and they are judged together — a batch answer is keyed
+            # by field, where a single-field one is flat.
+            if "FIELDS:" in prompt:
+                return json.dumps({"title": verdict})
+            return _reply(**verdict)
 
         routing = self._route(reply).routings["title"]
         self.assertEqual(routing.bucket, "document")

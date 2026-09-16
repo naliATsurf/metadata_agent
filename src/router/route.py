@@ -143,13 +143,118 @@ class FieldPlan:
         }
 
 
-def _search_docs(docs: List[Searchable], query: str, k: int) -> List[EvidenceRef]:
-    """Ranked spans across the document sources (scores compare within one corpus)."""
+#: How wide a document passage may be. The same budget layer 3 packs prose reads
+#: into, and the same size as a document it would otherwise take in one go.
+_PASSAGE_MAX_CHARS = 20_000
+
+
+def _pack(chunks: List[Any]) -> List[List[Any]]:
+    """Group *consecutive* chunks into runs that fit the passage budget.
+
+    Consecutive, unlike layer 3's packing of scattered retrieval hits, because a
+    router candidate's locator is a span: keeping a passage contiguous is what makes
+    ``text[start:end]`` the passage exactly, so a citation located inside it stays a
+    true document offset. A chunk over the budget is a passage by itself — a chunk is
+    never split, since it is what offsets point into.
+    """
+    runs: List[List[Any]] = []
+    current: List[Any] = []
+    size = 0
+    for chunk in chunks:
+        if current and size + len(chunk.text) > _PASSAGE_MAX_CHARS:
+            runs.append(current)
+            current, size = [], 0
+        current.append(chunk)
+        size += len(chunk.text)
+    if current:
+        runs.append(current)
+    return runs
+
+
+def _document_corpus(
+    docs: List[Searchable], packed: bool = True
+) -> Tuple[List[EvidenceRef], List[List[str]]]:
+    """Every document as candidates — packed into passages, or chunk by chunk.
+
+    **The router only widens what it offers when something can narrow it again.**
+    ``packed`` is therefore the judge's presence. With a judge, whole passages go out
+    and come back narrowed to the cited sentence (:func:`_cite`) — broad retrieval,
+    precise result. Without one, rank 1 *is* the answer, so a passage-wide candidate
+    would hand the compiler a whole section where it used to get the right paragraph,
+    and every field of one small document would seed the identical span. Unjudged
+    retrieval has to be precise, because nothing downstream will fix it.
+
+    Ranking the chunks and keeping the best three answers the wrong question. A field
+    description is written in schema vocabulary and the document in the author's, so
+    the paragraph that answers a field routinely shares no word with it: ``photoperiod``
+    against "a 12:12-h light–dark cycle" scores zero, and a paragraph naming the
+    species, the temperature, the food and the life stage is dropped for every one of
+    those fields at once. That is not a ranking a better lexical scorer fixes — the
+    term is absent, and a filter cannot recover what it discarded.
+
+    So nothing is discarded. The corpus is packed into whole passages and *all* of them
+    are offered, ordered by score; with a small document set every passage survives the
+    top-``k`` cut, and a large one still degrades gently, since ``k`` passages cover an
+    order of magnitude more text than ``k`` chunks did.
+
+    Built once per routing pass: chunking and tokenizing are per corpus, not per field.
+    """
     refs: List[EvidenceRef] = []
+    tokens: List[List[str]] = []
     for doc in docs:
-        refs.extend(doc.search(query, k=k))
-    refs.sort(key=lambda r: r.score, reverse=True)
-    return refs[:k]
+        for resource in getattr(doc, "resources", []):
+            chunks = list(doc.iter_chunks(resource))
+            if not chunks:
+                continue
+            text = doc.read_text(resource)
+            for run in (_pack(chunks) if packed else [[c] for c in chunks]):
+                start = run[0].start_offset
+                end = run[-1].start_offset + len(run[-1].text)
+                passage = text[start:end]
+                refs.append(
+                    EvidenceRef(
+                        resource=resource, locator=(start, end), kind="quoted_span",
+                        snippet=passage[:200] + ("…" if len(passage) > 200 else ""),
+                        score=0.0,
+                    )
+                )
+                tokens.append(tokenize(passage))
+    return refs, tokens
+
+
+def _search_docs(
+    corpus: Tuple[List[EvidenceRef], List[List[str]]],
+    query: str,
+    k: int,
+    offer_unscored: bool = False,
+) -> List[EvidenceRef]:
+    """Order the document passages against one field's query, best first.
+
+    ``offer_unscored`` decides what happens when *nothing* scores — the ``photoperiod``
+    case, where the field's every term is absent from the corpus and the answer is in
+    it anyway. Offering the passages regardless is the only way such a field can be
+    answered, **and it is only defensible when something can refuse them**: a judge
+    may answer "none", where a bare ranking takes rank 1 on faith. So the router
+    passes it only with a judge. Without one an empty result stands, and the field is
+    reported ``unanswered`` — a coverage gap is the honest reading of a corpus the
+    query cannot reach, and far better than a coin flip with a citation attached.
+    """
+    refs, tokens = corpus
+    if not refs:
+        return []
+    scores = bm25_scores(content_terms(query), tokens)
+    ranked = [
+        EvidenceRef(
+            resource=r.resource, locator=r.locator, kind=r.kind,
+            snippet=r.snippet, score=s,
+        )
+        for r, s in zip(refs, scores)
+        if s > 0
+    ]
+    if not ranked and offer_unscored:
+        ranked = list(refs)
+    ranked.sort(key=lambda r: r.score, reverse=True)
+    return ranked[:k]
 
 
 def _passage_reader(docs: List[Searchable]):
@@ -415,6 +520,7 @@ def route_fields(
     docs = docs or []
     specs = list(walk_schema(schema))
     passage = _passage_reader(docs)
+    corpus = _document_corpus(docs, packed=judge is not None)
 
     # Tier 1 — the structured corpus (tools + columns, one ranking), vetoed on type
     # and units before anything reads it. A ranking cannot tell a genus name from a
@@ -450,7 +556,9 @@ def route_fields(
     # is stated in prose — so a judge that dismissed a set of lexical coincidences
     # still gets to judge the narrative sources.
     spans = {
-        spec.path: _search_docs(docs, spec.description or spec.path, k)
+        spec.path: _search_docs(
+            corpus, spec.description or spec.path, k, offer_unscored=judge is not None
+        )
         for spec in pending
     }
     span_verdicts = _adjudicate(
