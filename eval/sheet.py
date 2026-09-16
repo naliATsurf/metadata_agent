@@ -19,7 +19,8 @@ from src.router.schema import FieldSpec, walk_schema
 from src.standards import get_schema_for_standard
 
 _HEADER = [
-    "field", "answer", "notes", "description", "type", "required", "router_top1",
+    "field", "answer", "evidence", "notes", "description", "type", "required",
+    "router_top1",
 ]
 
 
@@ -57,6 +58,7 @@ def write_sheet(
         rows.append({
             "field": path,
             "answer": "",                 # <- to fill in
+            "evidence": "",               # <- optional: words the right quote must contain
             "notes": "",
             "description": (spec.description if spec else routing.query) or "",
             "type": spec.type if spec else "",

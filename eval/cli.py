@@ -12,7 +12,13 @@ from pathlib import Path
 
 from rich.console import Console
 
-from eval.labels import ALTERNATIVE_SEP, UNANSWERABLE, load_labels, score
+from eval.labels import (
+    ALTERNATIVE_SEP,
+    UNANSWERABLE,
+    load_evidence,
+    load_labels,
+    score,
+)
 from eval.score import report
 from eval.sheet import write_sheet, write_sources
 from examples.field_router_plan import (
@@ -95,7 +101,12 @@ def run(args: argparse.Namespace, console: Console) -> Path:
         console.print(
             f"[dim]veto: {'off' if args.no_veto else 'on'}   candidate judge: {label}[/]"
         )
-        report(score(field_plan, load_labels(sheet)), console, args.candidates)
+        report(
+            score(field_plan, load_labels(sheet)),
+            console,
+            args.candidates,
+            load_evidence(sheet),
+        )
         return sheet
 
     written, fresh = write_sheet(field_plan, args.standard, sheet, args.candidates)

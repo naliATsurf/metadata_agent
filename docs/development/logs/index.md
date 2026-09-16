@@ -8,6 +8,11 @@ records findings from an investigation that changed no code.
 ## 2026-09
 
 - -
+  **[2026-09-16 — A document routing carries the passage it cited, not the file's name](2026-09-16_span-level-routing.change.md)**
+  — the judge was shown a 200-character preview of a 2 000-character chunk and abstained
+  for want of withheld evidence; it now reads the whole passage, its quote rides on the
+  routing, and the sheet grades the passage rather than the file.
+- -
   **[2026-09-15 — Claims agree by meaning, judged by a claim comparer](2026-09-15_claim-comparer.change.md)**
   — `LLMClaimComparer` groups differing claims by meaning in one call per bundle;
   corroboration and conflict follow the groups, and each column is decided once.

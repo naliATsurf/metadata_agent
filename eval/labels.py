@@ -111,6 +111,8 @@ class Scored:
     routed: bool
     signals: Dict[str, float]
     abstained_by: Optional[str] = None   # "veto" | "judge" | None
+    quote: str = ""                      # the sentence the judge cited
+    grounded: Optional[bool] = None      # was that quote found in the chosen material?
 
     @property
     def answerable(self) -> bool:
@@ -144,6 +146,37 @@ def score(field_plan: FieldPlan, labels: Dict[str, List[str]]) -> List[Scored]:
                 routed=routed,
                 signals={name: fn(routing) for name, fn in SIGNALS.items()},
                 abstained_by=by,
+                quote=routing.judge_quote or "",
+                grounded=routing.judge_grounded,
             )
         )
     return scored
+
+
+def load_evidence(path: Path) -> Dict[str, str]:
+    """Read the optional ``evidence`` column: what the right quote must contain.
+
+    A ref alone cannot grade a document answer. ``doc::readme_long`` is one label for
+    a 34 000-character file, so a routing that cites the lab bench temperature and one
+    that cites the acclimation temperature score identically — the metric measures
+    which *file* was named, which for a single-document bundle is no measurement at
+    all. A few words the correct passage must contain are cheap to label and restore
+    the distinction, and unlike a character offset a human can actually write them.
+
+    Optional per field: unlabeled fields are simply not span-scored.
+    """
+    if not path.exists():
+        return {}
+    with path.open(newline="", encoding="utf-8") as handle:
+        return {
+            row["field"]: (row.get("evidence") or "").strip()
+            for row in csv.DictReader(handle)
+            if (row.get("evidence") or "").strip()
+        }
+
+
+def cites(quote: str, evidence: str) -> bool:
+    """Does the cited quote contain the labeled evidence? Whitespace- and case-loose."""
+    if not quote or not evidence:
+        return False
+    return " ".join(evidence.casefold().split()) in " ".join(quote.casefold().split())

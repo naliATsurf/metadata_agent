@@ -84,7 +84,9 @@ class Verdict:
         return self.choice is None
 
 
-def describe(candidate: EvidenceRef, catalog: Any = None) -> Dict[str, Any]:
+def describe(
+    candidate: EvidenceRef, catalog: Any = None, passage: Optional[str] = None
+) -> Dict[str, Any]:
     """Everything known about one candidate, as the flat card a judge rules on.
 
     The units and the value range are the load-bearing parts. The two mistakes this
@@ -92,6 +94,14 @@ def describe(candidate: EvidenceRef, catalog: Any = None) -> Dict[str, Any]:
     as the condition's duration in days, and ``growth::condition`` (unitless, 0.89–
     1.22) as a temperature — are decidable from units and numbers and from nothing
     else. Layer 3 already computed both; this just puts them in front of the judge.
+
+    ``passage`` is the **full text a span candidate points at**, and for a document
+    candidate it is the whole card. Falling back to ``snippet`` is a last resort: a
+    snippet is a 200-character *preview* by design, a retrieved chunk is routinely ten
+    times that, and the sentence that answers the field is as likely to sit past the
+    cut as before it. A judge shown a preview abstains for want of evidence that was
+    retrieved and then withheld — indistinguishable, from the outside, from a judge
+    that read the passage and found nothing in it.
     """
     card: Dict[str, Any] = {
         "ref": candidate_ref(candidate),
@@ -120,7 +130,7 @@ def describe(candidate: EvidenceRef, catalog: Any = None) -> Dict[str, Any]:
         if column.link_quote:
             card["source_text"] = column.link_quote
     else:
-        card["text"] = candidate.snippet or ""
+        card["text"] = passage or candidate.snippet or ""
     return {key: value for key, value in card.items() if value not in (None, "")}
 
 
@@ -403,20 +413,19 @@ def _referee(data: Optional[dict], cards: Sequence[Dict[str, Any]]) -> Verdict:
     )
 
 
+def _contains(haystack: str, needle: str) -> bool:
+    """Whitespace-normalized, case-folded containment — a model reflows what it copies."""
+    if not needle:
+        return False
+    return " ".join(needle.casefold().split()) in " ".join(haystack.casefold().split())
+
+
 def _locatable(quote: str, card: Dict[str, Any]) -> bool:
     """Is ``quote`` present in the card the judge was shown?
 
-    Whitespace-normalized and case-folded, because a model reflows what it copies.
     An empty quote is not grounded — silence is not a citation.
     """
-    if not quote:
-        return False
-    material = " ".join(str(v) for v in card.values()).casefold().split()
-    needle = quote.casefold().split()
-    if not needle:
-        return False
-    haystack = " ".join(material)
-    return " ".join(needle) in haystack
+    return _contains(" ".join(str(value) for value in card.values()), quote)
 
 
 def weaker(first: str, second: str) -> str:
@@ -426,7 +435,9 @@ def weaker(first: str, second: str) -> str:
 
 
 def promote(
-    candidates: List[EvidenceRef], verdict: Verdict
+    candidates: List[EvidenceRef],
+    verdict: Verdict,
+    passage: Optional[Callable[[EvidenceRef], Optional[str]]] = None,
 ) -> List[EvidenceRef]:
     """Reorder so the judge's choice is rank 1, keeping the rest in ranked order.
 
@@ -435,8 +446,17 @@ def promote(
     the chosen candidate makes those commitments follow a *judgment* instead of
     corpus iteration order, without the compiler having to change. The rejected
     candidates stay on the routing as the record of what was considered.
+
+    **Every span of one document shares its ref** (:func:`candidate_ref` collapses
+    ``quoted_span`` to ``doc::<resource>``), so a verdict naming a document cannot on
+    its own say *which* passage of it was meant, and rank 1 would fall back to BM25
+    order — discarding the span-level judgement just paid for. The judge's own quote
+    disposes: given ``passage``, the span it actually cited leads.
     """
     if verdict.abstained:
         return candidates
     chosen = [c for c in candidates if candidate_ref(c) == verdict.choice]
-    return chosen + [c for c in candidates if candidate_ref(c) != verdict.choice]
+    rest = [c for c in candidates if candidate_ref(c) != verdict.choice]
+    if len(chosen) > 1 and passage is not None and verdict.quote:
+        chosen.sort(key=lambda c: not _contains(passage(c) or "", verdict.quote))
+    return chosen + rest

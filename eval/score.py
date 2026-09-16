@@ -25,7 +25,7 @@ from typing import Dict, List, Tuple
 from rich.console import Console
 from rich.table import Table
 
-from eval.labels import SIGNALS, UNANSWERABLE, ALTERNATIVE_SEP, Scored
+from eval.labels import SIGNALS, UNANSWERABLE, ALTERNATIVE_SEP, Scored, cites
 
 
 def risk_coverage(scored: List[Scored], signal: str) -> List[Tuple[float, float, float]]:
@@ -41,7 +41,12 @@ def risk_coverage(scored: List[Scored], signal: str) -> List[Tuple[float, float,
     return curve
 
 
-def report(scored: List[Scored], console: Console, k: int) -> Dict[str, float]:
+def report(
+    scored: List[Scored],
+    console: Console,
+    k: int,
+    evidence: Dict[str, str] | None = None,
+) -> Dict[str, float]:
     """Print the grading and return the headline numbers for a caller to assert on."""
     if not scored:
         raise SystemExit(
@@ -86,6 +91,23 @@ def report(scored: List[Scored], console: Console, k: int) -> Dict[str, float]:
     if by_veto or by_judge:
         console.print(f"  abstentions: veto {by_veto}, judge {by_judge}")
 
+    # Span precision: did the routing cite the right *passage*, not just the right
+    # file? Only meaningful where the sheet labels the evidence, and it is the number
+    # that separates a correct answer from one that named the same document by luck.
+    span_scored = [s for s in scored if s.routed and (evidence or {}).get(s.field)]
+    span_correct = sum(1 for s in span_scored if cites(s.quote, evidence[s.field]))
+    if span_scored:
+        console.print(
+            f"  cited correctly [bold]{span_correct}/{len(span_scored)}[/] of the "
+            "span-labeled fields — right passage, not just the right document"
+        )
+    ungrounded = [s for s in scored if s.routed and s.grounded is False]
+    if ungrounded:
+        console.print(
+            f"  [yellow]{len(ungrounded)} answered field(s) cited a quote that could "
+            "not be located[/] — the router's own unreliability signal"
+        )
+
     for signal in SIGNALS:
         curve = risk_coverage(scored, signal)
         if not curve:
@@ -101,12 +123,15 @@ def report(scored: List[Scored], console: Console, k: int) -> Dict[str, float]:
     wrong = [s for s in scored if s.routed and not s.top1_correct]
     if wrong:
         table = Table(title="Where rank 1 is wrong", title_justify="left")
-        for name in ("field", "answered with", "should be", *SIGNALS):
+        for name in ("field", "answered with", "should be", "cited", *SIGNALS):
             table.add_column(name, overflow="fold")
         for s in sorted(wrong, key=lambda s: s.signals["coverage"]):
             table.add_row(
                 s.field, s.top1 or "—",
                 ALTERNATIVE_SEP.join(s.truth) or UNANSWERABLE,
+                # The quote is what makes a document answer inspectable: two routings
+                # naming the same file are told apart only by what they cited.
+                (s.quote[:80] + "…" if len(s.quote) > 80 else s.quote) or "—",
                 *(f"{s.signals[n]:.2f}" for n in SIGNALS),
             )
         console.print(table)
@@ -116,4 +141,5 @@ def report(scored: List[Scored], console: Console, k: int) -> Dict[str, float]:
         "precision_at_1": hit_at_1 / len(answerable) if answerable else 0.0,
         "over_answered": float(len(over)),
         "accuracy": correct / len(scored),
+        "span_precision": span_correct / len(span_scored) if span_scored else 0.0,
     }

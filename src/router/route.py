@@ -80,6 +80,7 @@ class FieldRouting:
     # Populated when a candidate judge adjudicated the candidate set (layer 4b):
     judge_choice: Optional[str] = None     # the ref it picked, None when it abstained
     judge_note: Optional[str] = None       # why it picked that one, or why none
+    judge_quote: Optional[str] = None      # the sentence it cited from that candidate
     judge_grounded: Optional[bool] = None  # could its quote be found in the material?
     vetoed: List[str] = field(default_factory=list)   # candidates ruled out, and why
     # Populated by the M4 compiler, not the router:
@@ -95,6 +96,7 @@ class FieldRouting:
             "assurance": self.assurance,
             "judge_choice": self.judge_choice,
             "judge_note": self.judge_note,
+            "judge_quote": self.judge_quote,
             "judge_grounded": self.judge_grounded,
             "vetoed": self.vetoed,
             "candidates": [c.to_dict() for c in self.candidates],
@@ -146,6 +148,35 @@ def _search_docs(docs: List[Searchable], query: str, k: int) -> List[EvidenceRef
         refs.extend(doc.search(query, k=k))
     refs.sort(key=lambda r: r.score, reverse=True)
     return refs[:k]
+
+
+def _passage_reader(docs: List[Searchable]):
+    """Resolve a span candidate back to the **full text it points at**.
+
+    ``EvidenceRef.snippet`` is a 200-character preview — its stated purpose — while a
+    retrieved chunk runs to thousands. Handing the judge the preview withholds most of
+    what retrieval just found, and the sentence that answers the field is as likely to
+    fall past the cut as before it. The span is the pointer; this dereferences it.
+
+    Returns ``None`` for anything that is not a located span, which is every structured
+    candidate: a column's card is what layer 3 resolved, not a slice of a document.
+    """
+    by_resource: Dict[str, Searchable] = {}
+    for doc in docs:
+        for resource in getattr(doc, "resources", []):
+            by_resource.setdefault(resource, doc)
+
+    def read(candidate: EvidenceRef) -> Optional[str]:
+        locator = candidate.locator
+        doc = by_resource.get(candidate.resource)
+        if candidate.kind != "quoted_span" or doc is None:
+            return None
+        if not isinstance(locator, (tuple, list)) or len(locator) != 2:
+            return None
+        start, end = locator
+        return doc.read_text(candidate.resource)[start:end]
+
+    return read
 
 
 def _answer_tools():
@@ -208,6 +239,7 @@ def _adjudicate(
     judge: Optional[CandidateJudge],
     items: List[Tuple[FieldSpec, List[EvidenceRef]]],
     catalog: Optional[Catalog],
+    passage,
 ) -> Dict[str, Verdict]:
     """Put one whole tier's candidate sets to the judge, in a single pass.
 
@@ -219,7 +251,7 @@ def _adjudicate(
     if judge is None:
         return {}
     requests = [
-        (spec, [describe(c, catalog) for c in candidates])
+        (spec, [describe(c, catalog, passage(c)) for c in candidates])
         for spec, candidates in items
         if candidates
     ]
@@ -233,6 +265,7 @@ def _settle(
     catalog: Optional[Catalog],
     judge: Optional[CandidateJudge],
     vetoed: List[str],
+    passage=None,
 ) -> Optional[FieldRouting]:
     """Build the routing for one tier's candidates, or None if it cannot answer.
 
@@ -251,7 +284,7 @@ def _settle(
         )
         if decision.abstained:
             return None
-        candidates = promote(candidates, decision)
+        candidates = promote(candidates, decision, passage)
 
     top = candidates[0]
     bucket = _bucket_of(top)
@@ -265,6 +298,11 @@ def _settle(
         candidates=candidates, assurance=assurance,
         judge_choice=decision.choice,
         judge_note=decision.because or None,
+        # The quote is the sentence the judge cited, verified present in the candidate
+        # it chose. For a document field it is the nearest thing to the answer the
+        # router ever holds, and re-deriving it downstream means re-reading the whole
+        # document — so it travels on the routing rather than being recomputed.
+        judge_quote=decision.quote or None,
         judge_grounded=decision.grounded if judge is not None else None,
         vetoed=vetoed,
     )
@@ -338,6 +376,7 @@ def route_fields(
     """
     docs = docs or []
     specs = list(walk_schema(schema))
+    passage = _passage_reader(docs)
 
     # Tier 1 — the structured corpus (tools + columns, one ranking), vetoed on type
     # and units before anything reads it. A ranking cannot tell a genus name from a
@@ -351,14 +390,16 @@ def route_fields(
             candidates, reasons = apply_veto(spec, candidates, catalog)
         structured[spec.path], vetoes[spec.path] = candidates, reasons
 
-    verdicts = _adjudicate(judge, [(s, structured[s.path]) for s in specs], catalog)
+    verdicts = _adjudicate(
+        judge, [(s, structured[s.path]) for s in specs], catalog, passage
+    )
 
     routings: Dict[str, FieldRouting] = {}
     pending: List[FieldSpec] = []
     for spec in specs:
         settled = _settle(
             spec, structured[spec.path], verdicts.get(spec.path),
-            catalog, judge, vetoes[spec.path],
+            catalog, judge, vetoes[spec.path], passage,
         )
         if settled is None:
             pending.append(spec)
@@ -374,11 +415,13 @@ def route_fields(
         spec.path: _search_docs(docs, spec.description or spec.path, k)
         for spec in pending
     }
-    span_verdicts = _adjudicate(judge, [(s, spans[s.path]) for s in pending], catalog)
+    span_verdicts = _adjudicate(
+        judge, [(s, spans[s.path]) for s in pending], catalog, passage
+    )
     for spec in pending:
         routings[spec.path] = _settle(
             spec, spans[spec.path], span_verdicts.get(spec.path),
-            catalog, judge, vetoes[spec.path],
+            catalog, judge, vetoes[spec.path], passage,
         ) or _unanswered(
             spec, structured[spec.path] + spans[spec.path], judge, vetoes[spec.path]
         )
