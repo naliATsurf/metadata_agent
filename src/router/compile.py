@@ -159,9 +159,10 @@ def compile_field_plan(
 def _resources(routing: FieldRouting) -> Tuple[str, ...]:
     """Every resource this field's candidates live in, best-ranked first, deduped.
 
-    The unit of grouping *and* of what a task opens. A tool candidate carries an
-    empty resource — it is context-level, not tied to a table — so it contributes
-    nothing here and is handled by the empty-target convention instead.
+    The unit of grouping *and* of what a task opens. A tool candidate carries the table
+    the router bound it to run on; a tool that runs over the whole context carries an
+    empty resource, contributes nothing here, and is handled by the empty-target
+    convention instead.
     """
     seen: List[str] = []
     for candidate in routing.candidates:
@@ -240,16 +241,23 @@ def _field_bindings(routings: List[FieldRouting]) -> List[Dict[str, Any]]:
     reads the binding structurally instead of parsing an instruction. ``assurance``
     is provisional: the router's grade, to be confirmed by the verify pass. This is
     the *only* place candidates live on a task (no separate deduped pool).
+
+    A field with a tool carries ``tool_arguments`` too — one argument set per run, the
+    table and columns the router bound — so the tool can be run without a model
+    choosing them.
     """
-    return [
-        {
+    bindings = []
+    for r in routings:
+        binding: Dict[str, Any] = {
             "field": r.field_path,
             "query": r.query,
             "assurance": r.assurance,   # provisional — confirmed by the verify pass
             "candidates": [c.to_dict() for c in r.candidates],
         }
-        for r in routings
-    ]
+        if r.tool_arguments:
+            binding["tool_arguments"] = r.tool_arguments
+        bindings.append(binding)
+    return bindings
 
 
 def _artifact_name(bucket: str, resources: Tuple[str, ...], index: int) -> str:
@@ -271,11 +279,11 @@ def _extraction_task(
     index: int,
 ) -> Task:
     fields = [r.field_path for r in routings]
-    # Tool-answered fields are context-level, and an empty target already means
-    # all-of-context — the widest scope there is, so nothing is closed off. Every
-    # other task opens each resource its candidates live in, so the executor can
-    # actually reach the candidates `field_bindings` offers it.
-    target = [] if bucket == "tool" else list(resources)
+    # Every task opens each resource its candidates live in, so the executor can
+    # actually reach the candidates `field_bindings` offers it. A tool bound to tables
+    # opens those; one that runs over the whole context has none, and an empty target
+    # already means all-of-context.
+    target = list(resources)
     player = players.get(bucket, _BUCKET_PLAYER["column"])
     topology = _topology_for(routings)
 

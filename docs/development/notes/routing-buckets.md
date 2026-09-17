@@ -35,7 +35,7 @@ A candidate has five fields:
 
 | Field | Meaning |
 |---|---|
-| `resource` | the resource the location lives in (a table name, a document name; empty for a whole-context tool) |
+| `resource` | the resource the location lives in (a table name, a document name; for a tool, the table it runs on — empty for a whole-context tool) |
 | `locator` | the pointer *within* that resource — a **column name** (tabular) or a **`(start, end)` char span** (text) |
 | `kind` | what sort of location it is — the assurance tag (see below) |
 | `snippet` | a short human/LLM-readable preview of the location, for seeding and citation |
@@ -60,7 +60,7 @@ grounded, ordered from most to least verifiable.
 
 | `kind` | The location is… | Value produced by | Grounding | Produced by |
 |---|---|---|---|---|
-| `tool` | a whole-resource **tool** (e.g. `get_item_count`) | a deterministic computation | recomputable → high | `_structured_candidates` (`route.py`), from `field_answering_tools()` |
+| `tool` | a **tool** computing the value (e.g. `get_item_count`, `get_temporal_extent`), run on the table and columns bound as its arguments (`FieldRouting.tool_arguments`) | a deterministic computation | recomputable → high, lowered when an argument column does not fit | without judges, `_structured_candidates` (`route.py`, tools needing no columns only); with them, the tool matcher's pick joined to the column matcher's argument picks (`_settle_structured`) |
 | `computed_column` | a specific **column**, enriched with a resolved meaning | a computation over that column | recomputable, but only as sure as the column's resolution | `Catalog.search` / `TabularContext.search` |
 | `verified_span` | a prose **span** a verifier has confirmed supports the value | quoting, then confirmed | medium (checked) | *reserved for the verify pass (M5); not emitted yet* |
 | `quoted_span` | a prose **span**, retrieved but unconfirmed | quoting/extraction | low (retrieved only) | `TextContext.search` |
@@ -279,8 +279,10 @@ consumer. It reads the bucket for five distinct decisions:
    `data_analyst`; `document` → `metadata_specialist`.
 4. **Instruction phrasing** — `_instruction(bucket, …)`: "compute via the bound tool"
    vs "extract from column *X*" vs "quote the supporting span".
-5. **Target scoping** — `tool` tasks are context-level (`target_resources=[]`);
-   column and span tasks target the resource that holds them.
+5. **Target scoping** — every task targets the resources its candidates live in: a
+   `tool` task the tables its tool was bound to, or the whole context
+   (`target_resources=[]`) for a tool bound to none; column and span tasks the
+   resource that holds them.
 
 **Downstream (future — M5/M6):** the executor runs the compiled `Plan`; the
 verify/reconcile pass will lean on the bucket-implied assurance to decide replay vs

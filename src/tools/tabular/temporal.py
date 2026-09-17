@@ -5,7 +5,7 @@ from typing import Any, Dict
 import pandas as pd
 
 from src.context.base_context import TabularContext
-from src.tools.base import context_tool
+from src.tools.base import ColumnArg, context_tool
 from src.tools.tabular.detection import (
     detect_temporal_dtype,
     is_temporal_column_name,
@@ -113,7 +113,10 @@ def analyze_temporal_column(
     return result
 
 
-@context_tool(toolset="tabular.temporal", requires=TabularContext)
+@context_tool(
+    toolset="tabular.temporal", requires=TabularContext, answers_field=True,
+    column_args={"time_column": ColumnArg("the date or time each record was taken", "temporal")},
+)
 def get_temporal_extent(
     ctx: TabularContext, resource: str, time_column: str
 ) -> Dict[str, Any]:

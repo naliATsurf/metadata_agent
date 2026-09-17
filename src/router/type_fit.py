@@ -20,6 +20,17 @@ dtype, units and value range on its card. A mismatch is recorded on the routing 
 caps its assurance at ``low``: a routing whose winner does not fit the field's type
 is one to check, not one to trust.
 
+The same grade covers a tool's arguments (:func:`argument_mismatch`): a date range
+computed over a column of numbers is a routing to check.
+
+**A column whose values vary is noted, not graded** (:func:`varies`). A column repeating
+one value down every row *is* that value; one whose values differ must be summarised
+first. Whether that is wrong depends on what the field wants, and a type cannot say:
+"the temperature of the condition" answered by two temperatures is a question to ask,
+but "minimum latitude" from a latitude column is exactly right. The column matcher
+sees the distinct values on the card and can tell the two apart; this only records the
+observation.
+
 The rules are narrow anyway, because a false mismatch still costs confidence on a
 correct answer. "A text field is not answered by a numeric column" seems obviously
 true and is not: schemas routinely declare a measured quantity as ``str`` to hold
@@ -31,7 +42,7 @@ say it is nominal, not merely to be typed as text.
 from __future__ import annotations
 
 import re
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 from src.context.base_context import EvidenceRef
 from src.router.catalog import ResolvedColumn
@@ -190,6 +201,26 @@ def mismatch(field: FieldSpec, column: ResolvedColumn) -> Optional[str]:
     return None
 
 
+def varies(field: FieldSpec, column: ResolvedColumn) -> Optional[str]:
+    """A note when a field typed as one value is routed to a column whose values differ."""
+    if field_base_type(field.type) == "other" or (column.distinct_count or 0) <= 1:
+        return None
+    return f"{column.name} holds {column.distinct_count} different values"
+
+
+def argument_mismatch(argument: str, values: str, column: ResolvedColumn) -> Optional[str]:
+    """Why ``column`` does not fit a tool argument wanting ``values``, or None if it may.
+
+    ``values`` is the argument's declared kind (:class:`~src.tools.base.ColumnArg`):
+    ``temporal`` wants dates or times, ``numeric`` numbers, ``any`` anything.
+    """
+    if values == "temporal" and column.value_label != "temporal":
+        return f"{argument} needs dates or times; {column.name} holds {column.dtype} values"
+    if values == "numeric" and not _column_is_numeric(column):
+        return f"{argument} needs numbers; {column.name} holds {column.dtype} values"
+    return None
+
+
 def mismatches(
     field: FieldSpec, candidates: List[EvidenceRef], catalog: Any
 ) -> List[str]:
@@ -198,6 +229,22 @@ def mismatches(
     Tools and document spans are never graded: neither declares a type or a unit.
     Only resolved columns are, and only on what layer 3 established about them.
     """
+    return _per_column(field, candidates, catalog, mismatch)
+
+
+def variations(
+    field: FieldSpec, candidates: List[EvidenceRef], catalog: Any
+) -> List[str]:
+    """The :func:`varies` notes among ``candidates``, as ``ref — note`` lines."""
+    return _per_column(field, candidates, catalog, varies)
+
+
+def _per_column(
+    field: FieldSpec,
+    candidates: List[EvidenceRef],
+    catalog: Any,
+    check: Callable[[FieldSpec, ResolvedColumn], Optional[str]],
+) -> List[str]:
     if catalog is None:
         return []
     found: List[str] = []
@@ -205,7 +252,7 @@ def mismatches(
         if candidate.kind in ("tool", "quoted_span"):
             continue
         column = catalog.find(candidate.locator, candidate.resource)
-        reason = mismatch(field, column) if column is not None else None
+        reason = check(field, column) if column is not None else None
         if reason is not None:
             found.append(f"{candidate.resource}::{candidate.locator} — {reason}")
     return found

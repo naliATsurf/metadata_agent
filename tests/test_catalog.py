@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from src.context import create_context
 from src.router import (
     CachedProseReader,
+    Catalog,
     Claim,
     ClaimComparer,
     LLMClaimComparer,
@@ -22,7 +23,7 @@ from src.router import (
     resolve_bundle,
     resolve_catalog,
 )
-from src.router.catalog import _as_text_codebook
+from src.router.catalog import _DocResource, _as_text_codebook
 from dataclasses import replace
 
 from src import thresholds
@@ -402,6 +403,42 @@ class CatalogEdgeCaseTest(unittest.TestCase):
         self.assertTrue(all(c.link_method == "structured_dictionary" for c in cat.columns))
 
 
+class DistinctValuesTest(unittest.TestCase):
+    """Every column records how many values it takes, and lists them when few."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        pd.DataFrame({
+            "species": ["Salmo trutta"] * 6,
+            "pH": [7.6, 8.0, 7.6, 8.0, 7.6, 8.0],
+            "mass": [1.5, 2.25, 3.0, 4.75, 5.5, 6.0],
+        }).to_csv(os.path.join(self.dir, "obs.csv"), index=False)
+        self.tab = create_context(os.path.join(self.dir, "obs.csv"), name="obs")
+
+    def tearDown(self):
+        clear_registry()
+
+    def test_a_constant_column_lists_its_one_value(self):
+        species = resolve_catalog(self.tab).get("species")
+        self.assertEqual(species.distinct_count, 1)
+        self.assertEqual(species.distinct_values, ["Salmo trutta"])
+
+    def test_numbers_are_listed_without_trailing_zeros(self):
+        self.assertEqual(resolve_catalog(self.tab).get("pH").distinct_values, ["7.6", "8"])
+
+    def test_past_the_limit_only_the_count_is_kept(self):
+        with _limits(catalog_distinct_values_max=5):
+            mass = resolve_catalog(self.tab).get("mass")
+        self.assertEqual(mass.distinct_count, 6)
+        self.assertIsNone(mass.distinct_values)
+
+    def test_a_saved_catalog_keeps_them(self):
+        catalog = resolve_catalog(self.tab)
+        again = Catalog.from_dict(json.loads(json.dumps(catalog.to_dict())))
+        self.assertEqual(again.get("species").distinct_values, ["Salmo trutta"])
+        self.assertEqual(again.get("mass").distinct_count, 6)
+
+
 class FullyExercisedCatalogTest(unittest.TestCase):
     """One bundle that drives every resolution outcome at once.
 
@@ -476,7 +513,8 @@ class FullyExercisedCatalogTest(unittest.TestCase):
 
     def test_tmp_column_populates_every_field(self):
         """The linchpin: a single column with *no* empty ResolvedColumn field."""
-        tmp = self._catalog().get("tmp")
+        with _limits(catalog_distinct_values_max=8):   # so tmp's 8 values are listed
+            tmp = self._catalog().get("tmp")
         # Scalar fields all set (non-empty, non-"none").
         self.assertEqual(tmp.resource, "observations")
         self.assertEqual(tmp.name, "tmp")
@@ -752,6 +790,8 @@ class MixedDocumentLengthTest(unittest.TestCase):
     the bundle *total* meant the manuscript pushed every file onto the localized path,
     and localization is lexical — so a column defined in the README in plain narrative,
     without its own token, silently stopped resolving. Nothing errored; recall just fell.
+
+    The manuscript here packs into 2 passages; the limit is set to 1 so it is localized.
     """
 
     def setUp(self):
@@ -760,6 +800,7 @@ class MixedDocumentLengthTest(unittest.TestCase):
             os.path.join(self.dir, "obs.csv"), index=False
         )
         self.tab = create_context(os.path.join(self.dir, "obs.csv"), name="obs")
+        self.enterContext(_limits(catalog_read_all_max_passages=1))
         # Short: defines `bm` without ever writing "bm", so BM25 cannot place it.
         self.short = self._doc(
             "readme.md",
@@ -771,7 +812,7 @@ class MixedDocumentLengthTest(unittest.TestCase):
             "manuscript.txt",
             "# Methods\n\n"
             + ("Fish were held under a constant photoperiod and fed once daily. " * 400)
-            + "\n\nExcess post-exercise oxygen consumption (epoc) was integrated "
+            + "\n\n## Results\n\nExcess post-exercise oxygen consumption (epoc) was integrated "
             "from the recovery trace.\n",
         )
 
@@ -804,14 +845,14 @@ class MixedDocumentLengthTest(unittest.TestCase):
         return LLMProseReader(invoke)
 
     def test_each_file_takes_its_own_path(self):
-        from src.router.catalog import _doc_resources, _split_by_length
+        from src.router.catalog import _doc_resources, _split_by_passages
 
-        short, long = _split_by_length(_doc_resources([self.short, self.long]))
-        self.assertEqual([s.resource for s in short], ["readme"])
-        self.assertEqual([s.resource for s in long], ["manuscript"])
+        read_all, localize = _split_by_passages(_doc_resources([self.short, self.long]))
+        self.assertEqual([s.resource for s in read_all], ["readme"])
+        self.assertEqual([s.resource for s in localize], ["manuscript"])
 
-    def test_a_long_neighbour_does_not_cost_the_short_file_its_whole_doc_read(self):
-        """The regression: `bm` has no token in the README, so only a whole read finds it."""
+    def test_a_long_neighbour_does_not_cost_the_short_file_its_full_read(self):
+        """The regression: `bm` has no token in the README, so only a full read finds it."""
         catalog = resolve_catalog(
             self.tab, sources=[self.short, self.long], prose_reader=self._reader()
         )
@@ -1127,7 +1168,7 @@ class ProseReaderTierTest(unittest.TestCase):
             "appendix.md",
             "# Appendix\n\nWet body mass (mass) was measured at the start of each trial.\n",
         )
-        with _limits(catalog_whole_doc_max_chars=50):   # force the localize path
+        with _limits(catalog_read_all_max_passages=0):   # force the localize path
             col = resolve_catalog(
                 self.tab, sources=[decoy, appendix], prose_reader=self.reader
             ).get("mass")
@@ -1218,6 +1259,22 @@ class ProseReaderTierTest(unittest.TestCase):
 
     # --- batched, cached call shape (cost control for an expensive reader) ---
 
+    def test_a_long_document_within_the_limit_is_read_passage_by_passage(self):
+        """No retrieval: a column named nowhere in the text is still read, in passage 2."""
+        doc = self._doc("methods.md", self._MANUSCRIPT.replace("Oxygen debt (epoc)",
+                                                               "Oxygen debt"))
+        stub = _StubLLM({"epoc": {"description": "oxygen debt", "units": None,
+                                  "quote": "Oxygen debt was logged."}})
+        with _limits(catalog_passage_max_chars=60,        # one paragraph per passage
+                     catalog_read_all_max_passages=10):
+            passages = len(_DocResource(doc, doc.resources[0]).passages())
+            epoc = resolve_catalog(self.tab, sources=[doc],
+                                   prose_reader=LLMProseReader(stub)).get("epoc")
+        self.assertGreater(passages, 1)
+        self.assertEqual(stub.calls, passages)             # every passage, once
+        self.assertEqual(epoc.link_method, "prose_read")
+        self._assert_cited_exactly(epoc, doc)
+
     def test_reader_reads_all_residual_columns_in_one_call(self):
         # Two columns defined in narrative; both residual. In the whole-doc (short) path
         # the reader is handed the doc once, covering both columns.
@@ -1251,7 +1308,7 @@ class ProseReaderTierTest(unittest.TestCase):
         # both columns, and each read is still cited to its own paragraph's offsets.
         doc = self._doc("methods.md", self._MANUSCRIPT)
         spy = _CountingReader()
-        with _limits(catalog_whole_doc_max_chars=50):   # force the localize path
+        with _limits(catalog_read_all_max_passages=0):   # force the localize path
             cat = resolve_catalog(self.tab, sources=[doc], prose_reader=spy)
         self.assertEqual(len(spy.calls), 1)
         self.assertEqual(set(spy.calls[0][0]), {"mass", "epoc"})
@@ -1263,7 +1320,7 @@ class ProseReaderTierTest(unittest.TestCase):
     def test_passages_split_at_the_budget(self):
         doc = self._doc("methods.md", self._MANUSCRIPT)
         spy = _CountingReader()
-        with _limits(catalog_whole_doc_max_chars=50,      # force the localize path
+        with _limits(catalog_read_all_max_passages=0,     # force the localize path
                      catalog_passage_max_chars=60):       # room for one paragraph
             cat = resolve_catalog(self.tab, sources=[doc], prose_reader=spy)
         self.assertEqual([set(columns) for columns, _ in spy.calls], [{"mass"}, {"epoc"}])

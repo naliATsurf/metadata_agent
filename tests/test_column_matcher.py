@@ -1,7 +1,7 @@
 """Tests for the column matcher (src/router/column_matcher.py).
 
-Merging, splitting, and what the referee refuses to believe. Every test drives a stub
-``invoke``; no model is contacted.
+Merging, cards, splitting, and what the referee refuses to believe. Every test drives a
+stub ``invoke``; no model is contacted.
 """
 
 import json
@@ -19,14 +19,17 @@ from src.router.column_matcher import (
     group_card,
     merge_columns,
     split_cards,
+    table_card,
 )
 from src.router.judge import Verdict
 from src.router.schema import FieldSpec
 
 
-def _column(resource, name, description=None, units=None, value_range=None):
+def _column(resource, name, description=None, units=None, value_range=None,
+            distinct_count=None, distinct_values=None):
     return ResolvedColumn(resource=resource, name=name, dtype="float64",
-                          description=description, units=units, value_range=value_range)
+                          description=description, units=units, value_range=value_range,
+                          distinct_count=distinct_count, distinct_values=distinct_values)
 
 
 def _field(path):
@@ -85,17 +88,50 @@ class MergeTest(unittest.TestCase):
         card = group_card(merge_columns([_column("g", "days", "acclimation", "days")])[0])
         self.assertEqual(card["units"], "days")
         self.assertNotIn("value_range", card)
+        self.assertNotIn("distinct_values", card)
+        self.assertNotIn("distinct_count", card)
+
+
+class DistinctValuesCardTest(unittest.TestCase):
+    """A column holding one value is that value — the card has to be able to say so."""
+
+    def test_a_constant_column_lists_its_one_value(self):
+        card = group_card(merge_columns([
+            _column("g", "species", "species name", distinct_count=1,
+                    distinct_values=["Salmo trutta"]),
+        ])[0])
+        self.assertEqual(card["distinct_values"], ["Salmo trutta"])
+
+    def test_merged_columns_join_their_values(self):
+        card = group_card(merge_columns([
+            _column("a", "pH", "pH level", distinct_count=2, distinct_values=["7.6", "8"]),
+            _column("b", "pH", "pH level", distinct_count=2, distinct_values=["8", "7.2"]),
+        ])[0])
+        self.assertEqual(card["distinct_values"], ["7.6", "8", "7.2"])
+
+    def test_too_many_values_show_as_a_count(self):
+        card = group_card(merge_columns([
+            _column("a", "mass", "fish mass", distinct_count=36),
+            _column("b", "mass", "fish mass", distinct_count=3, distinct_values=["1", "2", "3"]),
+        ])[0])
+        self.assertEqual(card["distinct_count"], 36)
+        self.assertNotIn("distinct_values", card)
+
+    def test_a_table_card_names_its_columns(self):
+        card = table_card("growth", [_column("growth", "mass"), _column("growth", " tank ")])
+        self.assertEqual(card, {"ref": "table::growth", "kind": "table",
+                                "columns": ["mass", "tank"]})
 
 
 class SplitTest(unittest.TestCase):
     def test_a_small_catalog_is_one_slice(self):
         self.assertEqual(len(split_cards(CARDS, 10_000)), 1)
 
-    def test_a_large_catalog_splits_and_every_slice_carries_the_tools(self):
-        tool = {"ref": "tool::count", "kind": "tool", "computes": "rows"}
-        slices = split_cards([tool] + CARDS, max_chars=60)
+    def test_a_large_catalog_splits_and_every_slice_carries_the_tables(self):
+        table = {"ref": "table::t", "kind": "table", "columns": ["a", "b"]}
+        slices = split_cards([table] + CARDS, max_chars=60)
         self.assertEqual(len(slices), 2)
-        self.assertTrue(all(s[0] == tool for s in slices))
+        self.assertTrue(all(s[0] == table for s in slices))
 
     def test_splitting_issues_one_call_per_slice_and_keeps_the_strongest_pick(self):
         def reply(prompt):

@@ -15,8 +15,11 @@ from src.context.base_context import ExecutionContext
 from src.context.context_factory import create_context
 from src.orchestrator.utils import validate_plan_tool_compatibility
 from src.tools.base import (
+    ColumnArg,
     all_tools,
     clear_registry,
+    column_args_of,
+    context_tool,
     is_auto_fireable,
     is_resource_scoped,
     register_context,
@@ -172,6 +175,28 @@ class TestPlanToolCompatibility(ToolRegistryTestBase):
 
 def _by_name(name: str):
     return next(t for t in all_tools() if t.name == name)
+
+
+class TestColumnArgs(unittest.TestCase):
+    """A field-answering tool declares every argument a model would otherwise pick."""
+
+    def test_extent_tools_declare_their_columns(self):
+        self.assertEqual(list(column_args_of(spatial.get_spatial_extent)),
+                         ["lat_column", "lon_column"])
+        self.assertEqual(column_args_of(profiling.get_field_names), {})
+
+    def test_an_undeclared_argument_fails_at_registration(self):
+        def span(ctx, resource: str, start_column: str, end_column: str) -> int:
+            """The span between two columns."""
+            return 0
+
+        before = len(all_tools())
+        with self.assertRaises(TypeError):
+            context_tool(
+                toolset="test", answers_field=True,
+                column_args={"start_column": ColumnArg("a start date", "temporal")},
+            )(span)
+        self.assertEqual(len(all_tools()), before)   # nothing registered
 
 
 if __name__ == "__main__":

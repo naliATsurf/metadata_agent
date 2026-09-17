@@ -55,7 +55,8 @@ unreachable however good the reader is. `sources.csv` marks each ref
   The abstention failure, counted directly. **This is the number that moves.**
 - **abstentions by the judge** — how many fields the judges refused.
 - **cited correctly** — of the fields with an `evidence` label, how many cited a
-  passage containing it.
+  quote containing it. A field may cite several quotes; one holding the evidence is
+  enough.
 - **risk–coverage per signal** (without judges) — accuracy among the fields answered, as
   a function of how many are answered, swept over `bm25` score, query-term `coverage`,
   and rank-1 `margin`. A signal worth thresholding on is one where accuracy *rises* as coverage
@@ -73,7 +74,13 @@ python -m eval score                                        # BM25 alone
 python -m eval score --llm-candidate-judge                  # layer 4b on
 python -m eval score --llm-candidate-judge --no-judge-batch  # judged field by field
 python -m eval score --llm-candidate-judge --judge-workers 8 # same, concurrent
+python -m eval score --llm-candidate-judge --refresh-tool-cache  # re-ask the tool matcher
 ```
+
+The tool matcher's answers depend only on the standard, the tools and the model, so they
+are saved in `.cache/tool_matcher` and reused on the next run. `--refresh-tool-cache`
+ignores them, for instance after changing a tool's description by hand or when the model
+behind the same name changed.
 
 `--no-judge-batch` is the comparison worth running: asking about many fields per call
 saves round-trips, but fields judged together stop being independent,

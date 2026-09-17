@@ -12,8 +12,9 @@ The layers, in the order a field passes through them:
 :mod:`~src.router.schema`          flatten the target schema to leaf fields
 :mod:`~src.router.catalog`         resolve each column's meaning from the bundle (3)
 :mod:`~src.router.route`           rank sources per field, lexically (4)
-:mod:`~src.router.type_fit`        grade whether type and units fit the field (4a)    
-:mod:`~src.router.column_matcher`  match fields to columns and tools (4b)
+:mod:`~src.router.type_fit`        grade whether type and units fit the field (4a)
+:mod:`~src.router.tool_matcher`    decide which fields a tool computes (4b)
+:mod:`~src.router.column_matcher`  match fields and tool arguments to columns (4b)
 :mod:`~src.router.passage_reader`  read passages for the fields they state (4b)
 :mod:`~src.router.compile`         lay the routing out as executable tasks (5)
 =================================  ======================================================
@@ -56,7 +57,8 @@ from src.router.column_matcher import (
 from src.router.judge import Verdict, candidate_ref
 from src.router.passage_reader import LLMPassageReader, PassageReader
 from src.router.route import FieldPlan, FieldRouting, route_fields
-from src.router.type_fit import mismatch, mismatches
+from src.router.tool_matcher import LLMToolMatcher, ToolMatcher
+from src.router.type_fit import argument_mismatch, mismatch, mismatches, variations
 from src.router.schema import FieldSpec, walk_schema
 
 __all__ = [
@@ -75,7 +77,9 @@ __all__ = [
     "FieldSpec",
     "LLMColumnMatcher",
     "LLMPassageReader",
+    "LLMToolMatcher",
     "PassageReader",
+    "ToolMatcher",
     "merge_columns",
     "Claim",
     "ClaimComparer",
@@ -95,7 +99,9 @@ __all__ = [
     "resolve_bundle",
     "resolve_catalog",
     "route_fields",
+    "argument_mismatch",
     "mismatch",
     "mismatches",
+    "variations",
     "walk_schema",
 ]

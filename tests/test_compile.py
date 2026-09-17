@@ -523,6 +523,33 @@ class DegenerateTest(CompilerCase):
         self.assertEqual(len(self.extraction_tasks(plan)), 1)
 
 
+class BoundToolCompileTest(CompilerCase):
+    """A tool the router bound to a table opens that table and carries its arguments."""
+
+    def _plan(self, resource, arguments):
+        from src.context.base_context import EvidenceRef
+        from src.router.route import FieldRouting
+
+        routing = FieldRouting(
+            field_path="period", query="period of collection", bucket="tool",
+            candidates=[EvidenceRef(resource=resource, locator="get_temporal_extent",
+                                    kind="tool", snippet="date range", score=0.0)],
+            assurance="high", tool_arguments=arguments,
+        )
+        fp = FieldPlan(schema_name="S", routings={"period": routing})
+        return compile_field_plan(fp)
+
+    def test_the_bound_table_is_opened_and_the_arguments_travel(self):
+        arguments = [{"resource": "obs", "time_column": "date"}]
+        task = self.extraction_tasks(self._plan("obs", arguments))[0]
+        self.assertEqual(task.target_resources, ["obs"])
+        self.assertEqual(task.field_bindings[0]["tool_arguments"], arguments)
+
+    def test_a_whole_context_tool_opens_everything(self):
+        task = self.extraction_tasks(self._plan("", [{}]))[0]
+        self.assertEqual(task.target_resources, [])
+
+
 # ---------------------------------------------------------------------------
 # Caller-facing knobs: player overrides.
 # ---------------------------------------------------------------------------

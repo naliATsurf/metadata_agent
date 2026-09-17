@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+from dataclasses import dataclass
 from fnmatch import fnmatch
 from typing import Any, Callable, Dict, List, Optional, Type
 
@@ -230,12 +231,26 @@ def _derive_dispatch_flags(t: BaseTool) -> Dict[str, bool]:
     }
 
 
+@dataclass(frozen=True)
+class ColumnArg:
+    """A column a field-answering tool must be given, and what that column must hold.
+
+    ``holds`` is read by the column matcher, which picks the column. ``values`` is
+    checked by code against the picked column's value profile: ``"temporal"`` (dates or
+    times), ``"numeric"``, or ``"any"``.
+    """
+
+    holds: str
+    values: str = "any"
+
+
 def context_tool(
     *,
     toolset: str,
     requires: Type[ExecutionContext] = ExecutionContext,
     available_when: Optional[Callable[[ExecutionContext], bool]] = None,
     answers_field: bool = False,
+    column_args: Optional[Dict[str, ColumnArg]] = None,
 ):
     """Register a context tool and declare the capability it needs.
 
@@ -246,12 +261,17 @@ def context_tool(
             :class:`ExecutionContext`, meaning the tool works on any modality.
         available_when: Optional predicate for concerns capability cannot
             express — cardinality, for instance. Use sparingly.
-        answers_field: True when the tool's whole-resource result *is* a metadata
-            value (a row count, the column list), not an inspection aid. The field
-            router ranks a field's query against these tools' descriptions to bind
-            "tool" fields — so the binding is by the tool's declared purpose,
-            not a per-standard keyword table.
+        answers_field: True when the tool's result *is* a metadata value (a row
+            count, the column list, a date range), not an inspection aid. The field
+            router offers these tools to its tool matcher, so a field is bound to a
+            tool by the tool's declared purpose, not a per-standard keyword table.
+        column_args: For a field-answering tool, every required argument the runner
+            cannot supply, as a :class:`ColumnArg`. The router asks its column
+            matcher for each, so the tool can then run without a model choosing its
+            arguments. Declared rather than guessed from names, and checked here: a
+            field-answering tool with an undeclared argument fails at import.
     """
+    column_args = dict(column_args or {})
 
     def decorator(fn: Callable) -> BaseTool:
         llm_facing = _build_llm_facing_function(fn, requires)
@@ -261,12 +281,26 @@ def context_tool(
             "requires": requires,
             "available_when": available_when,
             "answers_field": answers_field,
+            "column_args": column_args,
             **_derive_dispatch_flags(t),
         }
+        if answers_field:
+            _check_column_args(t, column_args)
         _TOOL_REGISTRY.append(t)
         return t
 
     return decorator
+
+
+def _check_column_args(t: BaseTool, column_args: Dict[str, ColumnArg]) -> None:
+    """A field-answering tool declares exactly the arguments a model would otherwise pick."""
+    schema = t.args_schema.model_json_schema()
+    needed = set(schema.get("required", [])) - RUNNER_SUPPLIED_ARGS
+    if needed != set(column_args):
+        raise TypeError(
+            f"field-answering tool {t.name!r} must declare column_args for exactly "
+            f"{sorted(needed)}; declared {sorted(column_args)}"
+        )
 
 
 def is_field_answering(t: BaseTool) -> bool:
@@ -275,8 +309,13 @@ def is_field_answering(t: BaseTool) -> bool:
 
 
 def field_answering_tools() -> List[BaseTool]:
-    """Every tool whose whole-resource result is directly a field value."""
+    """Every tool whose result is directly a field value."""
     return [t for t in _TOOL_REGISTRY if is_field_answering(t)]
+
+
+def column_args_of(t: BaseTool) -> Dict[str, ColumnArg]:
+    """The columns a field-answering tool must be given (see ``column_args``)."""
+    return dict(tool_meta(t).get("column_args") or {})
 
 
 # ---------------------------------------------------------------------------

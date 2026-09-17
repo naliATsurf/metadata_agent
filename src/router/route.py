@@ -5,8 +5,8 @@ fall out, the router starts from *what it must fill* — the target schema's lea
 fields (:func:`~src.router.schema.walk_schema`) — and routes each to the source
 that can answer it. A field falls into one of three buckets:
 
-- **tool** — a property of the data itself (record count), computed by a
-  deterministic tool, no search;
+- **tool** — computed from the data by a deterministic tool (a record count, a date
+  range), run on the table or columns the router binds as its arguments;
 - **column** — "which column?", routed over the *enriched* catalog
   (:meth:`Catalog.search`), so opaque names resolved in layer 3 are reachable;
 - **document** — a meaning stated only in prose (abstract, licence), routed over
@@ -26,8 +26,8 @@ ranking, therefore:
   field against fractional values. A mismatch caps the routing's assurance at
   ``low``; it never removes a candidate, so a blunt rule cannot hide a right answer.
 - the judges (4b, optional, a model) decide what answers each field, or that nothing
-  does:
-  a :mod:`column matcher <src.router.column_matcher>` for the structured tier and a
+  does: a :mod:`tool matcher <src.router.tool_matcher>` and a
+  :mod:`column matcher <src.router.column_matcher>` for the structured tier, and a
   :mod:`passage reader <src.router.passage_reader>` for the documents. Their most
   valuable answer is *none*.
 
@@ -37,8 +37,9 @@ iteration order. The ordering is the whole seam; no consumer changes.
 
 Routing runs as **two passes, not field by field**: the structured tier for every
 field, then the document tier for whatever the first could not answer. With judges,
-the first pass matches every field against the whole catalog, and the second reads
-each retrieved passage once for all the fields that retrieved it. A judge is a
+the first pass asks which fields a tool computes, then matches every field — and every
+chosen tool's arguments — against the whole catalog; the second reads each passage
+once for all the fields it is read for. A judge is a
 network call and a schema is dozens of fields, so these shapes — one catalog, many
 fields; one passage, many fields — are what keep a routing pass affordable.
 
@@ -61,8 +62,8 @@ becomes provenance-captured evidence; that wiring is deliberately not here yet.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Type
+from dataclasses import dataclass, field, replace
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Type
 
 from pydantic import BaseModel
 
@@ -74,17 +75,18 @@ from src.context.base_context import (
     tokenize,
 )
 from src import thresholds
-from src.router.catalog import Catalog, locate_quote
+from src.router.catalog import Catalog, ResolvedColumn, pack_contiguous
 from src.router.column_matcher import (
     ColumnGroup,
     ColumnMatcher,
     group_card,
     merge_columns,
-    tool_card,
+    table_card,
 )
-from src.router.judge import TOOL_PREFIX, Verdict, rank_of, weaker
-from src.router.passage_reader import PassageReader, passage_card
-from src.router.type_fit import mismatch, mismatches
+from src.router.judge import TABLE_PREFIX, TOOL_PREFIX, Verdict, rank_of, weaker
+from src.router.passage_reader import PassageReader, find_quote, passage_card
+from src.router.tool_matcher import ToolMatcher, tool_card
+from src.router.type_fit import argument_mismatch, mismatch, mismatches, variations
 from src.router.schema import FieldSpec, walk_schema
 
 
@@ -101,10 +103,19 @@ class FieldRouting:
     # Populated when a judge decided the field (layer 4b):
     judge_choice: Optional[str] = None     # the ref it picked, None when it abstained
     judge_note: Optional[str] = None       # why it picked that one, or why none
-    judge_quote: Optional[str] = None      # the sentence it cited from that candidate
-    judge_grounded: Optional[bool] = None  # could its quote be found in the material?
-    citation: Optional[str] = None         # resource#start-end of the cited sentence
-    mismatches: List[str] = field(default_factory=list)  # candidates whose type/units do not fit
+    judge_quotes: List[str] = field(default_factory=list)  # every sentence cited as the answer
+    judge_grounded: Optional[bool] = None  # was every quote found in the material?
+    #: ``resource#start-end`` of each quote, aligned with ``judge_quotes``; ``None`` for a
+    #: quote that could not be located.
+    citations: List[Optional[str]] = field(default_factory=list)
+    mismatches: List[str] = field(default_factory=list)  # candidates or arguments that do not fit
+    varies: List[str] = field(default_factory=list)      # columns whose values differ, noted only
+    # Populated when the tool matcher chose a tool for the field, whether or not it runs:
+    tool_choice: Optional[str] = None      # the tool's ref
+    tool_note: Optional[str] = None        # why, and why it was not run if it was not
+    #: One argument set per run of the tool — ``resource`` plus any column arguments —
+    #: aligned with the routing's tool candidates. Empty when no tool runs.
+    tool_arguments: List[Dict[str, str]] = field(default_factory=list)
     # Populated by the M4 compiler, not the router:
     extractor_role: Optional[str] = None
     topology: Optional[str] = None
@@ -118,10 +129,14 @@ class FieldRouting:
             "assurance": self.assurance,
             "judge_choice": self.judge_choice,
             "judge_note": self.judge_note,
-            "judge_quote": self.judge_quote,
+            "judge_quotes": self.judge_quotes,
             "judge_grounded": self.judge_grounded,
-            "citation": self.citation,
+            "citations": self.citations,
             "mismatches": self.mismatches,
+            "varies": self.varies,
+            "tool_choice": self.tool_choice,
+            "tool_note": self.tool_note,
+            "tool_arguments": self.tool_arguments,
             "candidates": [c.to_dict() for c in self.candidates],
             "extractor_role": self.extractor_role,
             "topology": self.topology,
@@ -134,6 +149,8 @@ class FieldPlan:
 
     schema_name: str
     routings: Dict[str, FieldRouting]
+    #: The refs of every tool the tool matcher was shown. Empty when it did not run.
+    tools_shown: List[str] = field(default_factory=list)
     #: The refs of every card the column matcher was shown — the same catalog for every
     #: field, so recorded once here rather than as a candidate list on each routing.
     #: Empty when no matcher ran.
@@ -168,34 +185,20 @@ class FieldPlan:
             "schema_name": self.schema_name,
             "routings": {p: r.to_dict() for p, r in self.routings.items()},
             "judged": self.judged,
+            "tools_shown": self.tools_shown,
             "catalog_shown": self.catalog_shown,
             "coverage": self.coverage(),
         }
 
 
 def _pack(chunks: List[Any]) -> List[List[Any]]:
-    """Group *consecutive* chunks into runs that fit the passage budget.
+    """Group consecutive chunks into passages of up to ``router_passage_max_chars``.
 
-    Consecutive, unlike layer 3's packing of scattered retrieval hits, because a
-    router candidate's locator is a span: keeping a passage contiguous is what makes
-    ``text[start:end]`` the passage exactly, so a citation located inside it stays a
-    true document offset. A chunk over the budget is a passage by itself — a chunk is
-    never split, since it is what offsets point into. The budget is
-    ``router_passage_max_chars`` (:mod:`src.thresholds`).
+    Contiguous (:func:`~src.router.catalog.pack_contiguous`) because a router candidate's
+    locator is a span: ``text[start:end]`` is then the passage exactly, so a citation
+    located inside it stays a true document offset.
     """
-    limit = thresholds.current().router_passage_max_chars
-    runs: List[List[Any]] = []
-    current: List[Any] = []
-    size = 0
-    for chunk in chunks:
-        if current and size + len(chunk.text) > limit:
-            runs.append(current)
-            current, size = [], 0
-        current.append(chunk)
-        size += len(chunk.text)
-    if current:
-        runs.append(current)
-    return runs
+    return pack_contiguous(chunks, thresholds.current().router_passage_max_chars)
 
 
 def _document_corpus(
@@ -325,12 +328,12 @@ def _cite(
     verifier can check by reading, instead of a 2 000-character chunk whose boundaries
     are an artifact of the chunker.
 
-    A paraphrase that cannot be located leaves the candidate at chunk width. The
-    routing still carries ``judge_grounded=False``, so an unlocatable quote is already
-    graded; this only declines to invent a span for it.
+    A paraphrase that cannot be located returns the candidate unchanged, with no
+    citation. The routing still carries ``judge_grounded=False``, so an unlocatable
+    quote is already graded; this only declines to invent a span for it.
     """
     text = passage(candidate) if passage else None
-    span = locate_quote(quote, text) if text else None
+    span = find_quote(quote, text) if text else None
     if span is None or not isinstance(candidate.locator, (tuple, list)):
         return candidate, None
     base = candidate.locator[0]
@@ -342,6 +345,24 @@ def _cite(
         snippet=text[span[0] : span[1]], score=candidate.score,
     )
     return located, f"{candidate.resource}#{start}-{end}"
+
+
+def _cite_all(
+    candidate: EvidenceRef, quotes: Sequence[str], passage
+) -> Tuple[List[EvidenceRef], List[Optional[str]]]:
+    """One span per located quote, and a citation per quote (``None`` where not located).
+
+    A passage none of whose quotes can be located stays a candidate at full width:
+    the reader said it states the field, and nothing narrower can be shown.
+    """
+    spans: List[EvidenceRef] = []
+    citations: List[Optional[str]] = []
+    for quote in quotes:
+        located, citation = _cite(candidate, quote, passage)
+        citations.append(citation)
+        if citation is not None and all(span.locator != located.locator for span in spans):
+            spans.append(located)
+    return spans or [candidate], citations
 
 
 def _answer_tools():
@@ -360,14 +381,19 @@ def _structured_candidates(
     The corpus is the field-answering tools (by their own descriptions) plus the
     enriched columns, pooled into one BM25 ranking — both are short, comparable
     documents, so a tool and a column compete on equal footing. The winning
-    candidate's ``kind`` then names the bucket: a tool → ``structural`` (bound by
-    the tool's declared purpose, not a per-standard keyword), a column →
-    ``ambiguous_structural``. No field-name table anywhere.
+    candidate's ``kind`` then names the bucket. No field-name table anywhere.
+
+    A tool that needs columns is left out: without a column matcher nothing can choose
+    them, and a routing to a tool that cannot run is no routing.
     """
+    from src.tools.base import column_args_of
+
     entries: List[EvidenceRef] = []
     docs: List[List[str]] = []
 
     for tool in _answer_tools():
+        if column_args_of(tool):
+            continue
         entries.append(
             EvidenceRef(
                 resource="", locator=tool.name, kind="tool",
@@ -405,34 +431,44 @@ def _routing(
     candidates: List[EvidenceRef],
     catalog: Optional[Catalog],
     decision: Optional[Verdict] = None,
-    citation: Optional[str] = None,
+    *,
+    quotes: Optional[List[str]] = None,
+    citations: Optional[List[Optional[str]]] = None,
+    arguments: Optional[List[Dict[str, str]]] = None,
+    argument_mismatches: Optional[List[str]] = None,
+    ceiling: str = "high",
 ) -> FieldRouting:
     """A routed field, read off ``candidates[0]``; ``decision`` when a judge made it.
 
     Two hops when judged: the judge's confidence in the *match*, and the catalog's in
     the column's *meaning*. The routing is only as strong as the weaker. A winner whose
-    type or units do not fit the field (layer 4a) caps it at ``low`` on top: it may
-    still be right, so it stays, but it is a routing to check rather than trust.
+    type or units do not fit the field (layer 4a) caps it at ``low`` on top — and
+    so does a leading tool run on a column that does not fit its argument: it may still
+    be right, so it stays, but it is a routing to check rather than trust. ``ceiling``
+    caps it further when the caller knows of a disagreement.
     """
     top = candidates[0]
     bucket = _bucket_of(top)
     assurance = _assurance(bucket, top, catalog)
     if decision is not None:
         assurance = weaker(decision.confidence, assurance)
-    if _misfits(spec, top, catalog):
+    if _misfits(spec, top, catalog) or (top.kind == "tool" and argument_mismatches):
         assurance = weaker(assurance, "low")
+    assurance = weaker(assurance, ceiling)
     return FieldRouting(
         field_path=spec.path, query=spec.description or spec.path, bucket=bucket,
         candidates=candidates, assurance=assurance,
         judge_choice=decision.choice if decision else None,
         judge_note=(decision.because or None) if decision else None,
-        # The quote is the sentence the reader cited, verified present in the passage.
-        # For a document field it is the nearest thing to the answer the router holds,
-        # so it travels on the routing rather than being re-derived downstream.
-        judge_quote=(decision.quote or None) if decision else None,
+        # The quotes are the sentences the reader cited, checked against the passage.
+        # For a document field they are the nearest thing to the answer the router
+        # holds, so they travel on the routing rather than being re-derived downstream.
+        judge_quotes=list(quotes or []),
         judge_grounded=decision.grounded if decision else None,
-        citation=citation,
-        mismatches=mismatches(spec, candidates, catalog),
+        citations=list(citations or []),
+        mismatches=mismatches(spec, candidates, catalog) + list(argument_mismatches or []),
+        varies=variations(spec, candidates, catalog),
+        tool_arguments=list(arguments or []),
     )
 
 
@@ -444,30 +480,101 @@ def _misfits(spec: FieldSpec, top: EvidenceRef, catalog: Optional[Catalog]) -> b
     return column is not None and mismatch(spec, column) is not None
 
 
-def _unanswered(
-    spec: FieldSpec,
-    rejected: List[EvidenceRef],
-    judged: bool,
-    catalog: Optional[Catalog],
-) -> FieldRouting:
-    """A field no tier could answer — coverage, computed before extraction runs."""
+def _unanswered(spec: FieldSpec, judged: bool) -> FieldRouting:
+    """A field no tier could answer — coverage, computed before extraction runs.
+
+    It carries no candidates: a passage or column that does not answer the field is not
+    a place to look for its value. What the judges were shown is recorded once on the
+    plan (``catalog_shown``, ``tools_shown``); the note says that judges, rather than
+    an empty search, left the field unanswered.
+    """
     return FieldRouting(
         field_path=spec.path, query=spec.description or spec.path,
-        bucket="unanswered",
-        # With a judge the rejected set is the record of what was considered and
-        # refused; without one an empty list keeps the historical shape.
-        candidates=rejected if judged else [],
-        assurance="none", status="unanswered",
-        judge_note="judge found no candidate that answers this field"
-        if judged and rejected
-        else None,
-        mismatches=mismatches(spec, rejected, catalog),
+        bucket="unanswered", assurance="none", status="unanswered",
+        judge_note="no column or passage the judges were shown answers this field"
+        if judged else None,
     )
 
 
 # ---------------------------------------------------------------------------
-# Tier 1 with a judge: match every field against the whole catalog
+# Tier 1 with judges: which fields a tool computes, then what everything runs on
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Slot:
+    """One argument a chosen tool must be given, asked of the column matcher as a line."""
+
+    name: str              # "resource", or one of the tool's column arguments
+    values: str            # "table" for resource; else the ColumnArg's kind
+    line: FieldSpec        # what the column matcher answers, path ``field[name]``
+
+
+def _first_sentence(text: Optional[str]) -> str:
+    flat = " ".join((text or "").split())
+    end = flat.find(". ")
+    return flat if end == -1 else flat[: end + 1]
+
+
+def _slots(spec: FieldSpec, tool: Any) -> List[_Slot]:
+    """The arguments ``tool`` must be given to compute ``spec``, as column-matcher lines.
+
+    A tool that declares columns runs on the table holding them, so it is asked only for
+    those. One that takes only a table is asked for the table. One that takes neither
+    runs over the whole context and needs nothing.
+    """
+    from src.tools.base import column_args_of, is_resource_scoped
+
+    purpose = f"to compute {spec.path}: {spec.description or spec.path}"
+    declared = column_args_of(tool)
+    if declared:
+        return [
+            _Slot(name, arg.values, FieldSpec(
+                path=f"{spec.path}[{name}]", type="column", required=True,
+                description=f"{arg.holds} — for {tool.name}, {purpose}",
+            ))
+            for name, arg in declared.items()
+        ]
+    if is_resource_scoped(tool):
+        return [_Slot("resource", "table", FieldSpec(
+            path=f"{spec.path}[resource]", type="table", required=True,
+            description=(
+                f"the table to run {tool.name} on "
+                f"({_first_sentence(tool.description)}), {purpose}"
+            ),
+        ))]
+    return []
+
+
+@dataclass
+class _Tooling:
+    """What the tool matcher chose, and the argument lines each choice needs."""
+
+    verdicts: Dict[str, Verdict] = field(default_factory=dict)
+    tools: Dict[str, Any] = field(default_factory=dict)          # tool name -> tool
+    slots: Dict[str, List[_Slot]] = field(default_factory=dict)  # field path -> arguments
+    shown: List[str] = field(default_factory=list)               # every tool ref shown
+
+    @property
+    def lines(self) -> List[FieldSpec]:
+        return [slot.line for slots in self.slots.values() for slot in slots]
+
+    @property
+    def wants_tables(self) -> bool:
+        return any(slot.values == "table" for slots in self.slots.values() for slot in slots)
+
+
+def _match_tools(tool_matcher: ToolMatcher, specs: List[FieldSpec]) -> _Tooling:
+    """Ask which fields a tool computes — with the fields and the tools, nothing else."""
+    tools = {tool.name: tool for tool in _answer_tools()}
+    cards = [tool_card(tool) for tool in tools.values()]
+    verdicts = tool_matcher.match(fields=specs, cards=cards)
+    slots = {
+        spec.path: _slots(spec, tools[decision.choice[len(TOOL_PREFIX):]])
+        for spec in specs
+        if (decision := verdicts.get(spec.path)) is not None and not decision.abstained
+    }
+    return _Tooling(verdicts, tools, slots, [card["ref"] for card in cards])
 
 
 @dataclass
@@ -476,73 +583,205 @@ class _Matching:
 
     verdicts: Dict[str, Verdict]
     groups: Dict[str, ColumnGroup]            # group ref -> its columns
-    tools: Dict[str, str]                     # tool name -> description
     shown: List[str]                          # every card ref the matcher saw
 
 
 def _match(
     matcher: ColumnMatcher,
     specs: List[FieldSpec],
+    tooling: _Tooling,
     catalog: Optional[Catalog],
 ) -> _Matching:
-    """Match every field against the whole catalog — one catalog, shown to all of them.
+    """Match every field, and every chosen tool's arguments, against the whole catalog.
 
-    Nothing is withheld on type or units. Each card carries its column's dtype, units
-    and value range, so a mismatch is in front of the model when it decides; the
-    router grades the pick afterwards (:func:`_routing`). Showing every field the same
-    catalog is also what lets them share calls: the matcher splits only by size.
+    Nothing is withheld on type or units. Each card carries its column's dtype, units,
+    value range and distinct values, so a mismatch is in front of the model when it
+    decides; the router grades the pick afterwards (:func:`_routing`). Showing every
+    line the same catalog is also what lets them share calls: the matcher splits only
+    by size. A card per table is added only when some tool asks for a table.
     """
-    groups = merge_columns(catalog.columns) if catalog is not None else []
-    tools = _answer_tools()
-    cards = [tool_card(tool) for tool in tools] + [group_card(g) for g in groups]
+    columns = catalog.columns if catalog is not None else []
+    groups = merge_columns(columns)
+    tables: Dict[str, List[ResolvedColumn]] = {}
+    if tooling.wants_tables:
+        for column in columns:
+            tables.setdefault(column.resource, []).append(column)
+    cards = (
+        [table_card(name, members) for name, members in tables.items()]
+        + [group_card(group) for group in groups]
+    )
     return _Matching(
-        verdicts=matcher.match_many(requests=[(specs, cards)]),
+        verdicts=matcher.match_many(requests=[(specs + tooling.lines, cards)]),
         groups={group.ref: group for group in groups},
-        tools={tool.name: tool.description or tool.name for tool in tools},
         shown=[card["ref"] for card in cards],
     )
 
 
-def _settle_match(
-    spec: FieldSpec,
-    matching: _Matching,
-    catalog: Optional[Catalog],
-) -> Optional[FieldRouting]:
-    """The matched column(s) or tool, and nothing else.
+@dataclass
+class _Binding:
+    """The tool chosen for a field with its arguments bound from the column matcher — or why not."""
 
-    A matched group fans back out to every member, so a field answered by the same
-    column in six tables routes to all six — ``candidates[0]`` is the first, and the
-    compiler's bindings carry the rest. No retrieval ranking is appended: the matcher
-    saw the whole catalog, which the plan records once (``FieldPlan.catalog_shown``).
+    decision: Verdict
+    tool: Any
+    runs: List[Dict[str, str]] = field(default_factory=list)  # one argument set per table
+    confidence: str = "none"
+    mismatches: List[str] = field(default_factory=list)
+    unbound: Optional[str] = None                              # why the tool cannot run
+
+    @property
+    def columns(self) -> Set[Tuple[str, str]]:
+        """Every (table, column) the tool is given."""
+        return {
+            (run["resource"], value)
+            for run in self.runs
+            for name, value in run.items()
+            if name != "resource"
+        }
+
+    def candidates(self) -> List[EvidenceRef]:
+        """One tool candidate per run, on the table it runs on."""
+        return [
+            EvidenceRef(
+                resource=run.get("resource", ""), locator=self.tool.name, kind="tool",
+                snippet=self.tool.description or self.tool.name, score=0.0,
+            )
+            for run in self.runs
+        ]
+
+
+def _tables_of(choice: Optional[str], matching: _Matching) -> List[str]:
+    """The tables a pick for a ``resource`` argument names: a table, or a column's tables."""
+    if not choice:
+        return []
+    if choice.startswith(TABLE_PREFIX):
+        return [choice[len(TABLE_PREFIX):]]
+    group = matching.groups.get(choice)
+    return list(dict.fromkeys(c.resource for c in group.members)) if group else []
+
+
+def _bind(
+    spec: FieldSpec, tooling: _Tooling, matching: _Matching
+) -> Optional[_Binding]:
+    """Bind the arguments of the tool chosen for ``spec`` from the column matcher's picks.
+
+    Code, not a model, joins the two answers. Every argument must be answered — a table
+    argument by a table, a column argument by a column — and a tool taking several
+    columns runs only on a table holding all of them; a merged column group runs the
+    tool once per such table. A tool left with an argument unanswered cannot run. A
+    bound column whose values do not fit its argument is kept and recorded, to be
+    graded (:func:`~src.router.type_fit.argument_mismatch`).
+    """
+    decision = tooling.verdicts.get(spec.path)
+    if decision is None or decision.abstained:
+        return None
+    binding = _Binding(
+        decision, tooling.tools[decision.choice[len(TOOL_PREFIX):]],
+        confidence=decision.confidence,
+    )
+    slots = tooling.slots.get(spec.path, [])
+    if not slots:
+        binding.runs = [{}]
+        return binding
+
+    columns: Dict[str, List[ResolvedColumn]] = {}
+    for slot in slots:
+        verdict = matching.verdicts.get(slot.line.path) or Verdict(choice=None)
+        if slot.values == "table":
+            tables = _tables_of(verdict.choice, matching)
+            if not tables:
+                binding.unbound = f"no table chosen for {slot.name}"
+                return binding
+            binding.runs = [{"resource": table} for table in tables]
+        else:
+            group = matching.groups.get(verdict.choice) if verdict.choice else None
+            if group is None:
+                binding.unbound = f"no column chosen for {slot.name}"
+                return binding
+            columns[slot.name] = list(group.members)
+        binding.confidence = weaker(binding.confidence, verdict.confidence)
+    if not columns:
+        return binding
+
+    values = {slot.name: slot.values for slot in slots}
+    first = next(iter(columns.values()))
+    for table in dict.fromkeys(column.resource for column in first):
+        found = {
+            name: next((c for c in members if c.resource == table), None)
+            for name, members in columns.items()
+        }
+        if any(column is None for column in found.values()):
+            continue
+        binding.runs.append({"resource": table, **{n: c.name for n, c in found.items()}})
+        binding.mismatches += [
+            f"{table}::{column.name} — {reason}"
+            for name, column in found.items()
+            if (reason := argument_mismatch(name, values[name], column))
+        ]
+    if not binding.runs:
+        binding.unbound = f"no one table holds a column for each of {', '.join(columns)}"
+    return binding
+
+
+def _column_pick(spec: FieldSpec, matching: _Matching) -> Tuple[Verdict, List[EvidenceRef]]:
+    """The column matcher's verdict on the field itself, fanned out to every member column.
+
+    A table named for a field is not an answer to it: tables are offered only for tools.
     """
     decision = matching.verdicts.get(spec.path) or Verdict(
         choice=None, because="the column matcher returned no verdict for this field"
     )
-    if decision.abstained:
-        return None
+    group = matching.groups.get(decision.choice) if decision.choice else None
+    if group is None:
+        return decision, []
+    return decision, [
+        EvidenceRef(
+            resource=c.resource, locator=c.name, kind="computed_column",
+            snippet=f"{c.name}: {c.description or c.value_label or c.dtype}",
+            score=0.0,
+        )
+        for c in group.members
+    ]
 
-    choice = decision.choice
-    if choice.startswith(TOOL_PREFIX):
-        name = choice[len(TOOL_PREFIX):]
-        chosen = [EvidenceRef(
-            resource="", locator=name, kind="tool",
-            snippet=matching.tools.get(name, name), score=0.0,
-        )]
-    else:
-        group = matching.groups.get(choice)
-        members = group.members if group else ()
-        chosen = [
-            EvidenceRef(
-                resource=c.resource, locator=c.name, kind="computed_column",
-                snippet=f"{c.name}: {c.description or c.value_label or c.dtype}",
-                score=0.0,
-            )
-            for c in members
-        ]
-    if not chosen:
-        return None
 
-    return _routing(spec, chosen, catalog, decision)
+def _settle_structured(
+    spec: FieldSpec,
+    binding: Optional[_Binding],
+    matching: _Matching,
+    catalog: Optional[Catalog],
+) -> Optional[FieldRouting]:
+    """Tier 1's routing for one field: its tool, its column, both, or neither.
+
+    - **A tool that can run leads.** If the column matcher also picked a column for the
+      field and it is one the tool is given, the two agree: one tool routing.
+    - **A different column is kept beside it, first.** It was chosen with the data in
+      view and the tool without, and two routes to one value is a disagreement for the
+      executor to settle, so neither is trusted past ``medium``.
+    - **A tool that cannot run is dropped**, and the column pick stands alone.
+
+    A matched column group fans out to every member, so a field answered by the same
+    column in six tables routes to all six. No retrieval ranking is appended: the
+    matchers saw the whole catalog, which the plan records once.
+    """
+    decision, columns = _column_pick(spec, matching)
+    if binding is not None and binding.unbound is None:
+        tools = binding.candidates()
+        led = replace(binding.decision, confidence=binding.confidence)
+        options = dict(arguments=binding.runs, argument_mismatches=binding.mismatches)
+        if {(c.resource, c.locator) for c in columns} <= binding.columns:
+            return _routing(spec, tools, catalog, led, **options)
+        return _routing(spec, columns + tools, catalog, decision, ceiling="medium", **options)
+    if columns:
+        return _routing(spec, columns, catalog, decision)
+    return None
+
+
+def _note_tool(routing: FieldRouting, binding: Optional[_Binding]) -> None:
+    """Record the tool matcher's choice on a routing, whether or not the tool runs."""
+    if binding is None:
+        return
+    routing.tool_choice = binding.decision.choice
+    reasons = [binding.decision.because, f"not run: {binding.unbound}" if binding.unbound else ""]
+    routing.tool_note = " — ".join(r for r in reasons if r) or None
 
 
 # ---------------------------------------------------------------------------
@@ -600,12 +839,17 @@ def _settle_read(
     catalog: Optional[Catalog],
     passage,
 ) -> Optional[FieldRouting]:
-    """The best passage that states the field leads, narrowed to the sentence it quoted.
+    """Every passage that states the field, each narrowed to the sentences it quoted.
 
     Several passages can state one field — a README and a methods section both give
-    the title. A located quote beats an unlocated one, then confidence, then the
-    passage's position in ``ranked``: document order when every passage was read,
-    retrieval rank when BM25 chose them.
+    the title — and one passage can state it twice. Each located quote becomes a
+    candidate of its own. A passage the reader read and found nothing in is dropped.
+
+    Grounded answers are kept over ungrounded ones: when any passage's quotes were all
+    found, a passage with a quote that was not is left out, since a located sentence
+    beats a paraphrase. Then higher confidence leads, then the passage's position in
+    ``ranked`` — document order when every passage was read, retrieval rank when BM25
+    chose them. The leading passage's verdict grades the routing.
     """
     stated = [
         (rank, candidate, verdict)
@@ -614,13 +858,19 @@ def _settle_read(
     ]
     if not stated:
         return None
-    _, best, decision = max(
-        stated,
-        key=lambda item: (item[2].grounded is True, rank_of(item[2].confidence), -item[0]),
-    )
-    top, citation = _cite(best, decision.quote, passage)
-    candidates = [top] + [c for c in ranked if c is not best]
-    return _routing(spec, candidates, catalog, decision, citation)
+    if any(verdict.grounded for _, _, verdict in stated):
+        stated = [item for item in stated if item[2].grounded]
+    stated.sort(key=lambda item: (-rank_of(item[2].confidence), item[0]))
+
+    candidates: List[EvidenceRef] = []
+    quotes: List[str] = []
+    citations: List[Optional[str]] = []
+    for _, read, verdict in stated:
+        spans, cited = _cite_all(read, verdict.quotes, passage)
+        candidates += spans
+        quotes += verdict.quotes
+        citations += cited
+    return _routing(spec, candidates, catalog, stated[0][2], quotes=quotes, citations=citations)
 
 
 def _bucket_of(top: EvidenceRef) -> str:
@@ -683,6 +933,7 @@ def route_fields(
     k: int = 3,
     matcher: Optional[ColumnMatcher] = None,
     reader: Optional[PassageReader] = None,
+    tool_matcher: Optional[ToolMatcher] = None,
 ) -> FieldPlan:
     """Route every leaf field of ``schema`` to a source, producing a FieldPlan.
 
@@ -690,32 +941,42 @@ def route_fields(
     ``docs`` are the document sources for narrative fields. A field that neither
     can answer is left ``unanswered`` — coverage, computed before any extraction.
 
-    ``matcher`` and ``reader`` are the judges (layer 4b), one per tier. Without them
+    ``tool_matcher``, ``matcher`` and ``reader`` are the judges (layer 4b). Without them
     rank 1 wins on BM25 score alone, which over-answers badly when the schema and the
-    data were authored independently. Every routing is graded on type and unit fit
+    data were authored independently. A tool matcher needs a column matcher, which
+    chooses what the tools run on. Every routing is graded on type and unit fit
     (layer 4a), which lowers its assurance but never removes a candidate. See
-    :mod:`src.router.type_fit`, :mod:`src.router.column_matcher` and
-    :mod:`src.router.passage_reader`.
+    :mod:`src.router.type_fit`, :mod:`src.router.tool_matcher`,
+    :mod:`src.router.column_matcher` and :mod:`src.router.passage_reader`.
     """
+    if tool_matcher is not None and matcher is None:
+        raise ValueError(
+            "a tool matcher needs a column matcher: it chooses the table and columns "
+            "each tool runs on"
+        )
     docs = docs or []
     specs = list(walk_schema(schema))
     passage = _passage_reader(docs)
     corpus = _document_corpus(docs, packed=reader is not None)
-    judged = matcher is not None or reader is not None
+    judged = any(judge is not None for judge in (tool_matcher, matcher, reader))
 
-    # Tier 1 — columns and tools. With a matcher every field is matched against the
-    # whole catalog and nothing is ranked; without one, BM25 ranks the tools and
-    # enriched columns together and rank 1 is the routing.
-    matching = _match(matcher, specs, catalog) if matcher is not None else None
-    structured: Dict[str, List[EvidenceRef]] = {}
+    # Tier 1 — tools and columns. With judges, the tool matcher says which fields a tool
+    # computes, the column matcher matches every field and every tool argument against
+    # the whole catalog, and code joins the two; nothing is ranked. Without them, BM25
+    # ranks the tools and enriched columns together and rank 1 is the routing.
+    tooling = _match_tools(tool_matcher, specs) if tool_matcher is not None else _Tooling()
+    matching = _match(matcher, specs, tooling, catalog) if matcher is not None else None
+    bindings = (
+        {spec.path: _bind(spec, tooling, matching) for spec in specs}
+        if matching is not None else {}
+    )
     routings: Dict[str, FieldRouting] = {}
     pending: List[FieldSpec] = []
     for spec in specs:
         if matching is not None:
-            settled = _settle_match(spec, matching, catalog)
+            settled = _settle_structured(spec, bindings[spec.path], matching, catalog)
         else:
             ranked = _structured_candidates(spec.description or spec.path, catalog, k)
-            structured[spec.path] = ranked
             settled = _routing(spec, ranked, catalog) if ranked else None
         if settled is None:
             pending.append(spec)
@@ -734,14 +995,16 @@ def route_fields(
             settled = _settle_read(spec, ranked, readings[spec.path], catalog, passage)
         else:
             settled = _routing(spec, ranked, catalog) if ranked else None
-        routings[spec.path] = settled or _unanswered(
-            spec, structured.get(spec.path, []) + ranked, judged, catalog
-        )
+        routings[spec.path] = settled or _unanswered(spec, judged)
+
+    for spec in specs:
+        _note_tool(routings[spec.path], bindings.get(spec.path))
 
     # Emit in schema order, which the two-tier pass does not preserve on its own.
     return FieldPlan(
         schema_name=schema.__name__,
         routings={spec.path: routings[spec.path] for spec in specs},
+        tools_shown=tooling.shown,
         catalog_shown=matching.shown if matching is not None else [],
         judged=judged,
     )

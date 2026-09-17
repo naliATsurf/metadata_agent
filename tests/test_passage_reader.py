@@ -42,19 +42,44 @@ class RefereeTest(unittest.TestCase):
         return LLMPassageReader(_scripted(reply)).read(fields=[_field("f")], passage=PASSAGE)["f"]
 
     def test_a_located_quote_keeps_its_confidence(self):
-        v = self._verdict(stated=True, quote="held at 21.5 °C", confidence="high")
+        v = self._verdict(stated=True, quotes=["held at 21.5 °C"], confidence="high")
         self.assertEqual(v.choice, "doc::readme")
+        self.assertEqual(v.quotes, ("held at 21.5 °C",))
         self.assertTrue(v.grounded)
         self.assertEqual(v.confidence, "high")
 
     def test_an_unlocatable_quote_caps_confidence_at_low(self):
-        v = self._verdict(stated=True, quote="held at ... 21.5 °C", confidence="high")
+        v = self._verdict(stated=True, quotes=["held at ... 21.5 °C"], confidence="high")
         self.assertEqual(v.choice, "doc::readme")
         self.assertFalse(v.grounded)
         self.assertEqual(v.confidence, "low")
 
-    def test_an_empty_quote_is_not_a_citation(self):
-        v = self._verdict(stated=True, quote="", confidence="high")
+    def test_every_quote_must_be_found(self):
+        """One real sentence does not vouch for an invented one beside it."""
+        v = self._verdict(stated=True, confidence="high",
+                          quotes=["held at 21.5 °C", "kept in 30 psu seawater"])
+        self.assertFalse(v.grounded)
+        self.assertEqual(v.confidence, "low")
+
+    def test_several_located_quotes_are_all_kept_once(self):
+        v = self._verdict(stated=True, confidence="high",
+                          quotes=["held at 21.5 °C", "12:12-h light–dark cycle", "held at 21.5 °C"])
+        self.assertEqual(v.quotes, ("held at 21.5 °C", "12:12-h light–dark cycle"))
+        self.assertTrue(v.grounded)
+
+    def test_a_full_stop_added_where_a_sentence_was_cut_is_forgiven(self):
+        v = self._verdict(stated=True, quotes=["Fish were held at 21.5 °C."], confidence="high")
+        self.assertTrue(v.grounded)
+        v = self._verdict(stated=True, quotes=["Fish were kept at 21.5 °C."], confidence="high")
+        self.assertFalse(v.grounded)
+
+    def test_a_single_quote_string_is_read_as_one_quote(self):
+        v = self._verdict(stated=True, quote="held at 21.5 °C", confidence="high")
+        self.assertEqual(v.quotes, ("held at 21.5 °C",))
+        self.assertTrue(v.grounded)
+
+    def test_no_quote_is_not_a_citation(self):
+        v = self._verdict(stated=True, quotes=[], confidence="high")
         self.assertFalse(v.grounded)
         self.assertEqual(v.confidence, "low")
 

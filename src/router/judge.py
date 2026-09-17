@@ -8,22 +8,28 @@ correctness, because the highest-scoring hits are exactly the confident lexical
 coincidences ("Fulton's condition factor" winning ``temperature`` on *condition*).
 A model decides instead, and its most valuable answer is *none*.
 
-**Two judges, because columns and prose pose different questions.**
+**Three judges, because tools, columns and prose pose different questions.**
 
+- :mod:`src.router.tool_matcher` — *is this field computed?* A tool is an operation,
+  not a place: whether a row count answers ``sample_size`` depends on the schema and
+  the tool, not on the bundle. So the tool matcher sees no data, and its answers can
+  be cached across bundles.
 - :mod:`src.router.column_matcher` — *matching*. The catalog is fixed and identical
   for every field, the evidence is structured (units, value range, dtype), and seeing
   every field at once helps: a model that sees ``temperature`` and ``oxygen`` beside
   each other is better placed to see that ``p50`` is a fish's response, not a tank
-  condition. So the catalog is shown once and all fields are matched against it.
+  condition. So the catalog is shown once and all fields are matched against it —
+  together with the table or columns each chosen tool must be run on.
 - :mod:`src.router.passage_reader` — *reading*. A passage either states a field's
   value or it does not, and the sentence that states it *is* the evidence: locating
   the quote is what turns "somewhere in this file" into a citation. So each passage
   is read once for every field that retrieved it.
 
-What both share lives here: the ref vocabulary a pick and a hand label compare in,
-the :class:`Verdict`, the confidence grades, and the concurrent dispatch.
+What they share lives here: the ref vocabulary a pick and a hand label compare in,
+the :class:`Verdict`, the confidence grades, the pick referee, and the concurrent
+dispatch.
 
-**A model proposes; code disposes.** Neither judge is believed further than it can be
+**A model proposes; code disposes.** No judge is believed further than it can be
 checked: a ref that was not offered is discarded, a quote that cannot be located caps
 confidence at ``low``, and a failed or garbled call abstains rather than crashes.
 """
@@ -34,7 +40,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Sequence, TypeVar
+from typing import Any, Callable, Collection, List, Optional, Sequence, Tuple, TypeVar
 
 from src.context.base_context import EvidenceRef
 
@@ -43,6 +49,8 @@ from src.context.base_context import EvidenceRef
 # hand-written answer and a retrieved candidate compare with ``==``.
 TOOL_PREFIX = "tool::"
 DOC_PREFIX = "doc::"
+#: A whole table, as the column matcher offers it for a tool's ``resource`` argument.
+TABLE_PREFIX = "table::"
 
 #: Confidence values a judge may return, weakest first.
 CONFIDENCE_ORDER = ("none", "low", "medium", "high")
@@ -67,9 +75,10 @@ class Verdict:
 
     choice: Optional[str]                  # a candidate ref, or None to abstain
     because: str = ""
-    quote: str = ""
+    #: Every sentence cited as stating the value, in the order given.
+    quotes: Tuple[str, ...] = ()
     confidence: str = "none"               # high | medium | low | none
-    #: Was ``quote`` found in the material? ``None`` where a quote is not the
+    #: Was *every* quote found in the material? ``None`` where a quote is not the
     #: evidence at all — a column is matched on its card, not cited from it.
     grounded: Optional[bool] = None
 
@@ -100,6 +109,26 @@ def contains(haystack: str, needle: str) -> bool:
     if not needle:
         return False
     return " ".join(needle.casefold().split()) in " ".join(haystack.casefold().split())
+
+
+def pick(data: Any, shown: Collection[str], judge: str) -> Verdict:
+    """Validate one field's ``{choice, because, confidence}`` against the refs shown.
+
+    A ref the model composed — or took from a call that did not show it — is discarded
+    rather than trusted. Silence about a field is not a pick.
+    """
+    if not isinstance(data, dict):
+        return Verdict(choice=None, because=f"no usable answer from the {judge}")
+    raw = data.get("choice")
+    because = str(data.get("because") or "").strip()
+    if raw in (None, "", "null", "none", "NONE"):
+        return Verdict(choice=None, because=because)
+    ref = str(raw).strip()
+    if ref not in shown:
+        return Verdict(
+            choice=None, because=f"{judge} named {raw!r}, which was not in the catalog shown"
+        )
+    return Verdict(choice=ref, because=because, confidence=confidence_of(data.get("confidence")))
 
 
 def json_object(text: Any) -> Optional[dict]:
@@ -162,7 +191,7 @@ def in_groups(items: Sequence[T], size: int) -> List[List[T]]:
 
 
 def field_lines(fields: Sequence[Any]) -> str:
-    """The FIELDS block both judges' prompts list their fields in."""
+    """The FIELDS block the judges' prompts list their fields in."""
     return "\n".join(
         f"- {f.path} ({f.type}) — {f.description or f.path}" for f in fields
     )

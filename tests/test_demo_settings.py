@@ -128,6 +128,7 @@ class TestExampleArguments(unittest.TestCase):
             router_candidate_judge=True,
             router_judge_workers=4,
             router_judge_batch=False,
+            router_refresh_tool_cache=True,
         )
         args = self.parse(
             field_router_plan.build_parser(), chosen.router_arguments(),
@@ -141,6 +142,7 @@ class TestExampleArguments(unittest.TestCase):
         self.assertEqual(args.candidates, 8)
         self.assertEqual(args.judge_workers, 4)
         self.assertTrue(args.no_judge_batch)
+        self.assertTrue(args.refresh_tool_cache)
 
     def test_batching_is_stated_positively(self):
         """The panel offers batching; the example takes its negation."""
@@ -167,6 +169,7 @@ class TestToken(unittest.TestCase):
             {"topology": "thorough"},
             {"catalog_prose_tier": "llm"},
             {"router_candidates": 7},
+            {"router_refresh_tool_cache": True},
             {"models": {"PLANNING": LLMSettings("openai", "other-model", 0.1)}},
         ):
             with self.subTest(**change):

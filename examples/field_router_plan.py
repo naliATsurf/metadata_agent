@@ -19,7 +19,7 @@ Usage:
     python examples/resolve_catalog.py --out catalog.json
     python examples/field_router_plan.py --catalog catalog.json
 
-    # another standard, with a model matching columns and reading passages for each field
+    # another standard, with a model matching tools and columns and reading passages
     python examples/field_router_plan.py --catalog catalog.json \\
         --standard field_router_test --llm-candidate-judge
 
@@ -58,6 +58,7 @@ from src.router import (
 from src.config import llm_settings, PROVIDER_CONFIGS
 from src.router.column_matcher import ColumnMatcher, LLMColumnMatcher
 from src.router.passage_reader import LLMPassageReader, PassageReader
+from src.router.tool_matcher import LLMToolMatcher, ToolMatcher
 from src.standards import METADATA_STANDARDS, get_schema_for_standard
 
 REPO = Path(__file__).resolve().parents[1]
@@ -65,18 +66,31 @@ OUT = REPO / "data" / "sample_output"
 
 DEFAULT_STANDARD = "sharetrait_basic_no_trait"
 
-#: Which per-module LLM configuration the judges (column matcher, passage reader) draw from. Set
-#: LLM_PROVIDER_CANDIDATE_JUDGE / LLM_MODEL_CANDIDATE_JUDGE / LLM_TEMPERATURE_CANDIDATE_JUDGE
-#: in .env to point it somewhere other than the global default.
+#: Which per-module LLM configuration the judges (tool matcher, column matcher, passage
+#: reader) draw from. Set LLM_PROVIDER_CANDIDATE_JUDGE / LLM_MODEL_CANDIDATE_JUDGE /
+#: LLM_TEMPERATURE_CANDIDATE_JUDGE in .env to point it somewhere other than the global default.
 LLM_MODULE = "CANDIDATE_JUDGE"
+
+#: Where the tool matcher keeps its answers. They depend only on the standard, the tool
+#: set and the model, so they hold across bundles; delete the directory to ask again.
+TOOL_MATCH_CACHE = REPO / ".cache" / "tool_matcher"
+
+
+@dataclass(frozen=True)
+class Judges:
+    """The layer-4b judges one run uses, and a label naming them for output."""
+
+    tools: ToolMatcher | None = None
+    columns: ColumnMatcher | None = None
+    passages: PassageReader | None = None
+    label: str = "off"
 
 
 def build_plan(
     resolved: ResolvedBundle,
     standard: str,
     candidates: int = 5,
-    matcher: ColumnMatcher | None = None,
-    reader: PassageReader | None = None,
+    judges: Judges | None = None,
     documents: List[Path] | None = None,
 ) -> Tuple[FieldPlan, Plan]:
     """The core: route the resolved catalog → compile.
@@ -92,11 +106,12 @@ def build_plan(
     if schema is None:
         raise SystemExit(f"Unknown standard {standard!r}.")
 
+    judges = judges or Judges()
     routed = resolved.documents if documents is None else documents
     doc_ctx = [create_context(str(p), name=p.stem) for p in routed]
     field_plan = route_fields(                                     # layer 4 (+ 4b)
         schema, catalog=resolved.catalog, docs=doc_ctx, k=candidates,
-        matcher=matcher, reader=reader,
+        tool_matcher=judges.tools, matcher=judges.columns, reader=judges.passages,
     )
     plan = compile_field_plan(field_plan)                          # layer 5
     return field_plan, plan
@@ -137,22 +152,29 @@ def print_working(field_plan: FieldPlan, console: Console) -> None:
     """Each field's working: what was offered, what was refused, and on what evidence.
 
     The routing artifact records every step already — the candidates whose type or
-    units do not fit, and why, the ranked candidates, the judge's verdict, quote and citation — so
-    this reads the plan rather than instrumenting the router. Which is the point: an
-    intermediate you can only see with a debug flag on is an intermediate the artifact
-    should have been carrying.
+    units do not fit, and why, the candidates, the judge's verdict, quotes and
+    citations — so this reads the plan rather than instrumenting the router. Which is
+    the point: an intermediate you can only see with a debug flag on is an intermediate
+    the artifact should have been carrying.
 
     The distinction to look for is *why* a field is unanswered: nothing retrieved (no
-    candidates) and everything refused (candidates listed, no choice) both end at
-    ``unanswered``, and they call for opposite fixes.
+    judges ran) and everything refused (a judge note) both end at ``unanswered``, and
+    they call for opposite fixes.
     """
     console.print("\n[bold]Working (per field)[/]")
     for path, routing in field_plan.routings.items():
         console.print(f"\n[bold]{path}[/] [dim]— {routing.query}[/]")
         console.print(f"  bucket={routing.bucket} assurance={routing.assurance}")
+        if routing.tool_choice:
+            console.print(f"  [magenta]tool[/]  {routing.tool_choice} — {routing.tool_note or ''}")
+        for arguments in routing.tool_arguments:
+            bound = ", ".join(f"{name}={value}" for name, value in arguments.items())
+            console.print(f"  [magenta]runs with[/] {bound or 'the whole context'}")
         for reason in routing.mismatches:
-            console.print(f"  [yellow]type/unit mismatch[/] {reason}")
-        if not routing.candidates:
+            console.print(f"  [yellow]does not fit[/] {reason}")
+        for note in routing.varies:
+            console.print(f"  [dim]varies[/] {note}")
+        if not routing.candidates and not routing.judge_note:
             console.print("  [dim]no candidates retrieved[/]")
         for rank, c in enumerate(routing.candidates, 1):
             mark = "[green]→[/]" if rank == 1 and routing.status == "routed" else " "
@@ -162,11 +184,9 @@ def print_working(field_plan: FieldPlan, console: Console) -> None:
             )
         if routing.judge_note:
             console.print(f"  [cyan]judge[/] {routing.judge_choice or 'none'} — {routing.judge_note}")
-        if routing.judge_quote:
-            grounded = "located" if routing.judge_grounded else "[red]not located[/]"
-            console.print(f"  [cyan]quote[/] ({grounded}) {routing.judge_quote!r}")
-        if routing.citation:
-            console.print(f"  [cyan]cite[/]  {routing.citation}")
+        for quote, citation in zip(routing.judge_quotes, routing.citations):
+            where = f"[cyan]cite[/] {citation}" if citation else "[red]not located[/]"
+            console.print(f"  [cyan]quote[/] {quote!r}\n        {where}")
 
 
 def print_plan(plan: Plan, console: Console) -> None:
@@ -234,10 +254,12 @@ def build_parser() -> argparse.ArgumentParser:
                               "turn into a silent abstention")
     routing.add_argument("--llm-candidate-judge", action="store_true",
                          help="let an LLM decide what answers each field, or that nothing "
-                              "does: a column matcher over the whole catalog, then a "
-                              "passage reader over each retrieved passage. Without it rank 1 "
-                              "wins on BM25 score, which over-answers when schema and data "
-                              "were authored apart")
+                              "does: a tool matcher over the tools (answers cached in "
+                              ".cache/tool_matcher), a column matcher over the whole "
+                              "catalog that also picks each tool's table and columns, then "
+                              "a passage reader over each passage. Without it rank 1 wins "
+                              "on BM25 score, which over-answers when schema and data were "
+                              "authored apart")
 
     configured = llm_settings(LLM_MODULE)
     model.add_argument("--provider", choices=list(PROVIDER_CONFIGS),
@@ -256,6 +278,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="ask about one field per call instead of many. Slower, but "
                             "each field is judged independently — the comparison worth "
                             "running against a labeled sheet")
+    model.add_argument("--refresh-tool-cache", action="store_true",
+                       help="ask the tool matcher again instead of reusing its saved "
+                            "answers, and save the new answers in their place")
     return ap
 
 
@@ -284,13 +309,11 @@ def _logging_invoke(model, console: Console):
     return invoke
 
 
-def build_judges(
-    args: argparse.Namespace, console: Console | None = None
-) -> Tuple[ColumnMatcher | None, PassageReader | None, str]:
-    """Build the column matcher and passage reader from the flags, and a label.
+def build_judges(args: argparse.Namespace, console: Console | None = None) -> Judges:
+    """Build the tool matcher, column matcher and passage reader from the flags.
 
-    Both judges share one model and one set of flags: they are two shapes of the same
-    layer-4b decision, not two settings a user should have to keep in step.
+    The judges share one model and one set of flags: they are three shapes of the same
+    layer-4b decision, not three settings a user should have to keep in step.
 
     The model is constructed lazily — importing a provider SDK is only worth it when
     a judge is actually asked for, and the whole deterministic path must stay
@@ -298,7 +321,7 @@ def build_judges(
     model's invoke is wrapped to log prompts and responses.
     """
     if not args.llm_candidate_judge:
-        return None, None, "off"
+        return Judges()
     from src.config import create_llm_for   # lazy: pulls provider SDKs when used
 
     settings = llm_settings(
@@ -312,14 +335,23 @@ def build_judges(
         else (lambda prompt: model.invoke(prompt).content)
     )
     options = dict(batch=not args.no_judge_batch, max_workers=args.judge_workers)
-    matcher = LLMColumnMatcher(invoke, **options)
-    reader = LLMPassageReader(invoke, **options)
     detail = "per-field" if args.no_judge_batch else "grouped"
     if args.judge_workers > 1:
         detail += f", {args.judge_workers} at a time"
     if debug:
         detail += ", debug"
-    return matcher, reader, f"{settings.describe()} ({detail})"
+    refresh = getattr(args, "refresh_tool_cache", False)
+    if refresh:
+        detail += ", tool cache refreshed"
+    return Judges(
+        tools=LLMToolMatcher(
+            invoke, **options, cache_dir=TOOL_MATCH_CACHE, model=settings.describe(),
+            refresh=refresh,
+        ),
+        columns=LLMColumnMatcher(invoke, **options),
+        passages=LLMPassageReader(invoke, **options),
+        label=f"{settings.describe()} ({detail})",
+    )
 
 
 def run(
@@ -341,7 +373,7 @@ def run(
                 f"examples/resolve_catalog.py --out {args.catalog}, then rerun."
             )
         resolved = ResolvedBundle.load(args.catalog)
-    matcher, reader, judge_label = build_judges(args, console)
+    judges = build_judges(args, console)
 
     console.print(f"[bold]bundle:[/] {resolved.root}")
     console.print(f"standard: {args.standard}")
@@ -353,13 +385,12 @@ def run(
     held_back = [p.name for p in resolved.documents if p not in routed_docs]
     console.print(
         f"docs:     {[p.name for p in routed_docs] or 'none'}  "
-        f"candidates={args.candidates}  candidate-judge={judge_label}"
+        f"candidates={args.candidates}  candidate-judge={judges.label}"
         + (f"  (not routed: {held_back})" if held_back else "")
     )
 
     field_plan, plan = build_plan(
-        resolved, args.standard, candidates=args.candidates,
-        matcher=matcher, reader=reader,
+        resolved, args.standard, candidates=args.candidates, judges=judges,
         documents=routed_docs,
     )
     print_routing(field_plan, console)

@@ -61,7 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     router = ap.add_argument_group("Router", "The configuration being graded.")
     router.add_argument("--llm-candidate-judge", action="store_true",
-                        help="decide each field with the LLM judges (column matcher, passage reader)")
+                        help="decide each field with the LLM judges (tool matcher, column "
+                             "matcher, passage reader)")
 
     configured = llm_settings(LLM_MODULE)
     model = ap.add_argument_group("LLM candidate judge model", "Backing --llm-candidate-judge.")
@@ -74,12 +75,14 @@ def build_parser() -> argparse.ArgumentParser:
     model.add_argument("--no-judge-batch", action="store_true",
                        help="ask about one field per call instead of many — the "
                             "comparison worth running against a labeled sheet")
+    model.add_argument("--refresh-tool-cache", action="store_true",
+                       help="ask the tool matcher again instead of reusing its saved answers")
     return ap
 
 
 def run(args: argparse.Namespace, console: Console) -> Path:
     bundle = discover_bundle(args.bundle)
-    matcher, reader, label = build_judges(args)
+    judges = build_judges(args)
     resolved = resolve(
         bundle,
         select(bundle.codebooks, args.dictionary),
@@ -89,8 +92,7 @@ def run(args: argparse.Namespace, console: Console) -> Path:
         resolved,
         args.standard,
         candidates=args.candidates,
-        matcher=matcher,
-        reader=reader,
+        judges=judges,
     )
 
     out = args.out or (DATA / f"{args.standard}__{args.bundle.name}")
@@ -98,7 +100,7 @@ def run(args: argparse.Namespace, console: Console) -> Path:
 
     if args.command == "score":
         console.print(
-            f"[dim]candidate judge: {label}[/]"
+            f"[dim]candidate judge: {judges.label}[/]"
         )
         # The passage reader is what lets a document label be graded at the passage
         # rather than at the file; without it the sheet's `evidence` column is inert.

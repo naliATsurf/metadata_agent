@@ -10,7 +10,7 @@ without translation, which is the only reason scoring a judge is cheap.
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -111,8 +111,8 @@ class Scored:
     routed: bool
     signals: Dict[str, float]
     abstained_by: Optional[str] = None   # "judge" | None
-    quote: str = ""                      # the sentence the judge cited
-    grounded: Optional[bool] = None      # was that quote found in the chosen material?
+    quotes: List[str] = field(default_factory=list)  # the sentences the judge cited
+    grounded: Optional[bool] = None      # was every quote found in the material?
 
     #: Set by :func:`score` when the sheet labels this field's evidence: the ref
     #: matched *and* the passage actually contains it. ``None`` means ref-level only.
@@ -195,7 +195,7 @@ def score(
                 routed=routed,
                 signals={name: fn(routing) for name, fn in SIGNALS.items()},
                 abstained_by=by,
-                quote=routing.judge_quote or "",
+                quotes=list(routing.judge_quotes),
                 grounded=routing.judge_grounded,
                 top1_precise=(precise[0] and routed) if precise else None,
                 ranked_precise=any(precise) if precise else None,

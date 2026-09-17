@@ -1,4 +1,4 @@
-"""Layer 4b, columns — match schema fields against the catalog.
+"""Layer 4b, columns — match schema fields, and tools' arguments, against the catalog.
 
 Choosing a column is a *matching* problem, not a retrieval one. The catalog is fixed
 and identical for every field, so ranking it once per field and judging each field's
@@ -20,8 +20,15 @@ first is not enough:
    the strongest verdict wins.
 
 Every field sees the same catalog. Nothing is withheld on type or units — each card
-shows its column's dtype, units and value range, and the router grades a pick that
-does not fit (:mod:`src.router.type_fit`) rather than hiding the column beforehand.
+shows its column's dtype, units, value range and, when there are few, its distinct
+values — and the router grades a pick that does not fit (:mod:`src.router.type_fit`)
+rather than hiding the column beforehand.
+
+**Tools are not on the catalog.** Whether a field is computed is the tool matcher's
+question (:mod:`src.router.tool_matcher`). What reaches this matcher is the other half:
+for each tool chosen, one line per argument — ``sample_size[resource]`` asking for a
+table, ``measure_date[time_column]`` for a column — answered from the same cards, with
+a card per table added when a table is asked for.
 
 Matching needs no quote. A column's card *is* its evidence — meaning, units, value
 range — and what a model would copy back from it is the codebook text layer 3
@@ -38,16 +45,17 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from src import thresholds
 from src.router.catalog import ResolvedColumn
 from src.router.judge import (
-    TOOL_PREFIX,
+    TABLE_PREFIX,
     Verdict,
     ask,
-    confidence_of,
     dispatch,
     field_lines,
     in_groups,
+    pick,
     rank_of,
 )
 from src.router.schema import FieldSpec
+
 
 def column_ref(column: ResolvedColumn) -> str:
     """The ref a column goes by — the label vocabulary's ``table::column``."""
@@ -123,27 +131,45 @@ def group_card(
         low = min(r[0] for r in ranges)
         high = max(r[1] for r in ranges)
         card["value_range"] = f"{low:g} to {high:g}"
+    card.update(_distinct(shown))
     return {key: value for key, value in card.items() if value not in (None, "", [])}
 
 
-def tool_card(tool: Any) -> Dict[str, Any]:
-    """A field-answering tool, as a card: what it computes, in its own words."""
+def _distinct(columns: Sequence[ResolvedColumn]) -> Dict[str, Any]:
+    """The values a group takes when they are few, else how many there are.
+
+    A column holding one value down every row *is* that value for the dataset, which
+    the card can only say by listing it. Across merged columns the lists are joined;
+    where any member has too many to list, the count is the largest member's.
+    """
+    listed = [c.distinct_values for c in columns]
+    if all(values is not None for values in listed):
+        joined = list(dict.fromkeys(value for values in listed for value in values))
+        if len(joined) <= thresholds.current().catalog_distinct_values_max:
+            return {"distinct_values": joined}
+        return {"distinct_count": len(joined)}
+    counts = [c.distinct_count for c in columns if c.distinct_count is not None]
+    return {"distinct_count": max(counts)} if counts else {}
+
+
+def table_card(table: str, columns: Sequence[ResolvedColumn]) -> Dict[str, Any]:
+    """A whole table, offered for a tool's ``resource`` argument: its name and columns."""
     return {
-        "ref": f"{TOOL_PREFIX}{tool.name}",
-        "kind": "tool",
-        "computes": tool.description or tool.name,
+        "ref": f"{TABLE_PREFIX}{table}",
+        "kind": "table",
+        "columns": [c.name.strip() for c in columns],
     }
 
 
 def split_cards(cards: Sequence[Dict[str, Any]], max_chars: int) -> List[List[Dict[str, Any]]]:
-    """Pack column cards, in order, into slices under ``max_chars``; tools join every slice.
+    """Pack column cards, in order, into slices under ``max_chars``; tables join every slice.
 
-    A tool is a whole-resource computation that competes with every column, and there
-    are only ever a few, so each slice carries all of them. A single card over the
-    budget is a slice of its own — a card is never cut.
+    A table card is only there to be chosen as a whole, and there are only ever a few,
+    so each slice carries all of them. A single card over the budget is a slice of its
+    own — a card is never cut.
     """
-    tools = [c for c in cards if c.get("kind") == "tool"]
-    columns = [c for c in cards if c.get("kind") != "tool"]
+    tables = [c for c in cards if c.get("kind") == "table"]
+    columns = [c for c in cards if c.get("kind") != "table"]
     slices: List[List[Dict[str, Any]]] = []
     current: List[Dict[str, Any]] = []
     size = 0
@@ -156,7 +182,7 @@ def split_cards(cards: Sequence[Dict[str, Any]], max_chars: int) -> List[List[Di
         size += width
     if current:
         slices.append(current)
-    return [tools + part for part in slices] or [tools]
+    return [tables + part for part in slices] or [tables]
 
 
 #: One set of fields and the catalog cards they are matched against.
@@ -164,7 +190,7 @@ Request = Tuple[Sequence[FieldSpec], Sequence[Dict[str, Any]]]
 
 
 class ColumnMatcher:
-    """The seam: match fields to the column or tool that holds each, or to none.
+    """The seam: match fields to the column that holds each, or to none.
 
     Implementations receive fields and cards and nothing else, so a matcher never
     touches a catalog, a context, or an SDK. :meth:`match` is one judgement over one
@@ -186,23 +212,31 @@ class ColumnMatcher:
 
 
 _INSTRUCTION = (
-    "You match metadata fields to the data columns and tools that hold them.\n\n"
-    "A card answers a field only if it holds *the quantity the field asks for*. "
-    "Sharing a word is not enough. Check the units and the value range: a field "
-    "wanting a duration in days is not answered by a column of minutes, and a field "
-    "wanting a temperature is not answered by a unitless index ranging 0.9 to 1.2. "
-    "A column measuring the subject's response is not the experimental condition it "
-    "was measured under, and an identifier or a treatment label is not a "
-    "measurement.\n\n"
+    "You match metadata fields to the data columns that hold them.\n\n"
+    "A column answers a field only if it holds *the quantity the field asks for*. "
+    "Sharing a word is not enough. Check the units, the value range and the distinct "
+    "values: a field wanting a duration in days is not answered by a column of "
+    "minutes, and a field wanting a temperature is not answered by a unitless index "
+    "ranging 0.9 to 1.2. A column measuring the subject's response is not the "
+    "experimental condition it was measured under, and an identifier or a treatment "
+    "label is not a measurement. A column whose distinct_values is a single value "
+    "holds that value for every record. When a field asks for one value and the column "
+    "holds several, lower your confidence — unless the field asks for a summary of "
+    "them, such as a range, a minimum or a list.\n\n"
     "Most fields in a typical dataset have NO answer, because the schema and the data "
     "were written by different people for different purposes. Answering with null is "
     "the normal, expected outcome — a wrong source is far worse than none. Judge each "
-    "field on its own: one card may answer several fields, and most cards answer "
+    "field on its own: one column may answer several fields, and most columns answer "
     "none.\n\n"
-    'Return ONE JSON object mapping each field name to {{"choice": <the ref of the '
-    'card that answers it, or null>, "because": <why, naming the units or values '
-    'that decide it>, "confidence": "high"|"medium"|"low"}}. No prose outside the '
-    "JSON, no code fence.\n\n"
+    "A line written field[argument] is not a field. It asks what a tool should be run "
+    "on to compute that field: a table card's ref when the line says (table), a column "
+    "card's ref when it says (column), or null when no card holds what the line "
+    "describes. Judge it by what the argument must hold — the column does not have to "
+    "state the field's value itself.\n\n"
+    'Return ONE JSON object mapping each line\'s name, as written, to {{"choice": <the '
+    'ref of the card that answers it, or null>, "because": <why, naming the units or '
+    'values that decide it>, "confidence": "high"|"medium"|"low"}}. No prose outside '
+    "the JSON, no code fence.\n\n"
     # The catalog precedes the fields so that calls over one catalog share a prefix,
     # which an endpoint with prefix caching processes once.
     "CATALOG:\n{cards}\n\n"
@@ -292,20 +326,9 @@ def _stronger(new: Verdict, held: Verdict) -> bool:
 
 
 def _referee(data: Any, cards: Sequence[Dict[str, Any]]) -> Verdict:
-    """Validate one field's answer against the cards that call actually showed.
+    """Validate one line's answer against the cards that call actually showed.
 
-    A ref the model composed — or took from a slice this call did not see — is
-    discarded rather than trusted. Silence about a field is not a pick.
+    Whether a table was picked for a field, or a column for a table, is the router's
+    to refuse: it knows which lines are arguments.
     """
-    if not isinstance(data, dict):
-        return Verdict(choice=None, because="no usable answer from the column matcher")
-    raw = data.get("choice")
-    because = str(data.get("because") or "").strip()
-    if raw in (None, "", "null", "none", "NONE"):
-        return Verdict(choice=None, because=because)
-    ref = str(raw).strip()
-    if not any(card["ref"] == ref for card in cards):
-        return Verdict(
-            choice=None, because=f"matcher named {raw!r}, which was not in the catalog shown"
-        )
-    return Verdict(choice=ref, because=because, confidence=confidence_of(data.get("confidence")))
+    return pick(data, {card["ref"] for card in cards}, "column matcher")

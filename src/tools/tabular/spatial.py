@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 import pandas as pd
 
 from src.context.base_context import TabularContext
-from src.tools.base import context_tool
+from src.tools.base import ColumnArg, context_tool
 from src.tools.tabular.detection import (
     WKT_TYPES,
     detect_coordinate_values,
@@ -148,7 +148,13 @@ def analyze_spatial_column(
     return result
 
 
-@context_tool(toolset="tabular.spatial", requires=TabularContext)
+@context_tool(
+    toolset="tabular.spatial", requires=TabularContext, answers_field=True,
+    column_args={
+        "lat_column": ColumnArg("the latitude of each record, in decimal degrees", "numeric"),
+        "lon_column": ColumnArg("the longitude of each record, in decimal degrees", "numeric"),
+    },
+)
 def get_spatial_extent(
     ctx: TabularContext, resource: str, lat_column: str, lon_column: str
 ) -> Dict[str, Any]:

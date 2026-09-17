@@ -12,6 +12,68 @@ column into a *described* column so the router's search can reach it. See
 [routing buckets](routing-buckets.md) for what the router then does with the result, and
 [the field-router plan](../plans/field-router.md) for the surrounding design.
 
+## At a glance
+
+Blue parallelograms are **data**, white rectangles are **steps**, yellow diamonds are
+**decisions**. Each step names the phase below that describes it.
+
+```mermaid
+flowchart TD
+    bundle[/"Bundle: data tables + other files"/]:::data
+
+    %% Phase 0 — sort the other files
+    bundle --> sort["Phase 0 · Sort the other files"]:::step
+    sort --> isCodebook{"Table whose values<br/>are column names?"}:::decision
+    isCodebook -->|yes| codebooks[/"Codebook tables"/]:::data
+    sort --> documents[/"Documents"/]:::data
+    documents --> isGlossary{"3+ term = definition lines<br/>on column names?"}:::decision
+    isGlossary -->|yes| glossaries[/"Glossary entries"/]:::data
+
+    %% Phase 1 — deterministic candidates
+    bundle --> tables[/"Data tables"/]:::data
+    tables --> profile["Phase 1 · Profile each column<br/>sample of up to 1000 rows"]:::step
+    profile --> profiles[/"Column profiles<br/>type, range, whole numbers, distinct values"/]:::data
+    profiles --> collect["Phase 1 · Collect candidate meanings"]:::step
+    codebooks --> collect
+    glossaries --> collect
+    collect --> candidates[/"Candidates<br/>codebook row: high · glossary: medium<br/>value prior: coordinates, dates"/]:::data
+    candidates --> anyCandidate{"Column has<br/>a candidate?"}:::decision
+    anyCandidate -->|no| unexplained[/"Unexplained columns<br/>all tables, deduplicated"/]:::data
+
+    %% Phase 2 — the reader, unexplained columns only
+    unexplained --> readerOn{"LLM reader on?"}:::decision
+    readerOn -->|yes| split["Phase 2 · Split each document into passages<br/>up to 20,000 chars"]:::step
+    documents --> split
+    split --> passages[/"Passages"/]:::data
+    passages --> fewPassages{"Document fits<br/>in 1 passage?"}:::decision
+    fewPassages -->|yes| readAll["Phase 2 · Read the whole document<br/>for all unexplained columns<br/>1 call"]:::step
+    fewPassages -->|no| bm25["Phase 2 · BM25: top 3 chunks per column,<br/>packed into passages up to 20,000 chars<br/>1 call per passage"]:::step
+    readAll --> reads[/"Reads<br/>description, units, quote"/]:::data
+    bm25 --> reads
+    reads --> ground["Phase 2 · Find each quote in the document"]:::step
+    ground --> readCandidates[/"Read candidates<br/>found: citation + grade<br/>not found: low + flagged"/]:::data
+
+    %% Phase 3 — compare claims, decide each column
+    anyCandidate -->|yes| compare["Phase 3 · Group each column's claims by meaning<br/>claim comparer: 1 LLM call, or same wording"]:::step
+    readCandidates --> compare
+    compare --> groups[/"Claim groups"/]:::data
+    groups --> decide["Phase 3 · Decide each column<br/>strongest source · values refute · found quote wins"]:::step
+    readerOn -->|no| decide
+    decide --> resolved[/"Resolved columns<br/>meaning, units, confidence,<br/>corroborated by, conflicts, alternatives"/]:::data
+    decide --> unresolved[/"Unresolved columns"/]:::data
+
+    %% Phase 4 — assemble
+    resolved --> assemble["Phase 4 · Assemble one catalog for all tables"]:::step
+    unresolved --> assemble
+    assemble --> catalog[/"Catalog + the bundle files it came from<br/>→ field router"/]:::data
+
+    classDef data fill:#e3f0ff,stroke:#3a6ea5,color:#0b2545
+    classDef step fill:#ffffff,stroke:#444444,color:#111111
+    classDef decision fill:#fff4dc,stroke:#b7791f,color:#3d2a00
+```
+
+The numbers in the diagram are defaults (see below).
+
 ## Entry points
 
 | Function | Scope |
@@ -65,8 +127,12 @@ view and falls under the precision floor — so one shared codebook would be rec
 (`catalog_profile_sample` = 1000 rows — approximate stats are enough for a prior and for the
 refutation cross-check, and this keeps cost following the schema and the docs, not the
 row count), then for each column computes a value profile (`_value_profile`) and
-gathers its candidates (`_deterministic_candidates`). **Nothing is chosen yet**: every
-column is decided once, at the end (Phase 3), after the reader has added what it reads.
+gathers its candidates (`_deterministic_candidates`). The profile also counts each
+column's distinct values and lists them when there are at most
+`catalog_distinct_values_max` (5); they resolve nothing, but ride on the resolved column
+so the router's column matcher can see that a column holding one value *is* that value.
+**Nothing is chosen yet**: every column is decided once, at the end (Phase 3), after the
+reader has added what it reads.
 Three assurance tiers, ranked by `_TIER_RANK`:
 
 | Tier | Rank | Source |
@@ -90,15 +156,18 @@ deduped on `_read_key` (trimmed **and** case-folded) — a prose read depends on
 the docs, not the table, so `ID` and `id` in two tables are one read, and a document is read
 once for the whole bundle.
 
-**The path is chosen by document size** (`catalog_whole_doc_max_chars` = 20 000 chars, set well
-above a long README so the common natural-language case skips retrieval):
+**The path is chosen per document by its passage count.** Each document is split into
+contiguous passages of up to `catalog_passage_max_chars` (20 000); the field router's
+passage reader applies the same rule.
 
-- **Short docs → `_whole_doc_reads`: no retrieval at all.** The whole text plus *all*
-  residual columns go to the reader in one `read_many` per document. This is deliberate,
-  not a shortcut: retrieval by column token fails on narrative that never uses the literal
-  name ("oxygen debt" for `EPOC`), and when the docs are small, localizing is both
-  unnecessary and harmful.
-- **A manuscript → `_localized_reads`**, today a pass-through to `_batch_prose_reads`:
+- **At most `catalog_read_all_max_passages` (1) passages → `_read_all`: no retrieval at
+  all.** Every passage goes to the reader with *all* residual columns, one `read_many` per
+  passage; a README is one passage, so one call. This is deliberate, not a shortcut:
+  retrieval by column token fails on narrative that never uses the literal name ("oxygen
+  debt" for `EPOC`). The default is 1 rather than the router's 10: measured on
+  `readme_long` (2 passages), reading both passages for every column added no coverage and
+  made the reader invent units for columns a passage never describes.
+- **More → `_localized_reads`**, today a pass-through to `_batch_prose_reads`:
   BM25 over every chunk of every document by the column token, top `catalog_prose_read_k` (3)
   chunks per column. The distinct retrieved chunks are then **packed** in document order
   into passages of up to `catalog_passage_max_chars` (20 000), and each passage is read once over
@@ -192,8 +261,8 @@ structurally — a table column, or a run of glossary entries, whose keys are th
 and documents; gathers each table's candidates from three deterministic assurance tiers —
 codebook table, text codebook (a glossary run accepted on its structure, not its
 separators), self-evident value prior; then, only for the columns left without any and only
-once for the whole bundle, invokes an optional prose reader, handing it whole documents when
-they are small and BM25-localized chunks packed into passages when they are a manuscript,
+once for the whole bundle, invokes an optional prose reader, handing it every passage of a
+document with few enough passages and BM25-localized chunks packed into passages otherwise,
 grounding every read against its own verbatim quote; groups every column's differing claims
 by meaning with a claim comparer (one LLM call for the bundle, or identical wording without
 one); decides each column once — top tier, value profile as referee, recording

@@ -8,6 +8,18 @@ records findings from an investigation that changed no code.
 ## 2026-09
 
 - -
+  **[2026-09-17 — The catalog resolver reads every passage of a document with few enough](2026-09-17_catalog-read-all.change.md)**
+  — the size rule gives way to the router's passage-count rule, default 1: reading every
+  passage of `readme_long` added no coverage and made several reads' units worse.
+- -
+  **[2026-09-17 — A document routing lists the sentences that answer the field, and nothing else](2026-09-17_document-answers.change.md)**
+  — passages that state nothing are dropped, each located quote is a candidate, unanswered
+  fields list nothing; the multi-quote prompt costs `oxygen` on TRADAT031.
+- -
+  **[2026-09-17 — Tools are matched apart from columns, then bound to the columns they run on](2026-09-17_tool-column-split.change.md)**
+  — a tool matcher (cached across bundles) picks the operation; the column matcher picks
+  its table or columns; code joins them. Column cards list a column's few distinct values.
+- -
   **[2026-09-17 — With judges on, BM25 filters nothing; every threshold lives in one place](2026-09-17_read-all-thresholds.change.md)**
   — the passage reader reads every passage for every unanswered field; `src/thresholds.py`
   gathers 14 thresholds, overridable by `THRESHOLD_<NAME>` and the settings panel.
@@ -119,6 +131,14 @@ records findings from an investigation that changed no code.
 :maxdepth: 1
 :hidden:
 
+2026-09-17_catalog-read-all.change
+2026-09-17_document-answers.change
+2026-09-17_tool-column-split.change
+2026-09-17_read-all-thresholds.change
+2026-09-17_type-fit-grade.change
+2026-09-17_column-matcher-passage-reader.change
+2026-09-16_document-passages.change
+2026-09-16_span-level-routing.change
 2026-09-15_claim-comparer.change
 2026-09-15_packed-prose-reads.change
 2026-09-14_candidate-judge.change

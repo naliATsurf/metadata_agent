@@ -76,6 +76,8 @@ class PipelineSettings:
         router_candidate_judge: Let a model adjudicate the candidates (layer 4b).
         router_judge_workers: How many of the judge's calls to issue at once.
         router_judge_batch: Ask about many fields per call, rather than one.
+        router_refresh_tool_cache: Ask the tool matcher again rather than reuse its
+            saved answers.
         thresholds: The numbers the catalog resolver, router and compiler decide by
             (:mod:`src.thresholds`).
     """
@@ -90,6 +92,7 @@ class PipelineSettings:
     router_candidate_judge: bool = False
     router_judge_workers: int = 1
     router_judge_batch: bool = True
+    router_refresh_tool_cache: bool = False
     thresholds: Thresholds = field(default_factory=Thresholds.from_environment)
 
     # -- what a run is given ------------------------------------------------
@@ -137,6 +140,7 @@ class PipelineSettings:
             "llm_candidate_judge": self.router_candidate_judge,
             "judge_workers": self.router_judge_workers,
             "no_judge_batch": not self.router_judge_batch,
+            "refresh_tool_cache": self.router_refresh_tool_cache,
             "provider": judge.provider,
             "model": judge.model,
             "temperature": judge.temperature,
@@ -163,6 +167,7 @@ class PipelineSettings:
             "router_candidate_judge": self.router_candidate_judge,
             "router_judge_workers": self.router_judge_workers,
             "router_judge_batch": self.router_judge_batch,
+            "router_refresh_tool_cache": self.router_refresh_tool_cache,
             "thresholds": self.thresholds.to_dict(),
         }
 
@@ -249,7 +254,7 @@ def render() -> PipelineSettings:
     planning_model = chosen["Planning"]
     topology, tool_mode, tool_iterations, player_model = chosen["Players"]
     prose_tier, catalog_debug, catalog_model, catalog_limits = chosen["Catalog resolver"]
-    candidates, candidate_judge, workers, batch, judge_model, router_limits = chosen[
+    candidates, candidate_judge, workers, batch, refresh, judge_model, router_limits = chosen[
         "Field router"
     ]
     settings = PipelineSettings(
@@ -271,6 +276,7 @@ def render() -> PipelineSettings:
         router_candidate_judge=candidate_judge,
         router_judge_workers=workers,
         router_judge_batch=batch,
+        router_refresh_tool_cache=refresh,
         thresholds=Thresholds(**catalog_limits, **router_limits),
     )
     st.session_state[_SESSION_KEY] = settings
@@ -487,7 +493,7 @@ def _render_catalog(view: _View) -> tuple[str, bool, LLMSettings, dict[str, Any]
 
 def _render_router(
     view: _View,
-) -> tuple[int, bool, int, bool, LLMSettings, dict[str, Any]]:
+) -> tuple[int, bool, int, bool, bool, LLMSettings, dict[str, Any]]:
     """Layer 4: how many sources a field keeps, who judges them, and the judge's model."""
     _applies_to("the **Field router** module's starting values.")
     st.caption(
@@ -541,12 +547,25 @@ def _render_router(
                 ),
                 **view.bind("routing", "judge_batch", True),
             )
+        refresh = st.checkbox(
+            "Ask the tool matcher again",
+            disabled=not candidate_judge,
+            help=(
+                "The tool matcher's answers depend only on the standard, the tools and "
+                "the model, so they are saved in .cache/tool_matcher and reused. Turn "
+                "this on to ignore them and save the new answers in their place."
+            ),
+            **view.bind("routing", "refresh_tool_cache", False),
+        )
     model = _render_model(
         view, "CANDIDATE_JUDGE", disabled=not candidate_judge,
         off_note="Used only with the LLM candidate judge on.",
     )
     limits = _render_thresholds(view, threshold_registry.ROUTER, threshold_registry.COMPILER)
-    return int(candidates), bool(candidate_judge), int(workers), bool(batch), model, limits
+    return (
+        int(candidates), bool(candidate_judge), int(workers), bool(batch), bool(refresh),
+        model, limits,
+    )
 
 
 #: The modules the panel gives a tab, in tab order, with what renders each.

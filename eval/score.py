@@ -97,12 +97,18 @@ def report(
     # file? Only meaningful where the sheet labels the evidence, and it is the number
     # that separates a correct answer from one that named the same document by luck.
     span_scored = [s for s in scored if s.routed and (evidence or {}).get(s.field)]
-    span_correct = sum(1 for s in span_scored if cites(s.quote, evidence[s.field]))
+    span_correct = sum(
+        1 for s in span_scored if any(cites(quote, evidence[s.field]) for quote in s.quotes)
+    )
     if span_scored:
         console.print(
             f"  cited correctly [bold]{span_correct}/{len(span_scored)}[/] of the "
-            "span-labeled fields — right passage, not just the right document"
+            "span-labeled fields — a quote holds the labeled evidence, not just the "
+            "right document"
         )
+    several = [s for s in scored if s.routed and len(s.quotes) > 1]
+    if several:
+        console.print(f"  {len(several)} answered field(s) cited more than one quote")
     ungrounded = [s for s in scored if s.routed and s.grounded is False]
     if ungrounded:
         console.print(
@@ -135,7 +141,7 @@ def report(
                 ALTERNATIVE_SEP.join(s.truth) or UNANSWERABLE,
                 # The quote is what makes a document answer inspectable: two routings
                 # naming the same file are told apart only by what they cited.
-                (s.quote[:80] + "…" if len(s.quote) > 80 else s.quote) or "—",
+                _first(s.quotes),
                 *(f"{s.signals[n]:.2f}" for n in signals),
             )
         console.print(table)
@@ -147,3 +153,11 @@ def report(
         "accuracy": correct / len(scored),
         "span_precision": span_correct / len(span_scored) if span_scored else 0.0,
     }
+
+
+def _first(quotes) -> str:
+    """The leading quote, shortened for a table cell; how many more there are."""
+    if not quotes:
+        return "—"
+    head = quotes[0][:80] + ("…" if len(quotes[0]) > 80 else "")
+    return head + (f" (+{len(quotes) - 1} more)" if len(quotes) > 1 else "")

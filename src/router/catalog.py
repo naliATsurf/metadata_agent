@@ -74,16 +74,20 @@ gating), so adding one cannot overturn a resolution a codebook already made — 
 only fill gaps. Wrap it in :class:`CachedProseReader` and a passage is read once
 across the whole bundle.
 
-**Document length changes the pipeline shape**, at ``catalog_whole_doc_max_chars``, and the
-decision is made **per file** — a bundle is routinely a short README beside a long
-manuscript, and they take different paths in the same run:
+**Document length changes the pipeline shape.** Each file is split into contiguous
+passages of up to ``catalog_passage_max_chars``, and the decision is made **per file** —
+a bundle is routinely a short README beside a long manuscript, and they take different
+paths in the same run:
 
-- **short enough** — the whole-doc path (:func:`_whole_doc_reads`): no retrieval at
-  all. The file goes to the reader entire, with every residual column in one call.
-  One call per file, and a column whose name never appears verbatim is still read.
-- **too long** — the localized path (:func:`_localized_reads`): BM25 retrieval first
+- **at most** ``catalog_read_all_max_passages`` **passages** — the read-all path
+  (:func:`_read_all`): no retrieval at all. Every passage goes to the reader with every
+  residual column; a README is one passage, so one call. A column whose name never
+  appears verbatim is still read.
+- **more** — the localized path (:func:`_localized_reads`): BM25 retrieval first
   places each column in the top ``catalog_prose_read_k`` chunks, and only those spans are
   read, packed into passages of up to ``catalog_passage_max_chars``. One call per passage.
+
+The field router's passage reader follows the same rule (``router_read_all_max_passages``).
 
 The localized path degrades the reader *silently*, for a reason worth stating
 plainly: **localization is lexical, and the whole reason to reach for a reader is
@@ -166,9 +170,9 @@ class ResolvedColumn:
     """One column after symbol linking: what it means, on what evidence, and what
     shape its values are.
 
-    The last of those resolves nothing — ``value_range`` and ``value_integral`` are
-    published for the layers above, which judge whether a column answers a *field*
-    rather than describe what the column is.
+    The last of those resolves nothing — ``value_range``, ``value_integral`` and the
+    distinct values are published for the layers above, which judge whether a column
+    answers a *field* rather than describe what the column is.
     """
 
     resource: str
@@ -184,6 +188,8 @@ class ResolvedColumn:
     value_label: Optional[str] = None      # coarse prior: coordinate | temporal | numeric | categorical
     value_range: Optional[Tuple[float, float]] = None   # (min, max) for a numeric column
     value_integral: Optional[bool] = None  # numeric column whose values are all whole
+    distinct_count: Optional[int] = None   # different values in the profiled rows
+    distinct_values: Optional[List[str]] = None  # those values, when there are few
     conflicts: List[str] = field(default_factory=list)
     corroborated_by: List[str] = field(default_factory=list)  # citations of agreeing sources
     alternatives: List[Dict[str, Any]] = field(default_factory=list)  # candidates that lost
@@ -207,6 +213,8 @@ class ResolvedColumn:
             "value_label": self.value_label,
             "value_range": list(self.value_range) if self.value_range else None,
             "value_integral": self.value_integral,
+            "distinct_count": self.distinct_count,
+            "distinct_values": self.distinct_values,
             "conflicts": self.conflicts,
             "corroborated_by": self.corroborated_by,
             "alternatives": self.alternatives,
@@ -893,6 +901,28 @@ def _read_candidate(
 _PASSAGE_SEPARATOR = "\n\n"
 
 
+def pack_contiguous(chunks: Sequence[TextChunk], limit: int) -> List[List[TextChunk]]:
+    """Group *consecutive* chunks into runs whose text fits ``limit`` characters.
+
+    Consecutive, so the document text from a run's first chunk to the end of its last is
+    the passage exactly, and a quote located inside it keeps a true document offset. A
+    chunk over the limit is a run on its own: a chunk is never split, since it is what
+    offsets point into.
+    """
+    runs: List[List[TextChunk]] = []
+    current: List[TextChunk] = []
+    size = 0
+    for chunk in chunks:
+        if current and size + len(chunk.text) > limit:
+            runs.append(current)
+            current, size = [], 0
+        current.append(chunk)
+        size += len(chunk.text)
+    if current:
+        runs.append(current)
+    return runs
+
+
 def _pack_passages(indices: List[int], chunks: List[TextChunk]) -> List[List[int]]:
     """Group chunk ``indices``, in order, into runs whose joined text fits the budget.
 
@@ -1014,6 +1044,7 @@ def _value_profile(series: pd.Series) -> Dict[str, Any]:
     """
     profile: Dict[str, Any] = {
         "numeric": False, "min": None, "max": None, "integral": None, "label": None,
+        **_distinct(series),
     }
     if detect_temporal_dtype(series):
         profile["label"] = "temporal"
@@ -1040,10 +1071,28 @@ def _value_profile(series: pd.Series) -> Dict[str, Any]:
         )
         profile["label"] = "coordinate" if coord else "numeric"
         return profile
-    nunique = series.dropna().nunique()
+    nunique = profile["distinct_count"]
     if 0 < nunique <= max(20, len(series) // 10):
         profile["label"] = "categorical"
     return profile
+
+
+def _distinct(series: pd.Series) -> Dict[str, Any]:
+    """How many different values a column holds, and which, when they are few.
+
+    What tells a column that *is* a field's value — one value repeated down every row —
+    from one that varies, and so needs summarising before it can fill a single-valued
+    field. Counted over the profiled rows, so a count is a lower bound on a longer table.
+    """
+    values = series.dropna()
+    try:
+        unique = sorted(values.unique())
+    except TypeError:                      # mixed types do not order; keep first-seen order
+        unique = list(values.unique())
+    shown = None
+    if len(unique) <= thresholds.current().catalog_distinct_values_max:
+        shown = [f"{v:g}" if isinstance(v, float) else str(v) for v in unique]
+    return {"distinct_count": len(unique), "distinct_values": shown}
 
 
 # The *only* value profiles that identify a routing-useful kind on their own,
@@ -1149,9 +1198,9 @@ def _gather_table(
 
 
 # A README/codebook is small enough to hand to a reader whole; past
-# `catalog_whole_doc_max_chars` (src/thresholds.py) a document is a manuscript and must
-# be *localized* before reading (see _read_residuals). Its default sits well above a
-# long README so the common natural-language case skips retrieval.
+# A document is read passage by passage while it makes at most
+# `catalog_read_all_max_passages` (src/thresholds.py) passages; past that it is a
+# manuscript and is *localized* before reading (see _read_residuals).
 
 
 @dataclass(frozen=True)
@@ -1173,45 +1222,54 @@ class _DocResource:
     def chunks(self) -> List[TextChunk]:
         return list(self.doc.iter_chunks(self.resource))
 
+    def passages(self) -> List[Tuple[int, str]]:
+        """The file as contiguous passages of up to ``catalog_passage_max_chars``: (offset, text)."""
+        text = self.text()
+        runs = pack_contiguous(self.chunks(), thresholds.current().catalog_passage_max_chars)
+        return [
+            (run[0].start_offset, text[run[0].start_offset : run[-1].start_offset + len(run[-1].text)])
+            for run in runs
+        ]
+
 
 def _doc_resources(docs: List[TextContext]) -> List[_DocResource]:
     return [_DocResource(doc, r) for doc in docs for r in doc.resources]
 
 
-def _split_by_length(
+def _split_by_passages(
     sources: List[_DocResource],
 ) -> Tuple[List[_DocResource], List[_DocResource]]:
-    """Partition into (short enough to read whole, long enough to need localizing)."""
-    short, long = [], []
+    """Partition into (few enough passages to read them all, too many: localize first)."""
+    limit = thresholds.current().catalog_read_all_max_passages
+    read_all, localize = [], []
     for source in sources:
-        limit = thresholds.current().catalog_whole_doc_max_chars
-        (short if len(source.text()) <= limit else long).append(source)
-    return short, long
+        (read_all if len(source.passages()) <= limit else localize).append(source)
+    return read_all, localize
 
 
-def _whole_doc_reads(
+def _read_all(
     residual: List[Tuple[str, str]], sources: List[_DocResource], reader: ProseReader
 ) -> Dict[str, List["_Candidate"]]:
-    """Short-doc path: **skip retrieval**, hand one whole file plus *all* residual
-    columns to the reader, one call per file.
+    """Read-all path: **skip retrieval**, read every passage of each file for *all*
+    residual columns, one call per passage.
 
     Retrieval by column token fails on narrative that never uses the literal name
-    ("oxygen debt" for ``EPOC``, "the fish's mass" for ``mass``). For a file small
-    enough to pass whole this is unnecessary and harmful: give the reader the full
-    text and the full column list at once, and a column is read even if its name
-    never appears verbatim.
+    ("oxygen debt" for ``EPOC``, "the fish's mass" for ``mass``). For a file with few
+    enough passages this is unnecessary and harmful: give the reader all of the text
+    and the full column list, and a column is read even if its name never appears
+    verbatim. A README fits one passage, so it costs one call.
 
-    ``sources`` are the files that individually fit (:func:`_split_by_length`), so a
-    long neighbour in the same bundle does not drag them onto the localized path.
+    ``sources`` are the files that individually qualify (:func:`_split_by_passages`), so
+    a long neighbour in the same bundle does not drag them onto the localized path.
     """
     out: Dict[str, List[_Candidate]] = {}
     for source in sources:
-        text = source.text()
-        results = reader.read_many(columns=residual, chunk=text)
-        for name, result in results.items():
-            out.setdefault(name, []).append(
-                _read_candidate(result, name, source.resource, 0, text)
-            )
+        for start, text in source.passages():
+            results = reader.read_many(columns=residual, chunk=text)
+            for name, result in results.items():
+                out.setdefault(name, []).append(
+                    _read_candidate(result, name, source.resource, start, text)
+                )
     return out
 
 
@@ -1249,11 +1307,11 @@ def _read_residuals(
     name — a prose read depends on the name and the docs, not the table) into a single
     pass, so a document is read once for the whole bundle.
 
-    The read path is chosen **per file**, not per bundle: each file short enough is read
-    **whole** (:func:`_whole_doc_reads`, no retrieval, so a column whose name never
-    appears verbatim is still read), and only the files that are genuinely long are
-    **localized** (:func:`_localized_reads`). Both sets contribute, so a README sitting
-    beside a manuscript keeps the high-recall path it qualifies for. The reads become
+    The read path is chosen **per file**, not per bundle: each file with few enough
+    passages is read **in full** (:func:`_read_all`, no retrieval, so a column whose name
+    never appears verbatim is still read), and only the files that are genuinely long
+    are **localized** (:func:`_localized_reads`). Both sets contribute, so a README
+    sitting beside a manuscript keeps the high-recall path it qualifies for. The reads become
     the column's only candidates (it had none, by definition), its value profile still
     refereeing them when the column is decided.
     """
@@ -1271,14 +1329,14 @@ def _read_residuals(
                 residual.append((_match_key(col.name), col.dtype))
     if not residual:
         return
-    short, long = _split_by_length(_doc_resources(docs))
-    # Whole-doc reads first: same tier as localized ones, and source order breaks a
-    # remaining tie in _decide, so the higher-recall path is preferred on equal terms.
-    # Keyed on the normalized name, so a read reaches every spelling.
+    read_all, localize = _split_by_passages(_doc_resources(docs))
+    # Full reads first: same tier as localized ones, and source order breaks a remaining
+    # tie in _decide, so the higher-recall path is preferred on equal terms. Keyed on
+    # the normalized name, so a read reaches every spelling.
     by_key: Dict[str, List[_Candidate]] = {}
     for name, candidates in (
-        *_whole_doc_reads(residual, short, reader).items(),
-        *_localized_reads(residual, long, reader).items(),
+        *_read_all(residual, read_all, reader).items(),
+        *_localized_reads(residual, localize, reader).items(),
     ):
         by_key.setdefault(_read_key(name), []).extend(candidates)
     for t in tables:
@@ -1637,6 +1695,14 @@ def _value_integral(profile: Dict[str, Any]) -> Optional[bool]:
     return profile.get("integral") if profile.get("numeric") else None
 
 
+def _distinct_fields(profile: Dict[str, Any]) -> Dict[str, Any]:
+    """The profile's distinct count and values, as :class:`ResolvedColumn` fields."""
+    return {
+        "distinct_count": profile.get("distinct_count"),
+        "distinct_values": profile.get("distinct_values"),
+    }
+
+
 def _same_text(a: Optional[str], b: Optional[str]) -> bool:
     """Whether two quotes are the same text, spacing and case aside."""
     return bool(a and b) and " ".join(a.split()).lower() == " ".join(b.split()).lower()
@@ -1652,6 +1718,7 @@ def _decide(resource: str, column: _ColumnEvidence) -> ResolvedColumn:
         return ResolvedColumn(
             resource=resource, name=name, dtype=dtype, value_label=label,
             value_range=_value_range(profile), value_integral=_value_integral(profile),
+            **_distinct_fields(profile),
         )
 
     top_rank = max(_TIER_RANK[c.method] for c in candidates)
@@ -1726,5 +1793,6 @@ def _decide(resource: str, column: _ColumnEvidence) -> ResolvedColumn:
         link_method=chosen.method, link_confidence=confidence,
         link_evidence=chosen.evidence, link_quote=chosen.quote, value_label=label,
         value_range=_value_range(profile), value_integral=_value_integral(profile),
+        **_distinct_fields(profile),
         conflicts=conflicts, corroborated_by=corroborated_by, alternatives=alternatives,
     )

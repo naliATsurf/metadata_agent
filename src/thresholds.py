@@ -57,6 +57,12 @@ class Thresholds:
         "enough for a prior and for cross-checking a claim, and sampling keeps the cost "
         "following the schema rather than the row count.", 1,
     )
+    catalog_distinct_values_max: int = _threshold(
+        5, CATALOG, "Distinct values listed",
+        "A column with at most this many distinct values (in the profiled rows) lists "
+        "them, so a column holding one repeated value shows that value to the column "
+        "matcher. Every column records its distinct count either way.",
+    )
     catalog_dictionary_key_precision: float = _threshold(
         0.5, CATALOG, "Codebook key precision",
         "Share of a column's values that must be the table's column names for the column "
@@ -78,10 +84,14 @@ class Thresholds:
         "A definition longer than this is a paragraph that happened to follow a "
         "separator, not a glossary entry.", 1,
     )
-    catalog_whole_doc_max_chars: int = _threshold(
-        20_000, CATALOG, "Read a document whole up to (chars)",
-        "Documents up to this size go to the prose reader whole; longer ones are "
-        "localized with retrieval first.", 1,
+    catalog_read_all_max_passages: int = _threshold(
+        1, CATALOG, "Read every passage up to (passages)",
+        "Each document is split into passages of up to the passage size. A document with "
+        "at most this many is read passage by passage for every unexplained column. A "
+        "longer one is narrowed with BM25 first — cheaper, but a passage that describes "
+        "a column without using its name is then never read for it. The default, 1, reads "
+        "a document whole only if it fits one passage: reading long passages for every "
+        "column made the reader fill in columns a passage never describes.", 0,
     )
     catalog_prose_read_k: int = _threshold(
         3, CATALOG, "Chunks retrieved per column",
@@ -90,8 +100,8 @@ class Thresholds:
     )
     catalog_passage_max_chars: int = _threshold(
         20_000, CATALOG, "Passage size (chars)",
-        "Retrieved chunks are packed into passages up to this size, one reader call "
-        "each.", 1,
+        "Documents are split into passages up to this size — and, when narrowed with "
+        "BM25, the retrieved chunks packed into them — one reader call each.", 1,
     )
     catalog_grounding_support: float = _threshold(
         0.5, CATALOG, "Quote support for high confidence",
