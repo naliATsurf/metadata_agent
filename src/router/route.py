@@ -21,20 +21,31 @@ schema whose true answerable rate was 24% — schema and data are written by
 different people, so lexical overlap is coincidence in both directions. Above the
 ranking, therefore:
 
-- :mod:`src.router.veto` (4a, deterministic) drops candidates that *cannot* answer
-  the field on declared type or units — a name field against an integer column, a
-  whole-number field against fractional values. Permanent, so deliberately narrow.
-- :mod:`src.router.judge` (4b, optional, a model) adjudicates what survives and
-  may reject all of it. Its most valuable answer is *none*.
+- :mod:`src.router.type_fit` (4a, deterministic) grades whether a candidate's type
+  and units fit the field — a name field against an integer column, a whole-number
+  field against fractional values. A mismatch caps the routing's assurance at
+  ``low``; it never removes a candidate, so a blunt rule cannot hide a right answer.
+- the judges (4b, optional, a model) decide what answers each field, or that nothing
+  does:
+  a :mod:`column matcher <src.router.column_matcher>` for the structured tier and a
+  :mod:`passage reader <src.router.passage_reader>` for the documents. Their most
+  valuable answer is *none*.
 
 With a judge, ``candidates[0]`` is the judge's pick rather than BM25's, so the
 bucket and (downstream) the task's resources follow a judgement instead of corpus
 iteration order. The ordering is the whole seam; no consumer changes.
 
 Routing runs as **two passes, not field by field**: the structured tier for every
-field, adjudicated in one batch, then the document tier for whatever tier 1 could
-not answer, adjudicated in a second. A judge is a network call, and a schema is
-dozens of fields, so the batch boundary is what keeps a routing pass affordable.
+field, then the document tier for whatever the first could not answer. With judges,
+the first pass matches every field against the whole catalog, and the second reads
+each retrieved passage once for all the fields that retrieved it. A judge is a
+network call and a schema is dozens of fields, so these shapes — one catalog, many
+fields; one passage, many fields — are what keep a routing pass affordable.
+
+**BM25 still runs with judges on**, for two reasons: without a judge its rank 1 *is*
+the routing, and with one its ranking is the record of what retrieval proposed —
+what the evaluation's recall@k measures, and what a routing's rejected candidates
+show.
 
 The output is a :class:`FieldPlan` — the persisted routing artifact and the
 source of truth the M4 compiler turns into executable `Task`s. Coverage falls
@@ -62,8 +73,17 @@ from src.context.base_context import (
     tokenize,
 )
 from src.router.catalog import Catalog, locate_quote
-from src.router.judge import CandidateJudge, Verdict, describe, promote, weaker
-from src.router.veto import apply_veto
+from src.router.column_matcher import (
+    ColumnGroup,
+    ColumnMatcher,
+    column_ref,
+    group_card,
+    merge_columns,
+    tool_card,
+)
+from src.router.judge import TOOL_PREFIX, Verdict, candidate_ref, rank_of, weaker
+from src.router.passage_reader import PassageReader, passage_card
+from src.router.type_fit import mismatch, mismatches
 from src.router.schema import FieldSpec, walk_schema
 
 
@@ -77,13 +97,13 @@ class FieldRouting:
     candidates: List[EvidenceRef] = field(default_factory=list)
     assurance: str = "none"                 # high | medium | low | none
     status: str = "routed"                  # routed | unanswered
-    # Populated when a candidate judge adjudicated the candidate set (layer 4b):
+    # Populated when a judge decided the field (layer 4b):
     judge_choice: Optional[str] = None     # the ref it picked, None when it abstained
     judge_note: Optional[str] = None       # why it picked that one, or why none
     judge_quote: Optional[str] = None      # the sentence it cited from that candidate
     judge_grounded: Optional[bool] = None  # could its quote be found in the material?
     citation: Optional[str] = None         # resource#start-end of the cited sentence
-    vetoed: List[str] = field(default_factory=list)   # candidates ruled out, and why
+    mismatches: List[str] = field(default_factory=list)  # candidates whose type/units do not fit
     # Populated by the M4 compiler, not the router:
     extractor_role: Optional[str] = None
     topology: Optional[str] = None
@@ -100,7 +120,7 @@ class FieldRouting:
             "judge_quote": self.judge_quote,
             "judge_grounded": self.judge_grounded,
             "citation": self.citation,
-            "vetoed": self.vetoed,
+            "mismatches": self.mismatches,
             "candidates": [c.to_dict() for c in self.candidates],
             "extractor_role": self.extractor_role,
             "topology": self.topology,
@@ -177,7 +197,7 @@ def _document_corpus(
     """Every document as candidates — packed into passages, or chunk by chunk.
 
     **The router only widens what it offers when something can narrow it again.**
-    ``packed`` is therefore the judge's presence. With a judge, whole passages go out
+    ``packed`` is therefore the passage reader's presence. With a judge, whole passages go out
     and come back narrowed to the cited sentence (:func:`_cite`) — broad retrieval,
     precise result. Without one, rank 1 *is* the answer, so a passage-wide candidate
     would hand the compiler a whole section where it used to get the right paragraph,
@@ -373,89 +393,55 @@ def _structured_candidates(
     return ranked[:k]
 
 
-def _adjudicate(
-    judge: Optional[CandidateJudge],
-    items: List[Tuple[FieldSpec, List[EvidenceRef]]],
-    catalog: Optional[Catalog],
-    passage,
-) -> Dict[str, Verdict]:
-    """Put one whole tier's candidate sets to the judge, in a single pass.
-
-    Batched rather than field-by-field because a judge is a network call and a
-    routing pass is dozens of them: handing the judge the whole tier lets it group
-    fields offered identical candidates and issue the calls concurrently. Fields the
-    retrieval left empty are not asked about at all.
-    """
-    if judge is None:
-        return {}
-    requests = [
-        (spec, [describe(c, catalog, passage(c)) for c in candidates])
-        for spec, candidates in items
-        if candidates
-    ]
-    return judge.choose_many(requests=requests) if requests else {}
-
-
-def _settle(
+def _routing(
     spec: FieldSpec,
     candidates: List[EvidenceRef],
-    verdict: Optional[Verdict],
     catalog: Optional[Catalog],
-    judge: Optional[CandidateJudge],
-    vetoed: List[str],
-    passage=None,
-) -> Optional[FieldRouting]:
-    """Build the routing for one tier's candidates, or None if it cannot answer.
+    decision: Optional[Verdict] = None,
+    citation: Optional[str] = None,
+) -> FieldRouting:
+    """A routed field, read off ``candidates[0]``; ``decision`` when a judge made it.
 
-    Without a judge this is the historical behaviour: rank 1 wins, and the bucket,
-    the assurance, and (downstream) the task's resources are all read off it. With
-    one, rank 1 is the judge's pick rather than BM25's, so those same commitments
-    follow a judgement — the ordering is the seam, which is why no consumer changes.
+    Two hops when judged: the judge's confidence in the *match*, and the catalog's in
+    the column's *meaning*. The routing is only as strong as the weaker. A winner whose
+    type or units do not fit the field (layer 4a) caps it at ``low`` on top: it may
+    still be right, so it stays, but it is a routing to check rather than trust.
     """
-    if not candidates:
-        return None
-
-    decision = Verdict(choice=None)
-    if judge is not None:
-        decision = verdict or Verdict(
-            choice=None, because="the judge returned no verdict for this field"
-        )
-        if decision.abstained:
-            return None
-        candidates = promote(candidates, decision, passage)
-
     top = candidates[0]
-    citation = None
-    if judge is not None and decision.quote and top.kind == "quoted_span":
-        top, citation = _cite(top, decision.quote, passage)
-        candidates = [top] + candidates[1:]
     bucket = _bucket_of(top)
     assurance = _assurance(bucket, top, catalog)
-    if judge is not None:
-        # Two hops again: the judge's confidence in the *match*, and the catalog's
-        # in the column's *meaning*. The routing is only as strong as the weaker.
+    if decision is not None:
         assurance = weaker(decision.confidence, assurance)
+    if _misfits(spec, top, catalog):
+        assurance = weaker(assurance, "low")
     return FieldRouting(
         field_path=spec.path, query=spec.description or spec.path, bucket=bucket,
         candidates=candidates, assurance=assurance,
-        judge_choice=decision.choice,
-        judge_note=decision.because or None,
-        # The quote is the sentence the judge cited, verified present in the candidate
-        # it chose. For a document field it is the nearest thing to the answer the
-        # router ever holds, and re-deriving it downstream means re-reading the whole
-        # document — so it travels on the routing rather than being recomputed.
-        judge_quote=decision.quote or None,
-        judge_grounded=decision.grounded if judge is not None else None,
+        judge_choice=decision.choice if decision else None,
+        judge_note=(decision.because or None) if decision else None,
+        # The quote is the sentence the reader cited, verified present in the passage.
+        # For a document field it is the nearest thing to the answer the router holds,
+        # so it travels on the routing rather than being re-derived downstream.
+        judge_quote=(decision.quote or None) if decision else None,
+        judge_grounded=decision.grounded if decision else None,
         citation=citation,
-        vetoed=vetoed,
+        mismatches=mismatches(spec, candidates, catalog),
     )
+
+
+def _misfits(spec: FieldSpec, top: EvidenceRef, catalog: Optional[Catalog]) -> bool:
+    """Does the winning column's type or units not fit the field?"""
+    if top.kind != "computed_column" or catalog is None:
+        return False
+    column = catalog.find(top.locator, top.resource)
+    return column is not None and mismatch(spec, column) is not None
 
 
 def _unanswered(
     spec: FieldSpec,
     rejected: List[EvidenceRef],
-    judge: Optional[CandidateJudge],
-    vetoed: List[str],
+    judged: bool,
+    catalog: Optional[Catalog],
 ) -> FieldRouting:
     """A field no tier could answer — coverage, computed before extraction runs."""
     return FieldRouting(
@@ -463,13 +449,170 @@ def _unanswered(
         bucket="unanswered",
         # With a judge the rejected set is the record of what was considered and
         # refused; without one an empty list keeps the historical shape.
-        candidates=rejected if judge is not None else [],
+        candidates=rejected if judged else [],
         assurance="none", status="unanswered",
         judge_note="judge found no candidate that answers this field"
-        if judge is not None and rejected
+        if judged and rejected
         else None,
-        vetoed=vetoed,
+        mismatches=mismatches(spec, rejected, catalog),
     )
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 with a judge: match every field against the whole catalog
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _Matching:
+    """What the column matcher decided, and what it needs to fan a match back out."""
+
+    verdicts: Dict[str, Verdict]
+    groups: Dict[str, ColumnGroup]            # group ref -> its columns
+    tools: Dict[str, str]                     # tool name -> description
+
+
+def _match(
+    matcher: ColumnMatcher,
+    specs: List[FieldSpec],
+    catalog: Optional[Catalog],
+) -> _Matching:
+    """Match every field against the whole catalog — one catalog, shown to all of them.
+
+    Nothing is withheld on type or units. Each card carries its column's dtype, units
+    and value range, so a mismatch is in front of the model when it decides; the
+    router grades the pick afterwards (:func:`_routing`). Showing every field the same
+    catalog is also what lets them share calls: the matcher splits only by size.
+    """
+    groups = merge_columns(catalog.columns) if catalog is not None else []
+    tools = _answer_tools()
+    cards = [tool_card(tool) for tool in tools] + [group_card(g) for g in groups]
+    return _Matching(
+        verdicts=matcher.match_many(requests=[(specs, cards)]),
+        groups={group.ref: group for group in groups},
+        tools={tool.name: tool.description or tool.name for tool in tools},
+    )
+
+
+def _settle_match(
+    spec: FieldSpec,
+    matching: _Matching,
+    ranked: List[EvidenceRef],
+    catalog: Optional[Catalog],
+) -> Optional[FieldRouting]:
+    """The matched column(s) or tool lead; BM25's ranking follows as the record.
+
+    A matched group fans back out to every member, so a field answered by
+    the same column in six tables routes to all six — ``candidates[0]`` is the first,
+    and the compiler's bindings carry the rest.
+    """
+    decision = matching.verdicts.get(spec.path) or Verdict(
+        choice=None, because="the column matcher returned no verdict for this field"
+    )
+    if decision.abstained:
+        return None
+
+    scores = {candidate_ref(c): c.score for c in ranked}
+    choice = decision.choice
+    if choice.startswith(TOOL_PREFIX):
+        name = choice[len(TOOL_PREFIX):]
+        chosen = [EvidenceRef(
+            resource="", locator=name, kind="tool",
+            snippet=matching.tools.get(name, name), score=scores.get(choice, 0.0),
+        )]
+    else:
+        group = matching.groups.get(choice)
+        members = group.members if group else ()
+        chosen = [
+            EvidenceRef(
+                resource=c.resource, locator=c.name, kind="computed_column",
+                snippet=f"{c.name}: {c.description or c.value_label or c.dtype}",
+                score=scores.get(column_ref(c), 0.0),
+            )
+            for c in members
+        ]
+    if not chosen:
+        return None
+
+    taken = {candidate_ref(c) for c in chosen}
+    candidates = chosen + [c for c in ranked if candidate_ref(c) not in taken]
+    return _routing(spec, candidates, catalog, decision)
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 with a judge: read each retrieved passage once, for all its fields
+# ---------------------------------------------------------------------------
+
+
+def _span_key(candidate: EvidenceRef) -> Tuple[str, Any]:
+    locator = candidate.locator
+    return candidate.resource, tuple(locator) if isinstance(locator, list) else locator
+
+
+def _read(
+    reader: PassageReader,
+    pending: List[FieldSpec],
+    spans: Dict[str, List[EvidenceRef]],
+    passage,
+) -> Dict[str, Dict[Tuple[str, Any], Verdict]]:
+    """Read each retrieved passage once, for every field that retrieved it.
+
+    Retrieval is still per field — a field is read only against the passages it
+    ranked — but reading is per passage, so a passage six fields retrieved is one
+    call, not six. Returns, per field, the verdict each of its passages gave.
+    """
+    order: List[Tuple[str, Any]] = []
+    by_span: Dict[Tuple[str, Any], Tuple[EvidenceRef, List[FieldSpec]]] = {}
+    for spec in pending:
+        for candidate in spans[spec.path]:
+            key = _span_key(candidate)
+            if key not in by_span:
+                order.append(key)
+                by_span[key] = (candidate, [])
+            by_span[key][1].append(spec)
+
+    requests = [
+        (by_span[key][1], passage_card(by_span[key][0], passage(by_span[key][0]) or ""))
+        for key in order
+    ]
+    results = reader.read_many(requests=requests) if requests else []
+
+    readings: Dict[str, Dict[Tuple[str, Any], Verdict]] = {s.path: {} for s in pending}
+    for key, result in zip(order, results):
+        for spec in by_span[key][1]:
+            readings[spec.path][key] = result.get(spec.path) or Verdict(
+                choice=None, because="the passage reader returned no verdict"
+            )
+    return readings
+
+
+def _settle_read(
+    spec: FieldSpec,
+    ranked: List[EvidenceRef],
+    readings: Dict[Tuple[str, Any], Verdict],
+    catalog: Optional[Catalog],
+    passage,
+) -> Optional[FieldRouting]:
+    """The best passage that states the field leads, narrowed to the sentence it quoted.
+
+    Several passages can state one field — a README and a methods section both give
+    the title. A located quote beats an unlocated one, then confidence, then the
+    passage's own retrieval rank.
+    """
+    stated = [
+        (rank, candidate, verdict)
+        for rank, candidate in enumerate(ranked)
+        if (verdict := readings.get(_span_key(candidate))) and not verdict.abstained
+    ]
+    if not stated:
+        return None
+    _, best, decision = max(
+        stated,
+        key=lambda item: (item[2].grounded is True, rank_of(item[2].confidence), -item[0]),
+    )
+    top, citation = _cite(best, decision.quote, passage)
+    candidates = [top] + [c for c in ranked if c is not best]
+    return _routing(spec, candidates, catalog, decision, citation)
 
 
 def _bucket_of(top: EvidenceRef) -> str:
@@ -502,8 +645,8 @@ def route_fields(
     catalog: Optional[Catalog] = None,
     docs: Optional[List[Searchable]] = None,
     k: int = 3,
-    judge: Optional[CandidateJudge] = None,
-    veto: bool = True,
+    matcher: Optional[ColumnMatcher] = None,
+    reader: Optional[PassageReader] = None,
 ) -> FieldPlan:
     """Route every leaf field of ``schema`` to a source, producing a FieldPlan.
 
@@ -511,65 +654,60 @@ def route_fields(
     ``docs`` are the document sources for narrative fields. A field that neither
     can answer is left ``unanswered`` — coverage, computed before any extraction.
 
-    ``veto`` applies the deterministic type/unit filter (layer 4a) before anything
-    reads the candidates; ``judge`` is the optional candidate judge (layer 4b). Without
-    either, rank 1 wins on BM25 score alone, which over-answers badly when the schema
-    and the data were authored independently. See :mod:`src.router.veto` and
-    :mod:`src.router.judge`.
+    ``matcher`` and ``reader`` are the judges (layer 4b), one per tier. Without them
+    rank 1 wins on BM25 score alone, which over-answers badly when the schema and the
+    data were authored independently. Every routing is graded on type and unit fit
+    (layer 4a), which lowers its assurance but never removes a candidate. See
+    :mod:`src.router.type_fit`, :mod:`src.router.column_matcher` and
+    :mod:`src.router.passage_reader`.
     """
     docs = docs or []
     specs = list(walk_schema(schema))
     passage = _passage_reader(docs)
-    corpus = _document_corpus(docs, packed=judge is not None)
+    corpus = _document_corpus(docs, packed=reader is not None)
+    judged = matcher is not None or reader is not None
 
-    # Tier 1 — the structured corpus (tools + columns, one ranking), vetoed on type
-    # and units before anything reads it. A ranking cannot tell a genus name from a
-    # pH treatment level; a dtype can (layer 4a).
-    structured: Dict[str, List[EvidenceRef]] = {}
-    vetoes: Dict[str, List[str]] = {}
-    for spec in specs:
-        candidates = _structured_candidates(spec.description or spec.path, catalog, k)
-        reasons: List[str] = []
-        if veto and candidates:
-            candidates, reasons = apply_veto(spec, candidates, catalog)
-        structured[spec.path], vetoes[spec.path] = candidates, reasons
-
-    verdicts = _adjudicate(
-        judge, [(s, structured[s.path]) for s in specs], catalog, passage
-    )
+    # Tier 1 — the structured corpus (tools + columns, one ranking). Without a matcher
+    # the ranking decides; with one it is the record of what retrieval proposed, and
+    # the matcher decides over the whole catalog.
+    structured = {
+        spec.path: _structured_candidates(spec.description or spec.path, catalog, k)
+        for spec in specs
+    }
+    matching = _match(matcher, specs, catalog) if matcher is not None else None
 
     routings: Dict[str, FieldRouting] = {}
     pending: List[FieldSpec] = []
     for spec in specs:
-        settled = _settle(
-            spec, structured[spec.path], verdicts.get(spec.path),
-            catalog, judge, vetoes[spec.path], passage,
-        )
+        ranked = structured[spec.path]
+        if matching is not None:
+            settled = _settle_match(spec, matching, ranked, catalog)
+        else:
+            settled = _routing(spec, ranked, catalog) if ranked else None
         if settled is None:
             pending.append(spec)
         else:
             routings[spec.path] = settled
 
     # Tier 2 — the documents, for whatever tier 1 could not answer. A field reaches
-    # here either because nothing structured matched or because the judge rejected
+    # here either because nothing structured matched or because the matcher rejected
     # what did; both mean the same thing to the document tier — the answer, if any,
-    # is stated in prose — so a judge that dismissed a set of lexical coincidences
-    # still gets to judge the narrative sources.
+    # is stated in prose.
     spans = {
         spec.path: _search_docs(
-            corpus, spec.description or spec.path, k, offer_unscored=judge is not None
+            corpus, spec.description or spec.path, k, offer_unscored=reader is not None
         )
         for spec in pending
     }
-    span_verdicts = _adjudicate(
-        judge, [(s, spans[s.path]) for s in pending], catalog, passage
-    )
+    readings = _read(reader, pending, spans, passage) if reader is not None else None
     for spec in pending:
-        routings[spec.path] = _settle(
-            spec, spans[spec.path], span_verdicts.get(spec.path),
-            catalog, judge, vetoes[spec.path], passage,
-        ) or _unanswered(
-            spec, structured[spec.path] + spans[spec.path], judge, vetoes[spec.path]
+        ranked = spans[spec.path]
+        if readings is not None:
+            settled = _settle_read(spec, ranked, readings[spec.path], catalog, passage)
+        else:
+            settled = _routing(spec, ranked, catalog) if ranked else None
+        routings[spec.path] = settled or _unanswered(
+            spec, structured[spec.path] + ranked, judged, catalog
         )
 
     # Emit in schema order, which the two-tier pass does not preserve on its own.

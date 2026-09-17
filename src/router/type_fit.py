@@ -1,39 +1,37 @@
-"""Layer 4a — the deterministic veto: candidates that *cannot* answer a field.
+"""Layer 4a — type fit: does a candidate's type and unit fit the field? A grade, not a filter.
 
 Retrieval ranks by words, so its mistakes are word-shaped: "Fulton's condition
 factor" wins a field asking for *temperature* because both say "condition", and
-five taxonomy fields land on a ``pH`` treatment column because both say "level".
-Measured on a labeled bundle, rank 1 answers 88% of a schema whose true answerable
-rate is 24%.
+taxonomy fields land on a ``pH`` treatment column because both say "level". What
+words ignore, types and units see: a field wanting a genus name is not usually
+answered by a column of integers, and a field wanting whole days not by values
+running 0.89 to 1.22. Neither judgement needs a model.
 
-Vocabulary cannot fix that — schema and data were written by different people, so
-overlap is coincidence either way. What *can* is the evidence retrieval ignores:
-the field's declared type, and the column's dtype, units, and actual values. A field
-wanting a genus name is not answered by a column of integers; a field wanting whole
-days is not answered by values running 0.89 to 1.22. Neither judgement needs a model,
-and neither depends on what anything is *called*.
+**It lowers confidence; it never decides relevance.** This used to be a veto that
+removed candidates before the judge saw them, and that was too strong for rules this
+blunt. A type is a schema author's guess — ``str`` is what a schema reaches for when
+unsure, a count may be declared ``float``, a unit may be written in a way this table
+does not know — so a rule that is right most of the time still hides a correct column
+some of the time, and a hidden column can never be recovered. Worse, removal made the
+catalog differ per field, so fields could not share a column matcher's call.
 
-This runs **before** the candidate judge (:mod:`src.router.judge`), so the judge
-spends its calls on candidates that are at least dimensionally possible.
+So every candidate stays, and every judge sees the whole catalog with each column's
+dtype, units and value range on its card. A mismatch is recorded on the routing and
+caps its assurance at ``low``: a routing whose winner does not fit the field's type
+is one to check, not one to trust.
 
-**A veto is permanent, so it must be conservative.** A vetoed candidate never reaches
-the judge and can never be recovered, which makes a false veto a silent recall loss —
-strictly worse than a false accept, which the judge still gets a chance to reject.
-Every rule here therefore fires only on evidence both sides actually declared:
-unknown types, missing units, tools, and document spans are all left alone.
-
-The rules are narrower than they first look, and deliberately so. "A text field is
-not answered by a numeric column" seems obviously true and is not: schemas routinely
-declare a measured quantity as ``str`` to hold "12.5 °C" or a range, so that rule
-vetoes a correct water-temperature match. What survives is the narrower claim it was
-standing in for — a field asking for a *name* is not answered by a measurement — which
-needs the field to say it is nominal, not merely to be typed as text.
+The rules are narrow anyway, because a false mismatch still costs confidence on a
+correct answer. "A text field is not answered by a numeric column" seems obviously
+true and is not: schemas routinely declare a measured quantity as ``str`` to hold
+"12.5 °C" or a range. What survives is the narrower claim it was standing in for — a
+field asking for a *name* is not answered by a measurement — which needs the field to
+say it is nominal, not merely to be typed as text.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional
 
 from src.context.base_context import EvidenceRef
 from src.router.catalog import ResolvedColumn
@@ -44,7 +42,7 @@ from src.router.schema import FieldSpec
 _OPTIONAL = re.compile(r"^Optional\[(.*)\]$")
 _TEXT_TYPES = {"str", "string"}
 #: Words marking a field as *nominal* — it wants something's name, not a measurement
-#: of it. Kept to generic vocabulary: an entry here vetoes candidates in every
+#: of it. Kept to generic vocabulary: an entry here marks candidates down in every
 #: bundle, so a domain word ("stage", "taxon") does not belong in it even when it
 #: would help on one dataset.
 _NOMINAL_WORDS = (
@@ -74,7 +72,7 @@ def is_nominal(field: FieldSpec) -> bool:
     Read from the field's **path only**, never its type or its description. The type
     says little — ``str`` is what a schema reaches for when unsure. The description
     says too much: ``trait_type`` is described as "...for trait *name* to make
-    reference to..." and matching that incidental word vetoes a correct candidate.
+    reference to..." and matching that incidental word marks a correct candidate down.
     A path is the field's own compact statement of what it is, and ``genus_name``
     means it in a way a sentence mentioning "name" does not.
     """
@@ -96,7 +94,7 @@ def _column_is_text(column: ResolvedColumn) -> bool:
 
 #: Unit tokens grouped by the physical dimension they measure. Only used to spot a
 #: *mismatch* — two units in different groups cannot describe the same quantity. A
-#: unit absent from here is unknown, and unknown never vetoes.
+#: unit absent from here is unknown, and unknown is never a mismatch.
 _DIMENSIONS = {
     "time": {"s", "sec", "secs", "second", "seconds", "min", "mins", "minute",
              "minutes", "h", "hr", "hrs", "hour", "hours", "d", "day", "days",
@@ -115,7 +113,7 @@ _DIMENSIONS = {
 }
 
 #: Words in a *field description* that name the quantity it wants. Deliberately
-#: short: a wrong entry here vetoes a correct candidate for every bundle.
+#: short: a wrong entry here marks a correct candidate down in every bundle.
 _QUANTITY_WORDS = {
     "duration": "time", "period": "time", "elapsed": "time",
     "temperature": "temperature",
@@ -158,14 +156,14 @@ def _dimension_wanted(description: Optional[str]) -> Optional[str]:
     return None
 
 
-# --- the veto ---------------------------------------------------------------
+# --- the grade --------------------------------------------------------------
 
 
-def veto_reason(field: FieldSpec, column: ResolvedColumn) -> Optional[str]:
-    """Why ``column`` cannot answer ``field``, or None if it is at least possible.
+def mismatch(field: FieldSpec, column: ResolvedColumn) -> Optional[str]:
+    """Why ``column``'s type or units do not fit ``field``, or None if they may.
 
-    Returns a sentence rather than a boolean so a rejection can be recorded and
-    argued with, instead of a candidate silently vanishing from the set.
+    A sentence rather than a boolean, so a routing records the reason its confidence
+    was lowered and a reader can argue with it.
     """
     wanted = field_base_type(field.type)
 
@@ -192,27 +190,22 @@ def veto_reason(field: FieldSpec, column: ResolvedColumn) -> Optional[str]:
     return None
 
 
-def apply_veto(
+def mismatches(
     field: FieldSpec, candidates: List[EvidenceRef], catalog: Any
-) -> Tuple[List[EvidenceRef], List[str]]:
-    """Split candidates into those that survive and the reasons the rest were cut.
+) -> List[str]:
+    """The type and unit mismatches among ``candidates``, as ``ref — reason`` lines.
 
-    Tools and document spans always survive: neither declares a type or a unit, so
-    there is nothing here to judge them on. Only resolved columns are testable, and
-    only against what layer 3 actually established about them.
+    Tools and document spans are never graded: neither declares a type or a unit.
+    Only resolved columns are, and only on what layer 3 established about them.
     """
     if catalog is None:
-        return candidates, []
-    kept: List[EvidenceRef] = []
-    reasons: List[str] = []
+        return []
+    found: List[str] = []
     for candidate in candidates:
         if candidate.kind in ("tool", "quoted_span"):
-            kept.append(candidate)
             continue
         column = catalog.find(candidate.locator, candidate.resource)
-        reason = veto_reason(field, column) if column is not None else None
-        if reason is None:
-            kept.append(candidate)
-        else:
-            reasons.append(f"{candidate.resource}::{candidate.locator} — {reason}")
-    return kept, reasons
+        reason = mismatch(field, column) if column is not None else None
+        if reason is not None:
+            found.append(f"{candidate.resource}::{candidate.locator} — {reason}")
+    return found

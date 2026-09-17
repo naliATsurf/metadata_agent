@@ -24,7 +24,7 @@ from eval.sheet import write_sheet, write_sources
 from examples.field_router_plan import (
     DEFAULT_STANDARD,
     LLM_MODULE,
-    build_candidate_judge,
+    build_judges,
     build_plan,
 )
 from examples.resolve_catalog import DEFAULT_BUNDLE, resolve
@@ -60,10 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="sheet directory (default: eval/data/<standard>__<bundle>)")
 
     router = ap.add_argument_group("Router", "The configuration being graded.")
-    router.add_argument("--no-veto", action="store_true",
-                        help="disable the deterministic type/unit filter (layer 4a)")
     router.add_argument("--llm-candidate-judge", action="store_true",
-                        help="adjudicate each candidate set with the LLM candidate judge")
+                        help="decide each field with the LLM judges (column matcher, passage reader)")
 
     configured = llm_settings(LLM_MODULE)
     model = ap.add_argument_group("LLM candidate judge model", "Backing --llm-candidate-judge.")
@@ -74,15 +72,14 @@ def build_parser() -> argparse.ArgumentParser:
     model.add_argument("--judge-workers", type=int, default=1, metavar="N",
                        help="issue the judge's calls N at a time")
     model.add_argument("--no-judge-batch", action="store_true",
-                       help="judge every field separately instead of grouping fields "
-                            "offered identical candidates — the comparison worth "
-                            "running against a labeled sheet")
+                       help="ask about one field per call instead of many — the "
+                            "comparison worth running against a labeled sheet")
     return ap
 
 
 def run(args: argparse.Namespace, console: Console) -> Path:
     bundle = discover_bundle(args.bundle)
-    judge, label = build_candidate_judge(args)
+    matcher, reader, label = build_judges(args)
     resolved = resolve(
         bundle,
         select(bundle.codebooks, args.dictionary),
@@ -92,8 +89,8 @@ def run(args: argparse.Namespace, console: Console) -> Path:
         resolved,
         args.standard,
         candidates=args.candidates,
-        judge=judge,
-        veto=not args.no_veto,
+        matcher=matcher,
+        reader=reader,
     )
 
     out = args.out or (DATA / f"{args.standard}__{args.bundle.name}")
@@ -101,7 +98,7 @@ def run(args: argparse.Namespace, console: Console) -> Path:
 
     if args.command == "score":
         console.print(
-            f"[dim]veto: {'off' if args.no_veto else 'on'}   candidate judge: {label}[/]"
+            f"[dim]candidate judge: {label}[/]"
         )
         # The passage reader is what lets a document label be graded at the passage
         # rather than at the file; without it the sheet's `evidence` column is inert.

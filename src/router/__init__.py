@@ -8,18 +8,20 @@ contexts.
 
 The layers, in the order a field passes through them:
 
-=========================  ====================================================
-:mod:`~src.router.schema`  flatten the target schema to leaf fields
-:mod:`~src.router.catalog` resolve each column's meaning from the bundle (3)
-:mod:`~src.router.route`   rank sources per field, lexically (4)
-:mod:`~src.router.veto`    drop candidates that cannot answer, on type/units (4a)
-:mod:`~src.router.judge`  adjudicate what survives, or reject it all (4b)
-:mod:`~src.router.compile` lay the routing out as executable tasks (5)
-=========================  ====================================================
+=================================  ======================================================
+:mod:`~src.router.schema`          flatten the target schema to leaf fields
+:mod:`~src.router.catalog`         resolve each column's meaning from the bundle (3)
+:mod:`~src.router.route`           rank sources per field, lexically (4)
+:mod:`~src.router.type_fit`        grade whether type and units fit the field (4a)    
+:mod:`~src.router.column_matcher`  match fields to columns and tools (4b)
+:mod:`~src.router.passage_reader`  read passages for the fields they state (4b)
+:mod:`~src.router.compile`         lay the routing out as executable tasks (5)
+=================================  ======================================================
 
 Layers 4a and 4b exist because ranking alone over-answers: BM25's only reject rule
-is a non-empty score. 4a is deterministic and permanent, so it is narrow; 4b is a
-model and may be wrong, so its every answer is refereed by code.
+is a non-empty score. 4a is deterministic but blunt, so it only lowers confidence and
+never removes a candidate; 4b is a model and may be wrong, so its every answer is
+refereed by code.
 """
 
 from src.router.catalog import (
@@ -45,14 +47,16 @@ from src.router.display import (
     catalog_summary,
     render_catalog,
 )
-from src.router.judge import (
-    CandidateJudge,
-    LLMCandidateJudge,
-    Verdict,
-    candidate_ref,
+from src.router.column_matcher import (
+    ColumnGroup,
+    ColumnMatcher,
+    LLMColumnMatcher,
+    merge_columns,
 )
+from src.router.judge import Verdict, candidate_ref
+from src.router.passage_reader import LLMPassageReader, PassageReader
 from src.router.route import FieldPlan, FieldRouting, route_fields
-from src.router.veto import apply_veto, veto_reason
+from src.router.type_fit import mismatch, mismatches
 from src.router.schema import FieldSpec, walk_schema
 
 __all__ = [
@@ -66,9 +70,13 @@ __all__ = [
     "Catalog",
     "FieldPlan",
     "FieldRouting",
-    "CandidateJudge",
+    "ColumnGroup",
+    "ColumnMatcher",
     "FieldSpec",
-    "LLMCandidateJudge",
+    "LLMColumnMatcher",
+    "LLMPassageReader",
+    "PassageReader",
+    "merge_columns",
     "Claim",
     "ClaimComparer",
     "LLMClaimComparer",
@@ -77,7 +85,6 @@ __all__ = [
     "ReadResult",
     "ResolvedColumn",
     "Verdict",
-    "apply_veto",
     "candidate_ref",
     "catalog_conflicts",
     "catalog_overview",
@@ -88,6 +95,7 @@ __all__ = [
     "resolve_bundle",
     "resolve_catalog",
     "route_fields",
-    "veto_reason",
+    "mismatch",
+    "mismatches",
     "walk_schema",
 ]

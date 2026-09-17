@@ -110,7 +110,7 @@ class Scored:
     ranked: List[str]
     routed: bool
     signals: Dict[str, float]
-    abstained_by: Optional[str] = None   # "veto" | "judge" | None
+    abstained_by: Optional[str] = None   # "judge" | None
     quote: str = ""                      # the sentence the judge cited
     grounded: Optional[bool] = None      # was that quote found in the chosen material?
 
@@ -182,7 +182,7 @@ def score(
         routed = routing.status != "unanswered" and bool(ranked)
         by = None
         if not routed:
-            by = "judge" if routing.judge_note else ("veto" if routing.vetoed else None)
+            by = "judge" if routing.judge_note else None
         scored.append(
             Scored(
                 field=path,

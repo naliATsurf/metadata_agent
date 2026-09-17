@@ -11,7 +11,7 @@ from langchain_core.prompts import ChatPromptTemplate
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.llm_calls import count_llm_calls
-from src.router.judge import LLMCandidateJudge
+from src.router.column_matcher import LLMColumnMatcher
 from src.router.schema import FieldSpec
 
 
@@ -59,18 +59,18 @@ class CountLLMCallsTest(unittest.TestCase):
         self.assertEqual(counts, {"a": 3, "b": 5})
 
     def test_the_judge_thread_pool_is_counted(self):
-        judge = LLMCandidateJudge.from_chat_model(
-            _model('{"choice": null}'), batch=False, max_workers=4
+        model = _model('{"f0": {"choice": null}}')
+        matcher = LLMColumnMatcher(
+            lambda prompt: model.invoke(prompt).content, batch=False, max_workers=4
         )
-        cards = [{"ref": "table:t", "kind": "table"}]
-        requests = [
-            (FieldSpec(path=f"f{i}", description=f"field {i}", type="str", required=False), cards)
+        cards = [{"ref": "t::c", "kind": "column", "meaning": "a column"}]
+        fields = [
+            FieldSpec(path=f"f{i}", description=f"field {i}", type="str", required=False)
             for i in range(3)
         ]
         with count_llm_calls() as counter:
-            judge.choose_many(requests=requests)
+            matcher.match_many(requests=[(fields, cards)])
         self.assertEqual(counter.calls, 3)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -62,15 +62,14 @@ class ScoringTest(unittest.TestCase):
         [scored] = score(plan, {"f": ["t::a"]})
         self.assertIn("t::a", scored.ranked)
 
-    def test_abstention_is_attributed_to_the_veto_or_the_judge(self):
+    def test_abstention_is_attributed_to_the_judge_or_to_nothing_retrieved(self):
         plan = _plan(
-            byveto=self._routing("byveto", [], status="unanswered",
-                                 vetoed=["t::a — wrong type"]),
+            empty=self._routing("empty", [], status="unanswered"),
             byjudge=self._routing("byjudge", [_ref("t", "a")], status="unanswered",
                                    judge_note="none of these"),
         )
-        got = {s.field: s.abstained_by for s in score(plan, {"byveto": [], "byjudge": []})}
-        self.assertEqual(got, {"byveto": "veto", "byjudge": "judge"})
+        got = {s.field: s.abstained_by for s in score(plan, {"empty": [], "byjudge": []})}
+        self.assertEqual(got, {"empty": None, "byjudge": "judge"})
 
     def test_answering_an_unanswerable_field_counts_as_wrong(self):
         plan = _plan(f=self._routing("f", [_ref("t", "a")]))

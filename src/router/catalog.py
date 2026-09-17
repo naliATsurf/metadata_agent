@@ -51,7 +51,7 @@ Kelvin. That is the two-hop grounding (the *value* is computed; the
 
 The profile is also **published**, not merely consumed here. ``value_range`` and
 ``value_integral`` survive onto the resolved column because the layer above needs
-them to judge a *candidate*: the routing veto (:mod:`src.router.veto`) rejects a
+them to judge a *candidate*: the type-fit grade (:mod:`src.router.type_fit`) marks down a
 field wanting whole days from a column running 0.89-1.22, and the candidate judge
 (:mod:`src.router.judge`) puts the numbers in front of a model because "Fulton's
 condition factor" and "temperature" are indistinguishable by name and obvious by
@@ -1005,7 +1005,7 @@ def _value_profile(series: pd.Series) -> Dict[str, Any]:
 
     ``min`` / ``max`` / ``integral`` are not scratch: they survive onto the resolved
     column (:func:`_value_range`, :func:`_value_integral`), so what is measured here
-    bounds what the routing veto and the candidate judge are able to judge on.
+    bounds what the type-fit grade and the judges are able to judge on.
     """
     profile: Dict[str, Any] = {
         "numeric": False, "min": None, "max": None, "integral": None, "label": None,

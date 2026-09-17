@@ -8,6 +8,14 @@ records findings from an investigation that changed no code.
 ## 2026-09
 
 - -
+  **[2026-09-17 — Type and unit fit lowers confidence; it no longer removes candidates](2026-09-17_type-fit-grade.change.md)**
+  — the veto becomes a grade that caps assurance at `low`; every field sees one catalog,
+  so the column matcher takes 2 calls instead of 5, and splits are even.
+- -
+  **[2026-09-17 — The candidate judge splits into a column matcher and a passage reader](2026-09-17_column-matcher-passage-reader.change.md)**
+  — columns are matched against the whole catalog (same-meaning columns merged, split
+  under a budget); each passage is read once for all its fields. 22 judge calls → 13.
+- -
   **[2026-09-16 — The document tier offers whole passages, not its best three chunks](2026-09-16_document-passages.change.md)**
   — retrieval becomes an ordering rather than a filter, gated on a judge that can refuse;
   recall@5 5/12 → 12/12. Records why chunk enrichment was rejected and embeddings deferred.

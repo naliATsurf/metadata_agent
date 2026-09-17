@@ -73,8 +73,7 @@ class PipelineSettings:
         router_candidates: How many ranked candidates the router keeps per field.
         router_candidate_judge: Let a model adjudicate the candidates (layer 4b).
         router_judge_workers: How many of the judge's calls to issue at once.
-        router_judge_batch: Ask once about fields offered identical candidates,
-            rather than once per field.
+        router_judge_batch: Ask about many fields per call, rather than one.
     """
 
     models: Mapping[str, LLMSettings] = field(default_factory=dict)
@@ -485,11 +484,12 @@ def _render_router(view: _View) -> tuple[int, bool, int, bool, LLMSettings]:
             )
         with batch_column:
             batch = st.checkbox(
-                "Group identical candidate sets",
+                "Ask about many fields per call",
                 disabled=not candidate_judge,
                 help=(
-                    "Ask once about fields offered the same candidates. Turning it "
-                    "off judges every field independently, and costs a call each."
+                    "Match many fields against the catalog, and read a passage for many "
+                    "fields, in one call. Turning it off judges every field "
+                    "independently, and costs a call each."
                 ),
                 **view.bind("routing", "judge_batch", True),
             )

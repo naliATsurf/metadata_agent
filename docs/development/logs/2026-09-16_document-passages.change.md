@@ -43,11 +43,12 @@ offers when something downstream can narrow it again.**
 
 ### Grouping
 
-More fields now share an identical candidate list, so `choose_many` groups far more
-aggressively — often the whole document tier in one call. Cheap, but it is exactly the
-condition the judge's own docstring warns about: fields judged together stop being
-independent, and a model shown one passage and nine fields tends to distribute answers
-among them. **Not yet measured**; `--no-judge-batch` is the comparison to run.
+`choose_many` groups only fields whose candidate refs match *in order*. Measured on
+`TRADAT031` with batching on: routing `readme_long.txt` alone, the document tier takes
+**2 calls** and the column tier 11, for 30 fields. With all three readmes the document
+tier takes 11 calls, because BM25 orders the four passages differently per field.
+Grouped fields stop being independent — a model shown one passage and nine fields tends
+to distribute answers among them — so `--no-judge-batch` is still the comparison to run.
 
 ## Measured (`sharetrait_basic_no_trait__TRADAT031`, judge on)
 
