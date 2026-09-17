@@ -42,10 +42,11 @@ each retrieved passage once for all the fields that retrieved it. A judge is a
 network call and a schema is dozens of fields, so these shapes — one catalog, many
 fields; one passage, many fields — are what keep a routing pass affordable.
 
-**BM25 still runs with judges on**, for two reasons: without a judge its rank 1 *is*
-the routing, and with one its ranking is the record of what retrieval proposed —
-what the evaluation's recall@k measures, and what a routing's rejected candidates
-show.
+**With judges on, BM25 decides nothing it could get wrong.** The column matcher sees
+the whole catalog, and the passage reader reads every passage for every unanswered
+field; BM25 only chooses a field's passages when a bundle has too many to read
+(``router_read_all_max_passages``). Without judges it is the router: rank 1 is the
+answer.
 
 The output is a :class:`FieldPlan` — the persisted routing artifact and the
 source of truth the M4 compiler turns into executable `Task`s. Coverage falls
@@ -72,16 +73,16 @@ from src.context.base_context import (
     content_terms,
     tokenize,
 )
+from src import thresholds
 from src.router.catalog import Catalog, locate_quote
 from src.router.column_matcher import (
     ColumnGroup,
     ColumnMatcher,
-    column_ref,
     group_card,
     merge_columns,
     tool_card,
 )
-from src.router.judge import TOOL_PREFIX, Verdict, candidate_ref, rank_of, weaker
+from src.router.judge import TOOL_PREFIX, Verdict, rank_of, weaker
 from src.router.passage_reader import PassageReader, passage_card
 from src.router.type_fit import mismatch, mismatches
 from src.router.schema import FieldSpec, walk_schema
@@ -133,6 +134,13 @@ class FieldPlan:
 
     schema_name: str
     routings: Dict[str, FieldRouting]
+    #: The refs of every card the column matcher was shown — the same catalog for every
+    #: field, so recorded once here rather than as a candidate list on each routing.
+    #: Empty when no matcher ran.
+    catalog_shown: List[str] = field(default_factory=list)
+    #: Did a judge decide the routings? A consumer measuring *retrieval* needs to know:
+    #: with judges on, nothing was filtered out for retrieval to have missed.
+    judged: bool = False
 
     def unanswered(self) -> List[str]:
         """Fields with no candidate source — flagged before extraction runs."""
@@ -159,13 +167,10 @@ class FieldPlan:
         return {
             "schema_name": self.schema_name,
             "routings": {p: r.to_dict() for p, r in self.routings.items()},
+            "judged": self.judged,
+            "catalog_shown": self.catalog_shown,
             "coverage": self.coverage(),
         }
-
-
-#: How wide a document passage may be. The same budget layer 3 packs prose reads
-#: into, and the same size as a document it would otherwise take in one go.
-_PASSAGE_MAX_CHARS = 20_000
 
 
 def _pack(chunks: List[Any]) -> List[List[Any]]:
@@ -175,13 +180,15 @@ def _pack(chunks: List[Any]) -> List[List[Any]]:
     router candidate's locator is a span: keeping a passage contiguous is what makes
     ``text[start:end]`` the passage exactly, so a citation located inside it stays a
     true document offset. A chunk over the budget is a passage by itself — a chunk is
-    never split, since it is what offsets point into.
+    never split, since it is what offsets point into. The budget is
+    ``router_passage_max_chars`` (:mod:`src.thresholds`).
     """
+    limit = thresholds.current().router_passage_max_chars
     runs: List[List[Any]] = []
     current: List[Any] = []
     size = 0
     for chunk in chunks:
-        if current and size + len(chunk.text) > _PASSAGE_MAX_CHARS:
+        if current and size + len(chunk.text) > limit:
             runs.append(current)
             current, size = [], 0
         current.append(chunk)
@@ -470,6 +477,7 @@ class _Matching:
     verdicts: Dict[str, Verdict]
     groups: Dict[str, ColumnGroup]            # group ref -> its columns
     tools: Dict[str, str]                     # tool name -> description
+    shown: List[str]                          # every card ref the matcher saw
 
 
 def _match(
@@ -491,20 +499,21 @@ def _match(
         verdicts=matcher.match_many(requests=[(specs, cards)]),
         groups={group.ref: group for group in groups},
         tools={tool.name: tool.description or tool.name for tool in tools},
+        shown=[card["ref"] for card in cards],
     )
 
 
 def _settle_match(
     spec: FieldSpec,
     matching: _Matching,
-    ranked: List[EvidenceRef],
     catalog: Optional[Catalog],
 ) -> Optional[FieldRouting]:
-    """The matched column(s) or tool lead; BM25's ranking follows as the record.
+    """The matched column(s) or tool, and nothing else.
 
-    A matched group fans back out to every member, so a field answered by
-    the same column in six tables routes to all six — ``candidates[0]`` is the first,
-    and the compiler's bindings carry the rest.
+    A matched group fans back out to every member, so a field answered by the same
+    column in six tables routes to all six — ``candidates[0]`` is the first, and the
+    compiler's bindings carry the rest. No retrieval ranking is appended: the matcher
+    saw the whole catalog, which the plan records once (``FieldPlan.catalog_shown``).
     """
     decision = matching.verdicts.get(spec.path) or Verdict(
         choice=None, because="the column matcher returned no verdict for this field"
@@ -512,13 +521,12 @@ def _settle_match(
     if decision.abstained:
         return None
 
-    scores = {candidate_ref(c): c.score for c in ranked}
     choice = decision.choice
     if choice.startswith(TOOL_PREFIX):
         name = choice[len(TOOL_PREFIX):]
         chosen = [EvidenceRef(
             resource="", locator=name, kind="tool",
-            snippet=matching.tools.get(name, name), score=scores.get(choice, 0.0),
+            snippet=matching.tools.get(name, name), score=0.0,
         )]
     else:
         group = matching.groups.get(choice)
@@ -527,16 +535,14 @@ def _settle_match(
             EvidenceRef(
                 resource=c.resource, locator=c.name, kind="computed_column",
                 snippet=f"{c.name}: {c.description or c.value_label or c.dtype}",
-                score=scores.get(column_ref(c), 0.0),
+                score=0.0,
             )
             for c in members
         ]
     if not chosen:
         return None
 
-    taken = {candidate_ref(c) for c in chosen}
-    candidates = chosen + [c for c in ranked if candidate_ref(c) not in taken]
-    return _routing(spec, candidates, catalog, decision)
+    return _routing(spec, chosen, catalog, decision)
 
 
 # ---------------------------------------------------------------------------
@@ -555,11 +561,12 @@ def _read(
     spans: Dict[str, List[EvidenceRef]],
     passage,
 ) -> Dict[str, Dict[Tuple[str, Any], Verdict]]:
-    """Read each retrieved passage once, for every field that retrieved it.
+    """Read each passage once, for every field it is to be read for.
 
-    Retrieval is still per field — a field is read only against the passages it
-    ranked — but reading is per passage, so a passage six fields retrieved is one
-    call, not six. Returns, per field, the verdict each of its passages gave.
+    Which passages a field is read against is :func:`_passages_for`'s decision;
+    reading is per passage, so a passage six fields are read against is one call (or
+    a few, at the fields-per-call limit), not six. Returns, per field, the verdict
+    each of its passages gave.
     """
     order: List[Tuple[str, Any]] = []
     by_span: Dict[Tuple[str, Any], Tuple[EvidenceRef, List[FieldSpec]]] = {}
@@ -597,7 +604,8 @@ def _settle_read(
 
     Several passages can state one field — a README and a methods section both give
     the title. A located quote beats an unlocated one, then confidence, then the
-    passage's own retrieval rank.
+    passage's position in ``ranked``: document order when every passage was read,
+    retrieval rank when BM25 chose them.
     """
     stated = [
         (rank, candidate, verdict)
@@ -640,6 +648,34 @@ def _assurance(bucket: str, top: EvidenceRef, catalog: Optional[Catalog]) -> str
     return "high"
 
 
+def _passages_for(
+    pending: List[FieldSpec],
+    corpus: Tuple[List[EvidenceRef], List[List[str]]],
+    k: int,
+    reader: Optional[PassageReader],
+) -> Dict[str, List[EvidenceRef]]:
+    """The passages each unanswered field is offered, in the order they are weighed.
+
+    **With a reader, every passage is read for every field**, in document order, while
+    the bundle has at most ``router_read_all_max_passages`` of them. Choosing passages
+    by BM25 would save almost nothing — each passage is read once for many fields
+    anyway — and would skip, for a field, the passage that states it in words the field
+    description does not use: the vocabulary gap the reader exists to cross. Only a
+    bundle too large to read whole falls back to BM25, top ``k`` per field.
+
+    Without a reader, BM25 is the router, and rank 1 is the answer.
+    """
+    refs, _ = corpus
+    if reader is not None and len(refs) <= thresholds.current().router_read_all_max_passages:
+        return {spec.path: list(refs) for spec in pending}
+    return {
+        spec.path: _search_docs(
+            corpus, spec.description or spec.path, k, offer_unscored=reader is not None
+        )
+        for spec in pending
+    }
+
+
 def route_fields(
     schema: Type[BaseModel],
     catalog: Optional[Catalog] = None,
@@ -667,22 +703,19 @@ def route_fields(
     corpus = _document_corpus(docs, packed=reader is not None)
     judged = matcher is not None or reader is not None
 
-    # Tier 1 — the structured corpus (tools + columns, one ranking). Without a matcher
-    # the ranking decides; with one it is the record of what retrieval proposed, and
-    # the matcher decides over the whole catalog.
-    structured = {
-        spec.path: _structured_candidates(spec.description or spec.path, catalog, k)
-        for spec in specs
-    }
+    # Tier 1 — columns and tools. With a matcher every field is matched against the
+    # whole catalog and nothing is ranked; without one, BM25 ranks the tools and
+    # enriched columns together and rank 1 is the routing.
     matching = _match(matcher, specs, catalog) if matcher is not None else None
-
+    structured: Dict[str, List[EvidenceRef]] = {}
     routings: Dict[str, FieldRouting] = {}
     pending: List[FieldSpec] = []
     for spec in specs:
-        ranked = structured[spec.path]
         if matching is not None:
-            settled = _settle_match(spec, matching, ranked, catalog)
+            settled = _settle_match(spec, matching, catalog)
         else:
+            ranked = _structured_candidates(spec.description or spec.path, catalog, k)
+            structured[spec.path] = ranked
             settled = _routing(spec, ranked, catalog) if ranked else None
         if settled is None:
             pending.append(spec)
@@ -693,12 +726,7 @@ def route_fields(
     # here either because nothing structured matched or because the matcher rejected
     # what did; both mean the same thing to the document tier — the answer, if any,
     # is stated in prose.
-    spans = {
-        spec.path: _search_docs(
-            corpus, spec.description or spec.path, k, offer_unscored=reader is not None
-        )
-        for spec in pending
-    }
+    spans = _passages_for(pending, corpus, k, reader)
     readings = _read(reader, pending, spans, passage) if reader is not None else None
     for spec in pending:
         ranked = spans[spec.path]
@@ -707,11 +735,13 @@ def route_fields(
         else:
             settled = _routing(spec, ranked, catalog) if ranked else None
         routings[spec.path] = settled or _unanswered(
-            spec, structured[spec.path] + ranked, judged, catalog
+            spec, structured.get(spec.path, []) + ranked, judged, catalog
         )
 
     # Emit in schema order, which the two-tier pass does not preserve on its own.
     return FieldPlan(
         schema_name=schema.__name__,
         routings={spec.path: routings[spec.path] for spec in specs},
+        catalog_shown=matching.shown if matching is not None else [],
+        judged=judged,
     )

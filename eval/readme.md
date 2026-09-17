@@ -48,15 +48,17 @@ unreachable however good the reader is. `sources.csv` marks each ref
 ## What `score` reports
 
 - **recall@k** — of the answerable fields, how many have their true answer anywhere
-  in the ranked set. The ceiling on any re-ranking strategy. Unaffected by the veto
-  or the reader, both of which only reject.
+  in the ranked set. Reported only without `--llm-candidate-judge`: the judges see the
+  whole catalog and read every passage, so nothing is filtered to miss.
 - **precision@1** — how often the answer given is right.
 - **over-answered** — of the fields labeled `NONE`, how many were answered anyway.
   The abstention failure, counted directly. **This is the number that moves.**
-- **abstentions: veto N, reader N** — which mechanism did the rejecting.
-- **risk–coverage per signal** — accuracy among the fields answered, as a function of
-  how many are answered, swept over `bm25` score, query-term `coverage`, and rank-1
-  `margin`. A signal worth thresholding on is one where accuracy *rises* as coverage
+- **abstentions by the judge** — how many fields the judges refused.
+- **cited correctly** — of the fields with an `evidence` label, how many cited a
+  passage containing it.
+- **risk–coverage per signal** (without judges) — accuracy among the fields answered, as
+  a function of how many are answered, swept over `bm25` score, query-term `coverage`,
+  and rank-1 `margin`. A signal worth thresholding on is one where accuracy *rises* as coverage
   falls. Flat or falling means the signal carries no information about its own
   reliability — which is what all three do on `sharetrait_basic__TRADAT031`.
 
@@ -67,13 +69,13 @@ always recommend answering more.
 ## Comparing configurations
 
 ```bash
-python -m eval score --no-veto                       # layer 4a off
+python -m eval score                                        # BM25 alone
 python -m eval score --llm-candidate-judge                  # layer 4b on
 python -m eval score --llm-candidate-judge --no-judge-batch  # judged field by field
 python -m eval score --llm-candidate-judge --judge-workers 8 # same, concurrent
 ```
 
-`--no-judge-batch` is the comparison worth running: grouping fields that share a
-candidate list saves round-trips, but fields judged together stop being independent,
+`--no-judge-batch` is the comparison worth running: asking about many fields per call
+saves round-trips, but fields judged together stop being independent,
 and a model shown one passage and nine fields tends to distribute answers among them.
 The sheet is how you find out whether that costs anything.

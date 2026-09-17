@@ -67,6 +67,7 @@ import re
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
+from src import thresholds
 from src.core.schemas import Plan, Task
 from src.router.route import FieldPlan, FieldRouting
 
@@ -96,16 +97,16 @@ _ASSEMBLY_TASK_NAME = "assemble_metadata_record"
 _ASSEMBLY_PLAYER = "metadata_generator"
 _FINAL_ARTIFACT = "final_metadata"
 
-# Character budget for one task's seeded candidate payload. A group whose seeded
-# candidates exceed this is split into several tasks, so grouping fields that share
-# an extractor does not re-create the flooding the field-driven design removes.
-_DEFAULT_BUDGET = 2000
+# The character budget for one task's seeded candidate payload is
+# `compile_task_budget_chars` in src/thresholds.py. A group whose seeded candidates
+# exceed it is split into several tasks, so grouping fields that share an extractor
+# does not re-create the flooding the field-driven design removes.
 
 
 def compile_field_plan(
     field_plan: FieldPlan,
     *,
-    budget: int = _DEFAULT_BUDGET,
+    budget: Optional[int] = None,
     bucket_player: Optional[Dict[str, str]] = None,
     assembly_player: str = _ASSEMBLY_PLAYER,
 ) -> Plan:
@@ -128,6 +129,8 @@ def compile_field_plan(
             continue
         groups.setdefault(_group_key(routing), []).append(routing)
 
+    if budget is None:
+        budget = thresholds.current().compile_task_budget_chars
     # Flatten to budget-capped chunks, then number them *globally*: two groups can
     # share a (bucket, resource) but differ in tier, so a per-group index would
     # collide on the output-artifact name. A single running index keeps them unique.

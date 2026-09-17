@@ -24,14 +24,18 @@ Both take the same auxiliary `sources` (the rest of the bundle), an optional
 are answered by columns in *different* tables, so every `ResolvedColumn` keeps its
 `resource` and the router ranks a field against all tables at once.
 
+The numbers below are defaults. Every one is a field of `Thresholds` in
+`src/thresholds.py`, overridable with `THRESHOLD_<NAME>` in `.env` or from the app's
+settings panel.
+
 ## Phase 0 — classify the bundle's sources
 
 Each auxiliary source is auto-classified; nothing depends on a filename convention.
 
 - A **`TabularContext`** is tested by `_as_dictionary`: find the column whose *values
   are the target's column names*, ranked by match count then purity, and accept it only
-  if precision ≥ `_DICTIONARY_KEY_PRECISION` (0.5) and uniqueness ≥
-  `_DICTIONARY_KEY_UNIQUENESS` (0.9). Precision lets a *partial* codebook through;
+  if precision ≥ `catalog_dictionary_key_precision` (0.5) and uniqueness ≥
+  `catalog_dictionary_key_uniqueness` (0.9). Precision lets a *partial* codebook through;
   uniqueness is what stops a row-scale observation table — repeated values — from being
   read as a codebook. Description / units / notes columns are then picked by name regex,
   yielding a `by_name` map. (`looks_like_dictionary` exposes this same test to a caller
@@ -40,7 +44,7 @@ Each auxiliary source is auto-classified; nothing depends on a filename conventi
   tested by `_as_text_codebook` for the same thing written as text: a glossary. Every
   `term <sep> definition` entry is parsed (`:` / `=`, or a dash with whitespace on both
   sides), and adjacent well-formed entries are grouped into runs. A run is accepted only if
-  it has at least `_TEXT_CODEBOOK_MIN_ENTRIES` (3) entries and `_DICTIONARY_KEY_PRECISION`
+  it has at least `catalog_text_codebook_min_entries` (3) entries and `catalog_dictionary_key_precision`
   of its terms are schema names — the table's precision rule. **A separator alone is never
   the signal**: `AAS = MO2max − MO2standard` in a Methods paragraph has the same `=` as
   `la = latitude`. An entry must also be shaped like a definition (`_is_definition`:
@@ -58,7 +62,7 @@ view and falls under the precision floor — so one shared codebook would be rec
 ## Phase 1 — deterministic candidates, per table
 
 `_gather_table`, no LLM involved. It reads a **sample** of the table
-(`_PROFILE_SAMPLE` = 1000 rows — approximate stats are enough for a prior and for the
+(`catalog_profile_sample` = 1000 rows — approximate stats are enough for a prior and for the
 refutation cross-check, and this keeps cost following the schema and the docs, not the
 row count), then for each column computes a value profile (`_value_profile`) and
 gathers its candidates (`_deterministic_candidates`). **Nothing is chosen yet**: every
@@ -86,7 +90,7 @@ deduped on `_read_key` (trimmed **and** case-folded) — a prose read depends on
 the docs, not the table, so `ID` and `id` in two tables are one read, and a document is read
 once for the whole bundle.
 
-**The path is chosen by document size** (`_WHOLE_DOC_MAX_CHARS` = 20 000 chars, set well
+**The path is chosen by document size** (`catalog_whole_doc_max_chars` = 20 000 chars, set well
 above a long README so the common natural-language case skips retrieval):
 
 - **Short docs → `_whole_doc_reads`: no retrieval at all.** The whole text plus *all*
@@ -95,9 +99,9 @@ above a long README so the common natural-language case skips retrieval):
   name ("oxygen debt" for `EPOC`), and when the docs are small, localizing is both
   unnecessary and harmful.
 - **A manuscript → `_localized_reads`**, today a pass-through to `_batch_prose_reads`:
-  BM25 over every chunk of every document by the column token, top `_PROSE_READ_K` (3)
+  BM25 over every chunk of every document by the column token, top `catalog_prose_read_k` (3)
   chunks per column. The distinct retrieved chunks are then **packed** in document order
-  into passages of up to `_PASSAGE_MAX_CHARS` (20 000), and each passage is read once over
+  into passages of up to `catalog_passage_max_chars` (20 000), and each passage is read once over
   every column that retrieved a chunk in it — an expensive backend pays per retrieved
   text, not per chunk or column. Each read is grounded in the chunk its quote is found in,
   so citations stay document offsets. A column whose name is opaque or stopword-only

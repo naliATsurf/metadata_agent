@@ -30,6 +30,8 @@ from demo.components.console_view import (
     recording_console,
     render_console_html,
 )
+from demo import settings as pipeline_settings
+from src import thresholds
 from src.llm_calls import count_llm_calls
 
 
@@ -313,7 +315,10 @@ def _execute(
     console = recording_console(width=width)
     error: str | None = None
     result: Any = None
-    with st.spinner("Running…"), count_llm_calls() as llm_calls:
+    # The panel's thresholds apply to the run itself, not to the process environment,
+    # so two sessions with different settings do not reach into each other's runs.
+    limits = pipeline_settings.current().thresholds
+    with st.spinner("Running…"), count_llm_calls() as llm_calls, thresholds.use(limits):
         try:
             result = module.run(args, console, **inputs)
         except SystemExit as exc:

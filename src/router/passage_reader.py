@@ -16,11 +16,11 @@ appear in its source.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from src import thresholds
 from src.context.base_context import EvidenceRef
 from src.router.judge import (
-    MAX_FIELDS_PER_CALL,
     Verdict,
     ask,
     candidate_ref,
@@ -94,7 +94,7 @@ class LLMPassageReader(PassageReader):
         *,
         batch: bool = True,
         max_workers: int = 1,
-        max_fields: int = MAX_FIELDS_PER_CALL,
+        max_fields: Optional[int] = None,
     ) -> None:
         self._invoke = invoke
         self._batch = batch
@@ -117,7 +117,8 @@ class LLMPassageReader(PassageReader):
         return {f.path: _referee(data.get(f.path), passage) for f in fields}
 
     def read_many(self, *, requests: Sequence[Request]) -> List[Dict[str, Verdict]]:
-        per_call = self._max_fields if self._batch else 1
+        limit = self._max_fields or thresholds.current().router_max_fields_per_call
+        per_call = limit if self._batch else 1
         calls = [
             (index, group, passage)
             for index, (fields, passage) in enumerate(requests)

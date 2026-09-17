@@ -111,6 +111,7 @@ def run(args: argparse.Namespace, console: Console) -> Path:
             console,
             args.candidates,
             evidence,
+            judged=field_plan.judged,
         )
         return sheet
 

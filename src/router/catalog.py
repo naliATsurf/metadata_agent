@@ -74,7 +74,7 @@ gating), so adding one cannot overturn a resolution a codebook already made — 
 only fill gaps. Wrap it in :class:`CachedProseReader` and a passage is read once
 across the whole bundle.
 
-**Document length changes the pipeline shape**, at ``_WHOLE_DOC_MAX_CHARS``, and the
+**Document length changes the pipeline shape**, at ``catalog_whole_doc_max_chars``, and the
 decision is made **per file** — a bundle is routinely a short README beside a long
 manuscript, and they take different paths in the same run:
 
@@ -82,8 +82,8 @@ manuscript, and they take different paths in the same run:
   all. The file goes to the reader entire, with every residual column in one call.
   One call per file, and a column whose name never appears verbatim is still read.
 - **too long** — the localized path (:func:`_localized_reads`): BM25 retrieval first
-  places each column in the top ``_PROSE_READ_K`` chunks, and only those spans are
-  read, packed into passages of up to ``_PASSAGE_MAX_CHARS``. One call per passage.
+  places each column in the top ``catalog_prose_read_k`` chunks, and only those spans are
+  read, packed into passages of up to ``catalog_passage_max_chars``. One call per passage.
 
 The localized path degrades the reader *silently*, for a reason worth stating
 plainly: **localization is lexical, and the whole reason to reach for a reader is
@@ -118,6 +118,7 @@ from src.context.base_context import (
     tokenize,
 )
 from src.context.text_context import TextChunk, TextContext
+from src import thresholds
 from src.tools.tabular.detection import (
     detect_coordinate_values,
     detect_temporal_dtype,
@@ -129,13 +130,10 @@ from src.tools.tabular.detection import (
 # it covers rather than discarding it wholesale; uniqueness rejects a row-scale
 # data table whose cells are repeated observations (a constant or high-cardinality
 # column can't masquerade as a key). Together they need no coverage threshold.
-_DICTIONARY_KEY_PRECISION = 0.5
-_DICTIONARY_KEY_UNIQUENESS = 0.9
-# Rows sampled to compute a value profile. We sample, never scan the whole table:
-# approximate stats are enough for a prior and for the refutation cross-check, and
-# this keeps resolution doc-scale — cost follows the schema and the docs, not the
-# row count.
-_PROFILE_SAMPLE = 1000
+# Both numbers are in src/thresholds.py, as is the size of the row sample a value
+# profile is computed from: we sample, never scan the whole table — approximate stats
+# are enough for a prior and for the refutation cross-check, and this keeps resolution
+# doc-scale.
 
 _DESC_NAME_RE = re.compile(r"desc|label|meaning|definition|name|title", re.I)
 _UNIT_NAME_RE = re.compile(r"unit", re.I)
@@ -367,8 +365,8 @@ def _as_dictionary(src: TabularContext, target_columns: List[str]) -> Optional[_
         # data table — repeated observations — from being read as a codebook.
         if (
             best_key is None
-            or best_precision < _DICTIONARY_KEY_PRECISION
-            or best_uniqueness < _DICTIONARY_KEY_UNIQUENESS
+            or best_precision < thresholds.current().catalog_dictionary_key_precision
+            or best_uniqueness < thresholds.current().catalog_dictionary_key_uniqueness
         ):
             continue
 
@@ -438,11 +436,11 @@ def _cell(row: pd.Series, col: Optional[str]) -> Optional[str]:
 # decided exactly like a codebook table, one rank below it, because a parse of free text
 # is less certain than a parse of cells.
 
-# Fewest adjacent entries that make a run a glossary rather than a coincidence. Two
-# ``X = …`` side by side is ordinary in a Methods section; three is a list.
-_TEXT_CODEBOOK_MIN_ENTRIES = 3
-# A definition longer than this is a paragraph that happened to follow a separator.
-_TEXT_DEFINITION_MAX_CHARS = 160
+# How many adjacent entries make a run a glossary rather than a coincidence (two
+# ``X = …`` side by side is ordinary in a Methods section; three is a list), and how long
+# a definition may be before it is a paragraph that happened to follow a separator, are
+# `catalog_text_codebook_min_entries` and `catalog_text_definition_max_chars` in
+# src/thresholds.py.
 
 # A term: a bare identifier, optionally quoted/emphasised, optionally followed by its
 # units in parentheses (``SGR (%/day) – specific growth rate``).
@@ -485,7 +483,7 @@ def _is_definition(text: str) -> bool:
     match started inside), a spaced dash (a heading or a further entry the delimiters
     did not split), and a dangling function word (a phrase cut off mid-sentence).
     """
-    if not text or len(text) > _TEXT_DEFINITION_MAX_CHARS:
+    if not text or len(text) > thresholds.current().catalog_text_definition_max_chars:
         return False
     if text.count("(") != text.count(")") or text.count("[") != text.count("]"):
         return False
@@ -519,8 +517,8 @@ def _as_text_codebook(
     """Recognise the glossaries in one document as a codebook for ``target_columns``.
 
     Parses every ``term <sep> definition`` entry, groups adjacent well-formed entries
-    into runs, and keeps a run only when it has at least ``_TEXT_CODEBOOK_MIN_ENTRIES``
-    entries and ``_DICTIONARY_KEY_PRECISION`` of its terms are target column names — the
+    into runs, and keeps a run only when it has at least ``catalog_text_codebook_min_entries``
+    entries and ``catalog_dictionary_key_precision`` of its terms are target column names — the
     precision rule a codebook table is held to. A malformed entry ends a run. An entry
     that says nothing — its definition only restates the term (``p50 – p50``) — still
     counts toward its run's structure but is not recorded, so the column stays open for
@@ -574,7 +572,11 @@ def _as_text_codebook(
     by_name: Dict[str, _Entry] = {}
     for run in runs:
         keyed = sum(_read_key(e.key) in vocabulary for e in run)
-        if len(run) < _TEXT_CODEBOOK_MIN_ENTRIES or keyed / len(run) < _DICTIONARY_KEY_PRECISION:
+        limits = thresholds.current()
+        if (
+            len(run) < limits.catalog_text_codebook_min_entries
+            or keyed / len(run) < limits.catalog_dictionary_key_precision
+        ):
             continue
         for e in run:
             if e.description or e.units:
@@ -618,7 +620,7 @@ def _as_text_codebook(
 # retrieved chunk is not much better — a 34k-character README retrieved 19 distinct
 # paragraphs for 23 columns, 19 calls sending as much text as the whole file. So the
 # retrieved chunks are **packed** in document order into passages of up to
-# `_PASSAGE_MAX_CHARS`, and the reader is called **once per passage** over every column
+# `catalog_passage_max_chars`, and the reader is called **once per passage** over every column
 # that retrieved a chunk in it (`ProseReader.read_many`). Cost scales with the *text
 # retrieved*, not with chunk or column count. `CachedProseReader` memoizes by
 # (column, passage) — negatives included — so re-runs are free.
@@ -835,7 +837,11 @@ def _grounding_grade(column: str, description: str, quote: str) -> str:
     q = quote.lower()
     token_present = _match_key(column).lower() in q
     desc_words = [w for w in re.findall(r"[a-z0-9]+", (description or "").lower()) if len(w) > 2]
-    supported = bool(desc_words) and sum(w in q for w in desc_words) / len(desc_words) >= 0.5
+    supported = (
+        bool(desc_words)
+        and sum(w in q for w in desc_words) / len(desc_words)
+        >= thresholds.current().catalog_grounding_support
+    )
     return "high" if (token_present and supported) else "medium"
 
 
@@ -876,15 +882,11 @@ def _read_candidate(
     )
 
 
-# Chunks retrieved per column before reading — enough to survive a mis-ranked top
-# hit, small enough to stay doc-scale.
-_PROSE_READ_K = 3
-
-# Most text handed to the reader in one localized call. Retrieved chunks are packed
-# into passages up to this, so a manuscript costs calls in proportion to the text
-# retrieved, not to its column count. The same size as a file read whole: a passage
-# is never larger than a document the reader would take in one go.
-_PASSAGE_MAX_CHARS = 20_000
+# Chunks retrieved per column before reading (`catalog_prose_read_k`: enough to survive
+# a mis-ranked top hit, small enough to stay doc-scale) and the most text handed to the
+# reader in one localized call (`catalog_passage_max_chars`) are in src/thresholds.py.
+# Retrieved chunks are packed into passages up to that size, so a manuscript costs calls
+# in proportion to the text retrieved, not to its column count.
 
 # Between packed chunks. They need not be adjacent in the document, so a blank line
 # keeps one from running into the next.
@@ -894,15 +896,16 @@ _PASSAGE_SEPARATOR = "\n\n"
 def _pack_passages(indices: List[int], chunks: List[TextChunk]) -> List[List[int]]:
     """Group chunk ``indices``, in order, into runs whose joined text fits the budget.
 
-    A chunk longer than :data:`_PASSAGE_MAX_CHARS` is a passage on its own. It is not
+    A chunk longer than ``catalog_passage_max_chars`` is a passage on its own. It is not
     split: a chunk is the span a citation's offsets point into.
     """
+    limit = thresholds.current().catalog_passage_max_chars
     passages: List[List[int]] = []
     current: List[int] = []
     size = 0
     for i in indices:
         added = len(chunks[i].text) + (len(_PASSAGE_SEPARATOR) if current else 0)
-        if current and size + added > _PASSAGE_MAX_CHARS:
+        if current and size + added > limit:
             passages.append(current)
             current, added = [], len(chunks[i].text)
             size = 0
@@ -918,13 +921,13 @@ def _batch_prose_reads(
     sources: List[_DocResource],
     reader: ProseReader,
     *,
-    k: int = _PROSE_READ_K,
+    k: Optional[int] = None,
 ) -> Dict[str, List["_Candidate"]]:
     """Retrieve each column's top-``k`` chunks, then read them **packed into passages**.
 
     Retrieval is per column (BM25 over every chunk of every document by the column
     token). Reading is not: the distinct retrieved chunks are packed, in document
-    order, into passages of up to :data:`_PASSAGE_MAX_CHARS`
+    order, into passages of up to ``catalog_passage_max_chars``
     (:func:`_pack_passages`), and each passage is read once over every column that
     retrieved a chunk in it (:meth:`ProseReader.read_many`). An expensive backend pays
     per retrieved text, not per chunk or per column, and a column is read at most once
@@ -944,6 +947,8 @@ def _batch_prose_reads(
         return {}
     tokenized = [tokenize(c.text) for c in chunks]
 
+    if k is None:
+        k = thresholds.current().catalog_prose_read_k
     # Per column: its top-k chunk indices, best first.
     ranked_for: Dict[str, List[int]] = {}
     for name, _ in fields:
@@ -1120,7 +1125,7 @@ def _gather_table(
     """
     resource = resource or target.resources[0]
     info = target.get_resource_info(resource)
-    frame = target.read_resource(resource, limit=_PROFILE_SAMPLE)
+    frame = target.read_resource(resource, limit=thresholds.current().catalog_profile_sample)
 
     vocabulary = vocabulary or info.field_names
     docs = [src for src in sources if isinstance(src, TextContext)]
@@ -1143,10 +1148,10 @@ def _gather_table(
     return _TableEvidence(resource, columns, docs)
 
 
-# A README/codebook is small enough to hand to a reader whole; past this, a document is
-# a manuscript and must be *localized* before reading (see _read_residuals). Chosen well
-# above a long README so the common natural-language case skips retrieval.
-_WHOLE_DOC_MAX_CHARS = 20_000
+# A README/codebook is small enough to hand to a reader whole; past
+# `catalog_whole_doc_max_chars` (src/thresholds.py) a document is a manuscript and must
+# be *localized* before reading (see _read_residuals). Its default sits well above a
+# long README so the common natural-language case skips retrieval.
 
 
 @dataclass(frozen=True)
@@ -1179,7 +1184,8 @@ def _split_by_length(
     """Partition into (short enough to read whole, long enough to need localizing)."""
     short, long = [], []
     for source in sources:
-        (short if len(source.text()) <= _WHOLE_DOC_MAX_CHARS else long).append(source)
+        limit = thresholds.current().catalog_whole_doc_max_chars
+        (short if len(source.text()) <= limit else long).append(source)
     return short, long
 
 

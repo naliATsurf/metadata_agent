@@ -47,11 +47,6 @@ DOC_PREFIX = "doc::"
 #: Confidence values a judge may return, weakest first.
 CONFIDENCE_ORDER = ("none", "low", "medium", "high")
 
-#: The most fields one call is asked about. Grouped fields stop being independent —
-#: a model shown one passage and many fields tends to *distribute* answers among
-#: them — so a group is bounded even when the prompt could hold more.
-MAX_FIELDS_PER_CALL = 20
-
 
 def candidate_ref(candidate: EvidenceRef) -> str:
     """The stable reference string identifying what a candidate points at.

@@ -5,7 +5,6 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
 
 import pandas as pd
 
@@ -24,6 +23,14 @@ from src.router import (
     resolve_catalog,
 )
 from src.router.catalog import _as_text_codebook
+from dataclasses import replace
+
+from src import thresholds
+
+
+def _limits(**values):
+    """Run a block with some thresholds changed (see src/thresholds.py)."""
+    return thresholds.use(replace(thresholds.current(), **values))
 from src.tools.base import clear_registry
 
 
@@ -1120,7 +1127,7 @@ class ProseReaderTierTest(unittest.TestCase):
             "appendix.md",
             "# Appendix\n\nWet body mass (mass) was measured at the start of each trial.\n",
         )
-        with patch("src.router.catalog._WHOLE_DOC_MAX_CHARS", 50):   # force the localize path
+        with _limits(catalog_whole_doc_max_chars=50):   # force the localize path
             col = resolve_catalog(
                 self.tab, sources=[decoy, appendix], prose_reader=self.reader
             ).get("mass")
@@ -1244,7 +1251,7 @@ class ProseReaderTierTest(unittest.TestCase):
         # both columns, and each read is still cited to its own paragraph's offsets.
         doc = self._doc("methods.md", self._MANUSCRIPT)
         spy = _CountingReader()
-        with patch("src.router.catalog._WHOLE_DOC_MAX_CHARS", 50):   # force the localize path
+        with _limits(catalog_whole_doc_max_chars=50):   # force the localize path
             cat = resolve_catalog(self.tab, sources=[doc], prose_reader=spy)
         self.assertEqual(len(spy.calls), 1)
         self.assertEqual(set(spy.calls[0][0]), {"mass", "epoc"})
@@ -1256,8 +1263,8 @@ class ProseReaderTierTest(unittest.TestCase):
     def test_passages_split_at_the_budget(self):
         doc = self._doc("methods.md", self._MANUSCRIPT)
         spy = _CountingReader()
-        with patch("src.router.catalog._WHOLE_DOC_MAX_CHARS", 50), \
-             patch("src.router.catalog._PASSAGE_MAX_CHARS", 60):     # room for one paragraph
+        with _limits(catalog_whole_doc_max_chars=50,      # force the localize path
+                     catalog_passage_max_chars=60):       # room for one paragraph
             cat = resolve_catalog(self.tab, sources=[doc], prose_reader=spy)
         self.assertEqual([set(columns) for columns, _ in spy.calls], [{"mass"}, {"epoc"}])
         for name in ("mass", "epoc"):

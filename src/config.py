@@ -27,6 +27,10 @@ Configuration Options
     Default execution topology name. Defaults to ``"default"``.
 ``DEFAULT_METADATA_STANDARD``
     Default metadata standard. Defaults to ``"basic"``.
+``THRESHOLD_<NAME>``
+    The numbers the catalog resolver, field router and plan compiler decide by —
+    ``THRESHOLD_ROUTER_READ_ALL_MAX_PASSAGES``, ``THRESHOLD_CATALOG_PROFILE_SAMPLE`` and
+    so on. Every name, default and meaning is in :mod:`src.thresholds`.
 
 Provider Credentials and Endpoints
 ----------------------------------

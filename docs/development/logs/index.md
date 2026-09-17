@@ -8,6 +8,10 @@ records findings from an investigation that changed no code.
 ## 2026-09
 
 - -
+  **[2026-09-17 — With judges on, BM25 filters nothing; every threshold lives in one place](2026-09-17_read-all-thresholds.change.md)**
+  — the passage reader reads every passage for every unanswered field; `src/thresholds.py`
+  gathers 14 thresholds, overridable by `THRESHOLD_<NAME>` and the settings panel.
+- -
   **[2026-09-17 — Type and unit fit lowers confidence; it no longer removes candidates](2026-09-17_type-fit-grade.change.md)**
   — the veto becomes a grade that caps assurance at `low`; every field sees one catalog,
   so the column matcher takes 2 calls instead of 5, and splits are even.

@@ -15,7 +15,7 @@ first is not enough:
    for all of them and a match fans back out to every table, which is also how a
    field answered by six tables gets all six.
 2. **A catalog too large for one call is split** (:func:`split_cards`) into slices
-   under a character budget, each sent with the full field list — the short part is
+   under ``router_match_max_chars`` (:mod:`src.thresholds`), each sent with the full field list — the short part is
    repeated, the long part is not. A field can match in more than one slice, and
    the strongest verdict wins.
 
@@ -35,9 +35,9 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from src import thresholds
 from src.router.catalog import ResolvedColumn
 from src.router.judge import (
-    MAX_FIELDS_PER_CALL,
     TOOL_PREFIX,
     Verdict,
     ask,
@@ -48,12 +48,6 @@ from src.router.judge import (
     rank_of,
 )
 from src.router.schema import FieldSpec
-
-#: How many characters of catalog cards one call carries. About 7 500 tokens —
-#: large enough that a typical bundle is one call, small enough to stay well inside a
-#: modest model's attention.
-MATCH_MAX_CHARS = 30_000
-
 
 def column_ref(column: ResolvedColumn) -> str:
     """The ref a column goes by — the label vocabulary's ``table::column``."""
@@ -223,7 +217,7 @@ class LLMColumnMatcher(ColumnMatcher):
     this free of any SDK and testable with a stub.
 
     Each request is split into calls along both axes: the catalog into slices under
-    ``max_chars`` (:func:`split_cards`), and the fields into groups of at most
+    ``max_chars`` (:func:`split_cards`), and the fields into even groups of at most
     ``max_fields`` — or one field per call with ``batch=False``, the comparison worth
     running against a labeled sheet, since fields matched together are not
     independent. ``max_workers`` issues the calls concurrently.
@@ -235,8 +229,8 @@ class LLMColumnMatcher(ColumnMatcher):
         *,
         batch: bool = True,
         max_workers: int = 1,
-        max_chars: int = MATCH_MAX_CHARS,
-        max_fields: int = MAX_FIELDS_PER_CALL,
+        max_chars: Optional[int] = None,
+        max_fields: Optional[int] = None,
     ) -> None:
         self._invoke = invoke
         self._batch = batch
@@ -264,11 +258,15 @@ class LLMColumnMatcher(ColumnMatcher):
         return {f.path: _referee(data.get(f.path), cards) for f in fields}
 
     def match_many(self, *, requests: Sequence[Request]) -> Dict[str, Verdict]:
-        per_call = self._max_fields if self._batch else 1
+        # Unset limits are read when the call is made, so a threshold override reaches
+        # a matcher built before it.
+        limits = thresholds.current()
+        max_chars = self._max_chars or limits.router_match_max_chars
+        per_call = (self._max_fields or limits.router_max_fields_per_call) if self._batch else 1
         calls = [
             (group, part)
             for fields, cards in requests
-            for part in split_cards(cards, self._max_chars)
+            for part in split_cards(cards, max_chars)
             for group in in_groups(list(fields), per_call)
         ]
         results = dispatch(

@@ -3,9 +3,10 @@
 Two numbers carry the design, and they answer different questions:
 
 - **recall@k** — of the answerable fields, how many have their true answer anywhere
-  in the ranked set. The ceiling on *any* re-ranking strategy, an LLM judge
-  included, because a judge chooses among what retrieval surfaced and can never
-  recover a miss. Unaffected by the judge.
+  in the ranked set: the ceiling on what rank 1 can get right. Reported only for a run
+  **without** judges. With them nothing is filtered — the column matcher sees the whole
+  catalog and the passage reader reads every passage — so there is no retrieval miss
+  to count, and the number would be 100% by construction.
 - **over-answered** — of the fields labeled ``NONE``, how many the router answered
   anyway. The abstention failure, counted directly. This is the one that moves.
 
@@ -46,7 +47,8 @@ def report(
     console: Console,
     k: int,
     evidence: Dict[str, str] | None = None,
-) -> Dict[str, float]:
+    judged: bool = False,
+) -> Dict[str, float | None]:
     """Print the grading and return the headline numbers for a caller to assert on."""
     if not scored:
         raise SystemExit(
@@ -66,11 +68,13 @@ def report(
         f"\n[bold]Labeled:[/] {len(scored)} fields "
         f"({len(answerable)} answerable, {len(unanswerable)} {UNANSWERABLE})"
     )
-    if answerable:
+    if answerable and not judged:
         console.print(
             f"  recall@{k}   [bold]{hit_at_k}/{len(answerable)}[/] "
-            f"({hit_at_k / len(answerable):.0%})  — ceiling for any re-ranker"
+            f"({hit_at_k / len(answerable):.0%})  — ceiling for rank 1"
         )
+    elif answerable:
+        console.print("  recall@k    [dim]not measured — the judges filter nothing out[/]")
         console.print(
             f"  precision@1 {hit_at_1}/{len(answerable)} "
             f"({hit_at_1 / len(answerable):.0%})"
@@ -106,7 +110,8 @@ def report(
             "not be located[/] — the router's own unreliability signal"
         )
 
-    for signal in SIGNALS:
+    # The signals describe the lexical ranking; with judges on there is none to read.
+    for signal in () if judged else SIGNALS:
         curve = risk_coverage(scored, signal)
         if not curve:
             continue
@@ -121,7 +126,8 @@ def report(
     wrong = [s for s in scored if s.routed and not s.top1_correct]
     if wrong:
         table = Table(title="Where rank 1 is wrong", title_justify="left")
-        for name in ("field", "answered with", "should be", "cited", *SIGNALS):
+        signals = () if judged else tuple(SIGNALS)
+        for name in ("field", "answered with", "should be", "cited", *signals):
             table.add_column(name, overflow="fold")
         for s in sorted(wrong, key=lambda s: s.signals["coverage"]):
             table.add_row(
@@ -130,12 +136,12 @@ def report(
                 # The quote is what makes a document answer inspectable: two routings
                 # naming the same file are told apart only by what they cited.
                 (s.quote[:80] + "…" if len(s.quote) > 80 else s.quote) or "—",
-                *(f"{s.signals[n]:.2f}" for n in SIGNALS),
+                *(f"{s.signals[n]:.2f}" for n in signals),
             )
         console.print(table)
 
     return {
-        "recall_at_k": hit_at_k / len(answerable) if answerable else 0.0,
+        "recall_at_k": None if judged else (hit_at_k / len(answerable) if answerable else 0.0),
         "precision_at_1": hit_at_1 / len(answerable) if answerable else 0.0,
         "over_answered": float(len(over)),
         "accuracy": correct / len(scored),

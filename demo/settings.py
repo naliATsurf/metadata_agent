@@ -33,6 +33,8 @@ from src.config import (
     player_max_tool_iterations,
     player_tool_execution_mode,
 )
+from src import thresholds as threshold_registry
+from src.thresholds import Thresholds, env_name
 from src.topology import EXECUTION_TOPOLOGIES
 
 
@@ -74,6 +76,8 @@ class PipelineSettings:
         router_candidate_judge: Let a model adjudicate the candidates (layer 4b).
         router_judge_workers: How many of the judge's calls to issue at once.
         router_judge_batch: Ask about many fields per call, rather than one.
+        thresholds: The numbers the catalog resolver, router and compiler decide by
+            (:mod:`src.thresholds`).
     """
 
     models: Mapping[str, LLMSettings] = field(default_factory=dict)
@@ -86,6 +90,7 @@ class PipelineSettings:
     router_candidate_judge: bool = False
     router_judge_workers: int = 1
     router_judge_batch: bool = True
+    thresholds: Thresholds = field(default_factory=Thresholds.from_environment)
 
     # -- what a run is given ------------------------------------------------
 
@@ -104,6 +109,7 @@ class PipelineSettings:
             env[f"LLM_TEMPERATURE_{module}"] = str(settings.temperature)
         env["PLAYER_TOOL_EXECUTION_MODE"] = self.player_tool_mode
         env["PLAYER_MAX_TOOL_ITERATIONS"] = str(self.player_tool_iterations)
+        env.update(self.thresholds.environment())
         return env
 
     def catalog_arguments(self) -> dict[str, Any]:
@@ -157,6 +163,7 @@ class PipelineSettings:
             "router_candidate_judge": self.router_candidate_judge,
             "router_judge_workers": self.router_judge_workers,
             "router_judge_batch": self.router_judge_batch,
+            "thresholds": self.thresholds.to_dict(),
         }
 
     def token(self) -> str:
@@ -191,6 +198,7 @@ def defaults() -> PipelineSettings:
         topology=DEFAULT_TOPOLOGY,
         player_tool_mode=player_tool_execution_mode(),
         player_tool_iterations=player_max_tool_iterations(),
+        thresholds=Thresholds.from_environment(),
     )
 
 
@@ -240,8 +248,10 @@ def render() -> PipelineSettings:
 
     planning_model = chosen["Planning"]
     topology, tool_mode, tool_iterations, player_model = chosen["Players"]
-    prose_tier, catalog_debug, catalog_model = chosen["Catalog resolver"]
-    candidates, candidate_judge, workers, batch, judge_model = chosen["Field router"]
+    prose_tier, catalog_debug, catalog_model, catalog_limits = chosen["Catalog resolver"]
+    candidates, candidate_judge, workers, batch, judge_model, router_limits = chosen[
+        "Field router"
+    ]
     settings = PipelineSettings(
         # A module added to LLM_MODULES without a place here still runs, on its
         # configured model; it just is not adjustable until it is given one.
@@ -261,6 +271,7 @@ def render() -> PipelineSettings:
         router_candidate_judge=candidate_judge,
         router_judge_workers=workers,
         router_judge_batch=batch,
+        thresholds=Thresholds(**catalog_limits, **router_limits),
     )
     st.session_state[_SESSION_KEY] = settings
     return settings
@@ -401,7 +412,41 @@ def _render_players(view: _View) -> tuple[str, str, int, LLMSettings]:
     return topology, mode, int(iterations), _render_model(view, "PLAYER")
 
 
-def _render_catalog(view: _View) -> tuple[str, bool, LLMSettings]:
+def _render_thresholds(view: _View, *stages: str) -> dict[str, Any]:
+    """The thresholds of ``stages``, as number inputs; returns their values by name.
+
+    Each starts from what the environment configures (``THRESHOLD_<NAME>`` in ``.env``,
+    else the default in :mod:`src.thresholds`), and a value set here reaches every run
+    the app starts.
+    """
+    configured = Thresholds.from_environment()
+    values: dict[str, Any] = {}
+    for stage in stages:
+        specs = threshold_registry.specs(stage)
+        if not specs:
+            continue
+        st.markdown(f"**{stage} thresholds**")
+        st.caption(
+            "Same as `THRESHOLD_<NAME>` in `.env`. Hover a control for what it decides."
+        )
+        columns = st.columns(2, gap="medium")
+        for index, spec in enumerate(specs):
+            default = getattr(configured, spec.name)
+            is_int = isinstance(spec.default, int)
+            with columns[index % 2]:
+                value = st.number_input(
+                    spec.metadata["label"],
+                    min_value=spec.metadata["min"] if is_int else float(spec.metadata["min"]),
+                    step=1 if is_int else 0.05,
+                    format=None if is_int else "%.2f",
+                    help=f"{spec.metadata['help']} (`{env_name(spec.name)}`)",
+                    **view.bind("thresholds", spec.name, default),
+                )
+            values[spec.name] = int(value) if is_int else float(value)
+    return values
+
+
+def _render_catalog(view: _View) -> tuple[str, bool, LLMSettings, dict[str, Any]]:
     """Layer 3: how hard the resolver works to find what a column means, and its model."""
     _applies_to(
         "the **Catalog resolver** module's starting values — and so the catalog the "
@@ -436,10 +481,13 @@ def _render_catalog(view: _View) -> tuple[str, bool, LLMSettings]:
         view, "CATALOG_RESOLVER", disabled=tier != "llm",
         off_note="Used only with the `llm` prose tier.",
     )
-    return tier, bool(debug), model
+    limits = _render_thresholds(view, threshold_registry.CATALOG)
+    return tier, bool(debug), model, limits
 
 
-def _render_router(view: _View) -> tuple[int, bool, int, bool, LLMSettings]:
+def _render_router(
+    view: _View,
+) -> tuple[int, bool, int, bool, LLMSettings, dict[str, Any]]:
     """Layer 4: how many sources a field keeps, who judges them, and the judge's model."""
     _applies_to("the **Field router** module's starting values.")
     st.caption(
@@ -497,7 +545,8 @@ def _render_router(view: _View) -> tuple[int, bool, int, bool, LLMSettings]:
         view, "CANDIDATE_JUDGE", disabled=not candidate_judge,
         off_note="Used only with the LLM candidate judge on.",
     )
-    return int(candidates), bool(candidate_judge), int(workers), bool(batch), model
+    limits = _render_thresholds(view, threshold_registry.ROUTER, threshold_registry.COMPILER)
+    return int(candidates), bool(candidate_judge), int(workers), bool(batch), model, limits
 
 
 #: The modules the panel gives a tab, in tab order, with what renders each.

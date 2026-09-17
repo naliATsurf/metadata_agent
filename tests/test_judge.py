@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from typing import List, Optional
 
 import pandas as pd
@@ -18,6 +19,7 @@ from pydantic import BaseModel, Field
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from src import thresholds
 from src.context import create_context
 from src.context.base_context import EvidenceRef
 from src.router import resolve_bundle, resolve_catalog, route_fields
@@ -205,6 +207,36 @@ class RoutingIntegrationTest(unittest.TestCase):
         self.assertTrue(routing.mismatches)
 
 
+class ReadAllPassagesTest(unittest.TestCase):
+    """With a reader, BM25 does not choose passages — unless there are too many."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        path = os.path.join(self.dir, "readme.txt")
+        with open(path, "w") as handle:
+            # Two paragraphs, packed apart below; only the first shares a word with
+            # the title field's description.
+            handle.write("The dataset title is Foo Survey.\n\nFish were held for two weeks.\n")
+        self.doc = create_context(path, name="readme")
+
+    def _titles_read(self, **limits):
+        read = _scripted("{}")
+        settings = replace(thresholds.current(), router_passage_max_chars=40, **limits)
+        with thresholds.use(settings):
+            plan = route_fields(Meta, docs=[self.doc], k=5, reader=LLMPassageReader(read))
+        return [p for p in read.prompts if "- title" in p], plan
+
+    def test_every_passage_is_read_for_every_unanswered_field(self):
+        prompts, plan = self._titles_read()
+        self.assertEqual(len(prompts), 2)
+        self.assertTrue(plan.judged)
+
+    def test_bm25_chooses_passages_only_past_the_read_all_limit(self):
+        prompts, _ = self._titles_read(router_read_all_max_passages=1)
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("Foo Survey", prompts[0])
+
+
 class MergedColumnRoutingTest(unittest.TestCase):
     """A column repeated across tables is matched once and routed to every table."""
 
@@ -235,8 +267,17 @@ class MergedColumnRoutingTest(unittest.TestCase):
         ).routings["duration_days"]
         self.assertEqual(match.prompts[0].count('"ref": "growth::days"'), 1)
         self.assertNotIn('"ref": "swim::days"', "".join(match.prompts))
-        refs = [candidate_ref(c) for c in routing.candidates[:2]]
-        self.assertEqual(refs, ["growth::days", "swim::days"])
+        self.assertEqual(
+            [candidate_ref(c) for c in routing.candidates], ["growth::days", "swim::days"]
+        )
+
+    def test_the_plan_records_the_catalog_the_matcher_saw_once(self):
+        match = _scripted("{}")
+        plan = route_fields(Meta, catalog=self.catalog, k=5, matcher=LLMColumnMatcher(match))
+        self.assertIn("growth::days", plan.catalog_shown)
+        self.assertIn("tool::get_item_count", plan.catalog_shown)
+        self.assertNotIn("swim::days", plan.catalog_shown)   # merged into growth::days
+        self.assertTrue(plan.judged)
 
 
 if __name__ == "__main__":
