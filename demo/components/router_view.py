@@ -5,6 +5,16 @@ fields fall out, it starts from the fields that must be filled and routes each t
 whatever can answer it. What matters when reading a run is therefore per field —
 where it routed, on what evidence, and how well grounded — and which fields nothing
 could answer, which is the signal the router exists to surface *before* extraction.
+
+**The table follows what decided the routing**, because the two modes produce different
+artifacts and reading one as the other is misleading:
+
+- **With the judges on** every candidate is an answer a judge chose, carrying a quote,
+  a citation or a tool's bound arguments, and BM25 scored nothing. So one row per field
+  states the answer and its evidence, and selecting a row shows that field's full
+  working below the table — the same the ``--debug`` flag prints.
+- **Without them** the routing *is* the BM25 ranking, rank 1 is the answer by default,
+  and the scores are the thing to read. So the ranked candidate rows stay.
 """
 
 from __future__ import annotations
@@ -25,7 +35,11 @@ _BUCKET_HELP = {
 }
 _ASSURANCE_MARK = {"high": "🟢 high", "medium": "🟡 medium", "low": "🟠 low"}
 
-CANDIDATE_VIEW, FIELD_VIEW = "Candidates", "Fields"
+ANSWER_VIEW, CANDIDATE_VIEW, FIELD_VIEW = "Answers", "Candidates", "Fields"
+
+# One row per field, for a judged plan: what answers it, on what evidence, why, and what
+# the router flagged about the answer. The full working is a row's detail panel.
+ANSWER_COLUMNS = ("Assurance", "Answer from", "Evidence", "Why", "Checks")
 
 # One row per ranked candidate — the artifact as the router emits it. Ordered by what
 # each column describes: the rank and strength of the match, then what was matched and
@@ -36,7 +50,7 @@ CANDIDATE_COLUMNS = ("Score", "Kind", "Source", "Query", "Hit")
 # one candidate — printed once per group so the block reads as a block.
 _FIELD_LEVEL = ("Field", "Bucket", "Query")
 # One row per field — the summary, where "top candidate" is explicitly the top of a set.
-FIELD_COLUMNS = ("Assurance", "Candidates", "Top candidate", "Extractor", "Query")
+FIELD_COLUMNS = ("Assurance", "Candidates", "Top candidate", "Query")
 
 _ROUTING_COLUMNS = {
     "Field": st.column_config.TextColumn(pinned=True),
@@ -69,6 +83,24 @@ _ROUTING_COLUMNS = {
     ),
     "Candidates": st.column_config.NumberColumn(
         width="small", help="How many sources the router proposed for this field.",
+    ),
+    "Answer from": st.column_config.TextColumn(
+        width="medium",
+        help="Where the value comes from: a column, a tool with the table and columns "
+             "it was bound to, or a document citation.",
+    ),
+    "Evidence": st.column_config.TextColumn(
+        width="large",
+        help="The sentence quoted from the document, the column's resolved meaning, or "
+             "what the tool computes.",
+    ),
+    "Why": st.column_config.TextColumn(
+        width="large", help="The judge's own reason — including why a field is unanswered.",
+    ),
+    "Checks": st.column_config.TextColumn(
+        width="medium",
+        help="What the router flagged: a type or unit that does not fit, a column whose "
+             "values vary, a quote it could not locate, a column and a tool disagreeing.",
     ),
 }
 
@@ -126,33 +158,47 @@ def _render_coverage(coverage: dict[str, Any], result: Any, llm_calls: int) -> N
 
 
 def _render_routings(field_plan: Any, key: str) -> None:
-    """The router's output, either summarised per field or in full per candidate.
+    """The router's output, in the shape of whatever decided it.
 
-    The router proposes a *ranked set* per field and the executor picks from it, so a
-    single "source" column would assert a decision nobody has made. The candidate view
-    is the artifact as it stands; the field view is the summary over it.
+    A judged plan reads one row per field: the judges chose, so the row states the
+    answer, and a selected row opens that field's working. An unjudged plan is a ranked
+    set per field which the executor picks from, so a single "source" column would
+    assert a decision nobody has made — its rows stay per candidate, with the scores.
     """
+    judged = getattr(field_plan, "judged", False)
     buckets = sorted({r.bucket for r in field_plan.routings.values()})
     with st.container(border=True):
-        view_col, search_col, bucket_col = st.columns([1.4, 2, 2], gap="medium")
-        view = view_col.segmented_control(
-            "View", [CANDIDATE_VIEW, FIELD_VIEW], default=CANDIDATE_VIEW,
-            key=f"{key}.view",
-            help="Candidates shows every ranked proposal; fields summarises one row "
-                 "each.",
-        ) or CANDIDATE_VIEW
+        if judged:
+            view = ANSWER_VIEW
+            search_col, bucket_col = st.columns([2, 2], gap="medium")
+        else:
+            view_col, search_col, bucket_col = st.columns([1.4, 2, 2], gap="medium")
+            view = view_col.segmented_control(
+                "View", [CANDIDATE_VIEW, FIELD_VIEW], default=CANDIDATE_VIEW,
+                key=f"{key}.view",
+                help="Candidates shows every ranked proposal; fields summarises one row "
+                     "each.",
+            ) or CANDIDATE_VIEW
         query = search_col.text_input(
-            "Search fields", placeholder="field path, query, or hit", key=f"{key}.query"
+            "Search fields", placeholder="field path, query, or evidence", key=f"{key}.query"
         ).strip().lower()
         chosen = bucket_col.multiselect(
             "Buckets", buckets, default=[], key=f"{key}.buckets",
             placeholder="all buckets",
             help=" · ".join(f"{b}: {_BUCKET_HELP[b]}" for b in buckets if b in _BUCKET_HELP),
         )
-        optional = CANDIDATE_COLUMNS if view == CANDIDATE_VIEW else FIELD_COLUMNS
+        optional = {
+            ANSWER_VIEW: ANSWER_COLUMNS,
+            CANDIDATE_VIEW: CANDIDATE_COLUMNS,
+            FIELD_VIEW: FIELD_COLUMNS,
+        }[view]
         shown = column_chooser(optional, key=f"{key}.{view}")
 
-    build = _candidate_rows if view == CANDIDATE_VIEW else _field_rows
+    build = {
+        ANSWER_VIEW: _answer_rows,
+        CANDIDATE_VIEW: _candidate_rows,
+        FIELD_VIEW: _field_rows,
+    }[view]
     rows = [
         row
         for path, routing in field_plan.routings.items()
@@ -177,14 +223,123 @@ def _render_routings(field_plan: Any, key: str) -> None:
         if view == CANDIDATE_VIEW
         else f"{len(visible)} fields."
     )
-    st.dataframe(
+    table = st.dataframe(
         visible,
         width="stretch",
         hide_index=True,
         key=f"{key}.routing_table.{view}",
         height=min(600, 40 + 35 * len(visible)),
         column_config=_ROUTING_COLUMNS,
+        on_select="rerun" if view == ANSWER_VIEW else "ignore",
+        selection_mode="single-row",
     )
+    if view == ANSWER_VIEW:
+        selected = getattr(table, "selection", {}).get("rows", [])
+        if not selected:
+            st.caption("Select a field for the working behind its answer.")
+        for index in selected:
+            path = visible[index]["Field"]
+            with st.container(border=True):
+                st.markdown(f"**{path}**")
+                _render_working(path, field_plan.routings[path])
+
+
+def _answer_rows(path: str, routing: Any, shown: list[str]) -> list[dict[str, Any]]:
+    """One row per field: the answer a judge chose, and what to distrust about it."""
+    available = {
+        "Assurance": _ASSURANCE_MARK.get(routing.assurance, ""),
+        "Answer from": _answer_of(routing),
+        "Evidence": _evidence_of(routing),
+        "Why": routing.judge_note or routing.tool_note or "",
+        "Checks": " · ".join(_checks(routing)),
+    }
+    row: dict[str, Any] = {"Field": path, "Bucket": routing.bucket}
+    row.update({name: available[name] for name in ANSWER_COLUMNS if name in shown})
+    row["_search"] = (
+        f"{path} {routing.query} {available['Answer from']} {available['Evidence']}"
+    ).lower()
+    return [row]
+
+
+def _more(count: int, unit: str) -> str:
+    """`` (+2 more tables)``, or nothing when there is only the one."""
+    return f" (+{count} more {unit}{'s' if count > 1 else ''})" if count > 0 else ""
+
+
+def _answer_of(routing: Any) -> str:
+    """Where this field's value comes from, in the terms of its bucket."""
+    if not routing.candidates:
+        return ""
+    top = routing.candidates[0]
+    if top.kind == "tool":
+        run = routing.tool_arguments[0] if routing.tool_arguments else {}
+        columns = ", ".join(f"{name}={value}" for name, value in run.items()
+                            if name != "resource")
+        where = run.get("resource") or "the whole context"
+        return (f"{top.locator} on {where}" + (f" ({columns})" if columns else "")
+                + _more(len(routing.tool_arguments) - 1, "table"))
+    if top.kind == "quoted_span":
+        located = [c for c in routing.citations if c]
+        head = located[0] if located else f"{top.resource} (quote not located)"
+        return head + _more(len(located) - 1, "citation")
+    columns = [c for c in routing.candidates if c.kind == "computed_column"]
+    return _locate(top) + _more(len(columns) - 1, "table")
+
+
+def _evidence_of(routing: Any) -> str:
+    """What the answer rests on: the quote, the column's meaning, or the computation."""
+    if not routing.candidates:
+        return ""
+    if routing.judge_quotes:
+        return routing.judge_quotes[0] + _more(len(routing.judge_quotes) - 1, "quote")
+    return routing.candidates[0].snippet
+
+
+def _checks(routing: Any) -> list[str]:
+    """What the router flagged about this answer — every reason to look closer."""
+    notes = [f"does not fit: {reason}" for reason in routing.mismatches]
+    notes += [f"varies: {note}" for note in routing.varies]
+    if routing.judge_grounded is False:
+        notes.append("quote not located")
+    kinds = {c.kind for c in routing.candidates}
+    if {"tool", "computed_column"} <= kinds:
+        notes.append("column and tool disagree")
+    if routing.tool_note and "not run:" in routing.tool_note:
+        notes.append("tool dropped")
+    return notes
+
+
+def _render_working(path: str, routing: Any) -> None:
+    """One field's full working, below the table — what ``--debug`` prints, rendered.
+
+    Everything here is read off the routing artifact, which records each step already;
+    an intermediate only a debug flag can show is one the artifact should have carried.
+    """
+    st.caption(f"{routing.query} · assurance {routing.assurance} · {routing.status}")
+    if routing.tool_choice:
+        st.markdown(f"**Tool matcher** · `{routing.tool_choice}` — {routing.tool_note or ''}")
+    for arguments in routing.tool_arguments:
+        bound = ", ".join(f"`{name}` = `{value}`" for name, value in arguments.items())
+        st.markdown(f"**Runs with** {bound or 'the whole context'}")
+    if routing.judge_note:
+        st.markdown(f"**Judge** · `{routing.judge_choice or 'none'}` — {routing.judge_note}")
+    for quote, citation in zip(routing.judge_quotes, routing.citations):
+        st.markdown(f"> {quote}")
+        st.caption(f"`{citation}`" if citation else "not located in the passage")
+    for reason in routing.mismatches:
+        st.warning(f"does not fit — {reason}", icon="⚠️")
+    for note in routing.varies:
+        st.caption(f"varies — {note}")
+    if routing.candidates:
+        st.dataframe(
+            [
+                {"#": rank, "Kind": c.kind, "Source": _locate(c), "Hit": c.snippet}
+                for rank, c in enumerate(routing.candidates, start=1)
+            ],
+            width="stretch", hide_index=True, column_config=_ROUTING_COLUMNS,
+        )
+    else:
+        st.caption("No candidates — nothing the judges saw answers this field.")
 
 
 def _blank_repeats(rows: list[dict[str, Any]]) -> None:
@@ -241,7 +396,6 @@ def _field_rows(path: str, routing: Any, shown: list[str]) -> list[dict[str, Any
         "Assurance": _ASSURANCE_MARK.get(routing.assurance, ""),
         "Candidates": len(routing.candidates),
         "Top candidate": _source_of(routing),
-        "Extractor": routing.extractor_role or "",
         "Query": routing.query,
     }
     row: dict[str, Any] = {"Field": path, "Bucket": routing.bucket}

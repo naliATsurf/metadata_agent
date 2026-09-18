@@ -8,6 +8,10 @@ records findings from an investigation that changed no code.
 ## 2026-09
 
 - -
+  **[2026-09-18 — The router page's table follows what decided the routing](2026-09-18_router-answers-table.change.md)**
+  — a judged plan reads one row per field: the answer, its evidence, the judge's reason and
+  what to check, with each field's working an expander below. Unjudged keeps the scores.
+- -
   **[2026-09-17 — The catalog resolver reads every passage of a document with few enough](2026-09-17_catalog-read-all.change.md)**
   — the size rule gives way to the router's passage-count rule, default 1: reading every
   passage of `readme_long` added no coverage and made several reads' units worse.
@@ -131,6 +135,7 @@ records findings from an investigation that changed no code.
 :maxdepth: 1
 :hidden:
 
+2026-09-18_router-answers-table.change
 2026-09-17_catalog-read-all.change
 2026-09-17_document-answers.change
 2026-09-17_tool-column-split.change
