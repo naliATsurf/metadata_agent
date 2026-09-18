@@ -21,14 +21,10 @@ from eval.labels import (
 )
 from eval.score import report
 from eval.sheet import write_sheet, write_sources
-from examples.field_router_plan import (
-    DEFAULT_STANDARD,
-    LLM_MODULE,
-    build_judges,
-    build_plan,
-)
-from examples.resolve_catalog import DEFAULT_BUNDLE, resolve
-from src.config import PROVIDER_CONFIGS, llm_settings
+from src.cli.options import JUDGE_BACKING, add_judge_options, add_model_options, judges_from_args
+from src.pipelines.catalog import DEFAULT_BUNDLE, resolve
+from src.pipelines.models import JUDGE_MODULE
+from src.pipelines.routing import DEFAULT_STANDARD, route
 from src.context import create_context
 from src.router.bundle import NONE, discover_bundle, select
 from src.router.route import _passage_reader
@@ -64,35 +60,22 @@ def build_parser() -> argparse.ArgumentParser:
                         help="decide each field with the LLM judges (tool matcher, column "
                              "matcher, passage reader)")
 
-    configured = llm_settings(LLM_MODULE)
     model = ap.add_argument_group("LLM candidate judge model", "Backing --llm-candidate-judge.")
-    model.add_argument("--provider", choices=list(PROVIDER_CONFIGS),
-                       default=configured.provider)
-    model.add_argument("--model", default=configured.model)
-    model.add_argument("--temperature", type=float, default=configured.temperature)
-    model.add_argument("--judge-workers", type=int, default=1, metavar="N",
-                       help="issue the judge's calls N at a time")
-    model.add_argument("--no-judge-batch", action="store_true",
-                       help="ask about one field per call instead of many — the "
-                            "comparison worth running against a labeled sheet")
-    model.add_argument("--refresh-tool-cache", action="store_true",
-                       help="ask the tool matcher again instead of reusing its saved answers")
+    add_model_options(model, JUDGE_MODULE, backing=JUDGE_BACKING)
+    add_judge_options(model)
     return ap
 
 
 def run(args: argparse.Namespace, console: Console) -> Path:
     bundle = discover_bundle(args.bundle)
-    judges = build_judges(args)
+    judges = judges_from_args(args)
     resolved = resolve(
         bundle,
         select(bundle.codebooks, args.dictionary),
         select(bundle.documents, args.doc),
     )
-    field_plan, _ = build_plan(
-        resolved,
-        args.standard,
-        candidates=args.candidates,
-        judges=judges,
+    field_plan = route(
+        resolved, args.standard, candidates=args.candidates, judges=judges
     )
 
     out = args.out or (DATA / f"{args.standard}__{args.bundle.name}")

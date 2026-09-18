@@ -12,7 +12,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from rich.console import Console
 
-from examples import field_router_plan, resolve_catalog
+from src.cli import resolve as resolve_catalog
+from src.cli import route as field_router_plan
 from src.router import Catalog, ResolvedBundle
 from src.tools.base import clear_registry
 
@@ -103,7 +104,7 @@ class RouterConsumesResolutionTest(unittest.TestCase):
     def test_a_missing_resolution_says_how_to_make_one(self):
         with self.assertRaises(SystemExit) as caught:
             field_router_plan.run(_router_args(Path("/nonexistent/catalog.json")), _quiet())
-        self.assertIn("resolve_catalog.py --out", str(caught.exception))
+        self.assertIn("metadata-agent resolve --out", str(caught.exception))
 
 
 if __name__ == "__main__":

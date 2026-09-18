@@ -18,7 +18,8 @@ from demo.components.bundle_controls import render_tree
 from demo.components.example_runner import run_example
 from demo.components.router_view import render_router_view
 from demo.pages import catalog_resolver
-from examples import field_router_plan
+from src.cli import route as route_command
+from src.pipelines.field_driven import FieldDrivenRun
 from src.router import NONE, ResolvedBundle
 
 
@@ -41,9 +42,9 @@ def main() -> None:
     render_tree(resolved.root)
     settings = pipeline_settings.current()
     run_example(
-        field_router_plan,
+        route_command,
         key=KEY,
-        script="examples/field_router_plan.py",
+        script="metadata-agent route",
         title=TITLE,
         intro=(
             "Fill a metadata standard field by field: route each schema field of the "
@@ -115,7 +116,7 @@ def _document_picker(resolved: ResolvedBundle):
 
 
 def _render(
-    result: field_router_plan.RouterResult, current: ResolvedBundle, llm_calls: int
+    result: FieldDrivenRun, current: ResolvedBundle, llm_calls: int
 ) -> None:
     if result.resolved is not current:
         st.warning(

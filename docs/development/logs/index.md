@@ -8,6 +8,11 @@ records findings from an investigation that changed no code.
 ## 2026-09
 
 - -
+  **[2026-09-18 — Pipelines and the command line move into the library](2026-09-18_pipelines-and-cli.change.md)**
+  — `src/pipelines/` holds each stage separately and the composed path; `src/cli/` ships
+  `metadata-agent resolve|route|generate`; a quickstart and a four-page tutorial series
+  document both, and the two examples are rewritten to show what a flag cannot.
+- -
   **[2026-09-18 — Every single-call LLM role is registered in one place, and every prompt is published](2026-09-18_llm-role-registry.change.md)**
   — `src/llm_roles.py` names the five roles with their model setting, referee and prompt;
   the generated prompt reference publishes each one.
@@ -139,6 +144,7 @@ records findings from an investigation that changed no code.
 :maxdepth: 1
 :hidden:
 
+2026-09-18_pipelines-and-cli.change
 2026-09-18_llm-role-registry.change
 2026-09-18_router-answers-table.change
 2026-09-17_catalog-read-all.change

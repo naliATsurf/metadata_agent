@@ -120,12 +120,12 @@ def command_line(
     Args:
         parser: The parser the arguments came from.
         args: The collected argument values.
-        script: Path of the script, e.g. ``examples/resolve_catalog.py``.
+        script: How the command is invoked, e.g. ``metadata-agent resolve``.
 
     Returns:
         A single shell command string.
     """
-    parts = ["python", script]
+    parts = script.split()
     for action in parser._actions:
         if isinstance(action, _IGNORED_ACTIONS):
             continue

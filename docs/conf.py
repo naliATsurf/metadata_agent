@@ -24,6 +24,7 @@ extensions = [
     "myst_parser",
     "sphinx_copybutton",
     "promptdocs",  # generates prompts.md from the live prompt templates
+    "clidocs",     # generates cli-reference.md from the live CLI parsers
 ]
 
 autoapi_type = "python"
@@ -38,6 +39,11 @@ autoapi_options = [
 
 # Generate `#slug` anchors for h1-h3 so pages can link to their own sections.
 myst_heading_anchors = 3
+
+# The flowcharts in the notes are ```mermaid fences: GitHub and the IDE render them, and
+# Sphinx has no lexer for them, so it would warn on every build. The block still shows,
+# as plain text.
+suppress_warnings = ["misc.highlighting_failure"]
 
 # The prompt reference renders the templates' own ```json examples, which use
 # ellipses and so aren't valid JSON. Pygments falls back to relaxed lexing and

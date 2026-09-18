@@ -5,8 +5,11 @@
 
 development/index
 philosophy
+quickstart
+tutorials/index
 tutorial
 examples
+cli-reference
 demo
 architecture
 modules

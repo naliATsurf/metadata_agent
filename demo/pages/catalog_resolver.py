@@ -25,7 +25,7 @@ from demo.components.bundle_controls import (
 )
 from demo.components.catalog_view import render_catalog_view
 from demo.components.example_runner import run_example
-from examples import resolve_catalog
+from src.cli import resolve as resolve_command
 from src.router import ResolvedBundle
 
 
@@ -54,9 +54,9 @@ def main() -> None:
     render_tree(Path(selected_bundle(KEY)))
     settings = pipeline_settings.current()
     run_example(
-        resolve_catalog,
+        resolve_command,
         key=KEY,
-        script="examples/resolve_catalog.py",
+        script="metadata-agent resolve",
         title="Catalog resolver",
         intro=(
             "Resolve a bundle's columns into described columns, and show the "
@@ -92,7 +92,7 @@ def _render(resolved: ResolvedBundle, llm_calls: int) -> None:
         mime="application/json",
         key=f"{KEY}.download_resolution",
         help="The catalog and the files it was resolved from — what "
-             "examples/field_router_plan.py --catalog reads.",
+             "`metadata-agent route --catalog` reads.",
     )
 
 

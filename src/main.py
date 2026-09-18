@@ -30,11 +30,14 @@ from src.context import create_context
 from src.tui import run_tui  # Uncomment if TUI is implemented
 
 
-def main():
-    """
-    Main function to run the metadata agent.
+def build_parser():
+    """The command's argument surface, built separately so a UI or the docs can read it.
+
+    Every other command in :mod:`src.cli` exposes its parser this way; the generated CLI
+    reference is built from them, so a flag added here documents itself.
     """
     parser = argparse.ArgumentParser(
+        prog="metadata-agent generate",
         description="Run metadata extraction using multi-agent orchestration."
     )
     
@@ -104,7 +107,12 @@ def main():
         help="Logging level."
     )
     
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv=None):
+    """Run metadata extraction over the source named on the command line."""
+    args = build_parser().parse_args(argv)
 
     if args.tui:
         run_tui()

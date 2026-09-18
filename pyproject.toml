@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.scripts]
-metadata-agent = "src.main:main"
+metadata-agent = "src.cli:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

@@ -117,7 +117,7 @@ class PipelineSettings:
         return env
 
     def catalog_arguments(self) -> dict[str, Any]:
-        """Starting values for ``examples/resolve_catalog.py``'s form, by ``dest``."""
+        """Starting values for the ``resolve`` command's form, by ``dest``."""
         model = self.model_for("CATALOG_RESOLVER")
         return {
             "llm_reader": self.catalog_prose_tier == "llm",
@@ -129,7 +129,7 @@ class PipelineSettings:
         }
 
     def router_arguments(self) -> dict[str, Any]:
-        """Starting values for ``examples/field_router_plan.py``'s form, by ``dest``.
+        """Starting values for the ``route`` command's form, by ``dest``.
 
         The router routes a catalog the resolver page already resolved, so it takes
         only its own settings: the candidate budget, and the candidate judge and its

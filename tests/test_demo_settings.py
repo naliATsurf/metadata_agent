@@ -19,7 +19,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from demo.components.arg_form import Defaults
 from demo.settings import PipelineSettings, defaults
 from demo.workflows.metadata_generation import _configured
-from examples import field_router_plan, resolve_catalog
+from src.cli import resolve as resolve_catalog
+from src.cli import route as field_router_plan
 from src.config import LLMSettings, llm_settings, player_max_tool_iterations
 
 
