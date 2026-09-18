@@ -1,7 +1,12 @@
 """Sphinx extension: generate the prompt reference page from the live sources.
 
-Prompt text in this repo lives in three places, and this extension pulls all
-three into ``docs/prompts.md`` at build time so the page cannot drift:
+Prompt text in this repo lives in four places, and this extension pulls all
+four into ``docs/prompts.md`` at build time so the page cannot drift:
+
+``src/llm_roles.py``
+    The single-call roles — one prompt, no tools, an answer code referees.
+    The registry holds each role's question, model settings and referee; the
+    prompt itself is imported live from the module that sends it.
 
 ``src/orchestrator/prompts.py``
     Zero-argument ``get_*_prompt`` factories returning ``ChatPromptTemplate``.
@@ -19,6 +24,7 @@ from __future__ import annotations
 import ast
 import inspect
 from pathlib import Path
+from string import Formatter
 
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -172,6 +178,11 @@ def _placeholders(text: str) -> list[str]:
     return sorted(set(found))
 
 
+def _format_fields(template: str) -> list[str]:
+    """The ``str.format`` fields of a template — not the JSON braces it escapes."""
+    return sorted({name for _, name, _, _ in Formatter().parse(template) if name})
+
+
 def _player_sections() -> list[str]:
     """Extract every inline prompt in ``player.py`` via static analysis."""
     tree = ast.parse(PLAYER_SOURCE.read_text())
@@ -236,7 +247,41 @@ def _player_sections() -> list[str]:
 # role personas
 # --------------------------------------------------------------------------
 
-def _role_section() -> str:
+def _single_call_sections() -> list[str]:
+    """Document every role in ``src/llm_roles.py``: what it decides, and its prompt."""
+    from src.llm_roles import ROLES
+
+    out = [
+        "## Single-call roles",
+        "",
+        "One call, a fixed prompt, no tools, and an answer code checks before anything "
+        "uses it. Registered in `src/llm_roles.py`, which is also where each role's "
+        "model settings and referee are stated.",
+        "",
+        "| Role | Layer | Decides | Model settings | Implemented by |",
+        "|---|---|---|---|---|",
+    ]
+    out += [
+        f"| `{r.key}` | {r.layer} | {r.decides} | `LLM_*_{r.module}` | "
+        f"`{r.implemented_by}` |"
+        for r in ROLES
+    ]
+    out.append("")
+    for role in ROLES:
+        # The templates keep the ``{{``/``}}`` escaping ``str.format`` needs; undo it
+        # so the page shows what the model actually receives.
+        text = role.prompt.replace("{{", "{").replace("}}", "}")
+        out.append(_section(
+            role.key,
+            [("prompt", text)],
+            subtitle=f"**{role.title}** — {role.decides}",
+            note=f"**Calls:** {role.calls}\n\n**Checked:** {role.checked}",
+            variables=_format_fields(role.prompt),
+        ))
+    return out
+
+
+def _persona_section() -> str:
     """Document the personas substituted into every ``{self.role_prompt}``."""
     from src.players.configs import PLAYER_CONFIGS
 
@@ -293,8 +338,9 @@ def generate(app=None):
         "# Prompt reference",
         "",
         "*Generated at build time from `src/orchestrator/prompts.py`, "
-        "`src/players/player.py`, and `src/players/configs.py`. Do not edit "
-        "this page by hand -- edit the prompts and rebuild.*",
+        "`src/players/player.py`, `src/players/configs.py` and the roles "
+        "registered in `src/llm_roles.py`. Do not edit this page by hand -- edit "
+        "the prompts and rebuild.*",
         "",
         "## Orchestrator prompts",
         "",
@@ -313,7 +359,8 @@ def generate(app=None):
         "",
     ]
     page += _player_sections()
-    page.append(_role_section())
+    page.append(_persona_section())
+    page += _single_call_sections()
 
     OUTPUT.write_text("\n".join(page))
 

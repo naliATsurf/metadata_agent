@@ -59,7 +59,7 @@ class ToolMatcher:
         raise NotImplementedError
 
 
-_INSTRUCTION = (
+PROMPT = (
     "You decide, for each metadata field, whether its value is computed by one of these "
     "tools from a dataset's tables.\n\n"
     "A tool answers a field only if the tool's result *is* the value the field asks for: "
@@ -128,7 +128,7 @@ class LLMToolMatcher(ToolMatcher):
     def _call(
         self, fields: Sequence[FieldSpec], cards: Sequence[Dict[str, Any]]
     ) -> Dict[str, Verdict]:
-        prompt = _INSTRUCTION.format(
+        prompt = PROMPT.format(
             cards=json.dumps(list(cards), indent=2, default=str), fields=field_lines(fields)
         )
         data = self._answer(prompt)

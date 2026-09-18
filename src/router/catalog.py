@@ -725,7 +725,7 @@ class CachedProseReader(ProseReader):
 
 # The extraction contract handed to the model: define only what the passage states,
 # omit the rest (abstention is first-class), return strict JSON we can parse.
-_LLM_READER_INSTRUCTION = (
+PROSE_READER_PROMPT = (
     "You extract a data dictionary from documentation. You are given a PASSAGE and a "
     "list of COLUMN names from a dataset's tables. For every column the passage "
     "*explicitly* describes, return its meaning, unit, and the supporting sentence; omit "
@@ -785,7 +785,7 @@ class LLMProseReader(ProseReader):
             return {}
         # Present trimmed names to the model; map its answers back to the true headers.
         by_norm = {_match_key(name): name for name, _ in columns}
-        prompt = _LLM_READER_INSTRUCTION.format(columns=json.dumps(sorted(by_norm)), passage=chunk)
+        prompt = PROSE_READER_PROMPT.format(columns=json.dumps(sorted(by_norm)), passage=chunk)
         try:
             data = _extract_json_object(self._invoke(prompt))
         except Exception:
@@ -1547,7 +1547,7 @@ class ClaimComparer:
 
 # The contract handed to the model: same meaning only, no partial credit, and an
 # explicit partition we can check.
-_LLM_COMPARER_INSTRUCTION = (
+CLAIM_COMPARER_PROMPT = (
     "You compare what different sources say a dataset column means. Each COLUMN below "
     "has numbered CLAIMS: a description, units, and the text the claim was taken from.\n"
     "Group the claims that state the same meaning: the same quantity or attribute, in "
@@ -1616,7 +1616,7 @@ class LLMClaimComparer(ClaimComparer):
             }
             for i, (column, claims) in enumerate(requests, 1)
         }
-        prompt = _LLM_COMPARER_INSTRUCTION.format(
+        prompt = CLAIM_COMPARER_PROMPT.format(
             columns=json.dumps(payload, indent=1, ensure_ascii=False)
         )
         try:

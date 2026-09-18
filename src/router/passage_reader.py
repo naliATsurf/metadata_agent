@@ -76,7 +76,7 @@ class PassageReader:
         return [self.read(fields=fields, passage=passage) for fields, passage in requests]
 
 
-_INSTRUCTION = (
+PROMPT = (
     "You read a passage from a dataset's documentation and decide, for each metadata "
     "field, whether the passage states the value that field asks for.\n\n"
     "A field is stated only if the passage gives *the value the field asks for*. "
@@ -126,7 +126,7 @@ class LLMPassageReader(PassageReader):
         """One call: these fields against this passage."""
         if not fields:
             return {}
-        prompt = _INSTRUCTION.format(
+        prompt = PROMPT.format(
             ref=passage["ref"], text=passage.get("text", ""), fields=field_lines(fields)
         )
         if prompt not in self._cache:

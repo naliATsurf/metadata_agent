@@ -33,6 +33,7 @@ from src.config import (
     player_max_tool_iterations,
     player_tool_execution_mode,
 )
+from src import llm_roles
 from src import thresholds as threshold_registry
 from src.thresholds import Thresholds, env_name
 from src.topology import EXECUTION_TOPOLOGIES
@@ -333,9 +334,13 @@ def _render_model(
     configured = llm_settings(module)
     providers = list(PROVIDER_CONFIGS)
     st.markdown(f"**{spec.label} model**")
+    # Naming the roles is what makes one model setting legible: a module can drive
+    # several single-call roles, each with its own prompt (see src/llm_roles.py).
+    driven = ", ".join(role.title for role in llm_roles.roles(module))
     st.caption(
         f"{spec.description} Same as `LLM_MODEL_{module}` (and its provider and "
         "temperature) in `.env`; left alone, it follows `LLM_PROVIDER` / `LLM_MODEL`."
+        + (f" Runs: {driven}." if driven else "")
         + (f" {off_note}" if disabled and off_note else "")
     )
     provider_column, model_column, temperature_column = st.columns(

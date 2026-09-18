@@ -211,7 +211,7 @@ class ColumnMatcher:
         return verdicts
 
 
-_INSTRUCTION = (
+PROMPT = (
     "You match metadata fields to the data columns that hold them.\n\n"
     "A column answers a field only if it holds *the quantity the field asks for*. "
     "Sharing a word is not enough. Check the units, the value range and the distinct "
@@ -282,7 +282,7 @@ class LLMColumnMatcher(ColumnMatcher):
         if not cards:
             return {f.path: Verdict(choice=None, because="no catalog to match against")
                     for f in fields}
-        prompt = _INSTRUCTION.format(
+        prompt = PROMPT.format(
             cards=json.dumps(list(cards), indent=2, default=str),
             fields=field_lines(fields),
         )
