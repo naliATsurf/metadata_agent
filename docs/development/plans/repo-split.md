@@ -5,7 +5,7 @@ the legacy half there.
 
 Status legend: ✅ done · 🟡 partial · 🔲 not started · ⛔ blocked on a decision.
 
-**Status: ⛔ waiting for decisions 2–5** (see the end). The name is decided.
+**Status: 🟡 in progress.** Every decision is made (see the end). Step 1 is done except the push to the fork; steps 2–4 talk to GitHub, and you run them.
 
 ## Why
 
@@ -170,7 +170,7 @@ One commit each, with `make ci` passing after each.
 - Tell Zehao.
 - Make the repository public once decision 4 is settled, if you want it public.
 
-## Decisions for you ⛔
+## Decisions ✅
 
 1. ✅ **Name.** The repository and the PyPI name are `metadata-from-sources`; the
    import package and the command are `metasource` (`metasource extract --bundle …`),
@@ -179,10 +179,12 @@ One commit each, with `make ci` passing after each.
    (usually means reading embedded file metadata, such as EXIF), `sourced-metadata`
    and `honest-metadata` (say nothing about extracting), `metasrc` and `mfs` (taken on
    PyPI).
-2. **Owner.** Your account (`naliATsurf`) or an organization.
-3. **Visibility.** *Recommendation:* private until decision 4.
-4. **Data in git.** The sample bundle and the eval labels were kept out of git on
-   purpose. If the data may be shared, commit at least `eval/data`, since ground-truth
-   labels belong under version control. If not, keep them local and backed up.
-5. **When.** *Recommendation:* before the extraction work starts, so that work happens
-   in the new repository and nothing has to keep the legacy path running.
+2. ✅ **Owner.** Your account, `naliATsurf`.
+3. ✅ **Visibility.** Private. Revisit decision 4 before making it public.
+4. ✅ **Data in git.** Kept local for now: the sample bundle and the eval labels are
+   copied into the new folder (step 5) but not committed. Git history is permanent, so
+   this is decided before anything data-related is committed. If the data may be
+   shared later, commit at least `eval/data`, since ground-truth labels belong under
+   version control.
+5. ✅ **When.** Now, before the extraction work starts, so that work happens in the new
+   repository and nothing has to keep the legacy path running.
