@@ -30,8 +30,13 @@ to the new repository.
   on pushes to `main`, and it has never run on this branch. Locally 409 tests pass,
   but ruff reports 2 errors, and in a fresh clone 2 tests in `tests/test_examples.py`
   fail because they need the ignored TRADAT031 bundle.
-- **Nothing is lost by pushing only `provenance`.** It already contains `main`,
-  `free-text`, `mlflow` and `tracking`.
+- **Pushing only `provenance` carries the full history**: 219 commits back to Zehao's
+  `initial commit` of 2026-01-06, with the same hashes, authors and dates. It already
+  contains your `main`, `free-text`, `mlflow` and `tracking`. Not carried: upstream's
+  `croissant` and `tui` branches (9 commits, never merged into yours; they stay in
+  `com3dian/metadata_agent`), a local stash from 2026-05-01 (stashes are never
+  pushed), and anything on GitHub rather than in git (issues, PR discussions,
+  releases, Actions runs).
 - **Nothing here changes this repository.** The steps add a new GitHub repository and
   a new folder. If something goes wrong, delete both; the fork stays as it is.
 
