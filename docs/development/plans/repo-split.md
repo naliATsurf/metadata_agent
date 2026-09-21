@@ -31,7 +31,7 @@ to the new repository.
   branch. Ruff reported 2 errors; in a clean clone, 2 tests in
   `tests/test_examples.py` needed the ignored TRADAT031 bundle, and the two app-page
   tests needed `streamlit`, which CI did not install.
-- **Pushing only `provenance` carries the full history**: 219 commits back to Zehao's
+- **Pushing only `provenance` carries the full history**: every commit back to Zehao's
   `initial commit` of 2026-01-06, with the same hashes, authors and dates. It already
   contains your `main`, `free-text`, `mlflow` and `tracking`. Not carried: upstream's
   `croissant` and `tui` branches (9 commits, never merged into yours; they stay in
@@ -103,12 +103,13 @@ what. Tags are not pushed: `v0.1.0` is the old project's release and stays behin
 ```bash
 git clone "git@github.com:$OWNER/$NAME.git" "$NEW"
 cd "$NEW"
-uv sync
+make ci-install
 make ci
 ```
 
-`make ci` should pass here before anything is copied in, since this is what GitHub
-runs.
+`make ci-install` installs what CI installs, so `make ci` here is what GitHub runs,
+before anything is copied in. For day-to-day work, add the groups you use, for
+example `uv sync --group demo --group docs`.
 
 ### 5. Copy the local-only files 🔲
 
