@@ -17,6 +17,9 @@ started · ⛔ blocked on a decision) so it doubles as a progress view.
 - **[Field-driven routing](field-router.md)** — a planner that fills a metadata
   standard field by field, routing each field to the source that can answer it.
   Builds on the capability split above.
+- **[Field-driven extraction](field-driven-extraction.md)** — the stage after
+  routing: a record in which every value cites its evidence, built without the
+  legacy executor. Replaces the compile step. Waiting for approval.
 
 ```{toctree}
 :maxdepth: 1
@@ -26,4 +29,5 @@ free-text
 free-text-delivery
 multi-modality
 field-router
+field-driven-extraction
 ```
