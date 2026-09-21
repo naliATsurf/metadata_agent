@@ -26,10 +26,11 @@ to the new repository.
   `logs/`, `.env`, `eval/data`. The sample bundle (TRADAT031) and the hand-written
   eval labels are among them. `CLAUDE.md`, `.claude/` and `.python-version` are also
   git-ignored and not in that list.
-- **CI would fail on the first push.** CI runs `make ci` (ruff, compileall, unittest)
-  on pushes to `main`, and it has never run on this branch. Locally 409 tests pass,
-  but ruff reports 2 errors, and in a fresh clone 2 tests in `tests/test_examples.py`
-  fail because they need the ignored TRADAT031 bundle.
+- **CI would have failed on the first push** (fixed in step 1). CI runs `make ci`
+  (ruff, compileall, unittest) on pushes to `main`, and it had never run on this
+  branch. Ruff reported 2 errors; in a clean clone, 2 tests in
+  `tests/test_examples.py` needed the ignored TRADAT031 bundle, and the two app-page
+  tests needed `streamlit`, which CI did not install.
 - **Pushing only `provenance` carries the full history**: 219 commits back to Zehao's
   `initial commit` of 2026-01-06, with the same hashes, authors and dates. It already
   contains your `main`, `free-text`, `mlflow` and `tracking`. Not carried: upstream's
@@ -55,21 +56,24 @@ NEW=~/codes/$NAME
 
 ### 1. Prepare the branch, in this repository
 
-- ✅ Commit the extraction plan (`fe29970`).
+- ✅ Commit the plans (`fe29970`, `8b2db43`, `a7d4371`).
 - 🟡 Back up the local-only files. `eval/data` was added to `.data-required` in
   `fe29970`; check that your backup has run since.
-- 🔲 Fix the 2 lint errors: the unused `Tuple` import in `eval/labels.py:15` and the
-  import below code in `tests/test_catalog.py:35`.
-- 🔲 Make the two example tests pass without the sample bundle: point them at
-  `data/tests/router_test`, or skip them when the bundle is missing.
-- 🔲 Check the way GitHub will, in a fresh clone, then push:
+- ✅ Make CI pass in a clean clone (`0ecf511`): fix the 2 lint errors; skip the two
+  example tests when the sample bundle is missing, and run `describe_columns` on
+  `data/tests/router_test` as well; install the `demo` dependency group in CI, since
+  the app-page tests need `streamlit`.
+- ✅ Check the way GitHub will. In a clean copy, with `uv sync --locked
+  --no-default-groups --group demo`, `make ci` passes: 410 tests, 5 skipped (the ones
+  that need the ignored sample data).
 
   ```bash
   rm -rf /tmp/split-check
   git clone --branch provenance "$OLD" /tmp/split-check
-  (cd /tmp/split-check && uv sync && make ci)
-  git -C "$OLD" push origin provenance
+  (cd /tmp/split-check && uv sync --locked --no-default-groups --group demo && make ci)
   ```
+- 🔲 Push the branch to the fork, so the fork has the final state:
+  `git -C "$OLD" push origin provenance`.
 
 ### 2. Create the repository on GitHub 🔲
 
@@ -84,11 +88,12 @@ private (decision 3).
 ### 3. Push the history 🔲
 
 ```bash
-cd "$OLD"
-git remote add new "git@github.com:$OWNER/$NAME.git"
-git push new provenance:main
-git remote remove new
+git -C "$OLD" push "git@github.com:$OWNER/$NAME.git" provenance:main
 ```
+
+Pushing to the URL leaves this repository's remotes unchanged. To check it, `git
+ls-remote "git@github.com:$OWNER/$NAME.git" main` prints the same hash as `git -C
+"$OLD" rev-parse provenance`.
 
 This pushes the full history, including Zehao's commits, so it still shows who wrote
 what. Tags are not pushed: `v0.1.0` is the old project's release and stays behind.
