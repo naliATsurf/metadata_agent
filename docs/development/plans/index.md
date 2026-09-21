@@ -20,6 +20,8 @@ started · ⛔ blocked on a decision) so it doubles as a progress view.
 - **[Field-driven extraction](field-driven-extraction.md)** — the stage after
   routing: a record in which every value cites its evidence, built without the
   legacy executor. Replaces the compile step. Waiting for approval.
+- **[Repository split](repo-split.md)** — moving the field-driven path out of
+  this fork into a repository of its own, then removing the legacy half there.
 
 ```{toctree}
 :maxdepth: 1
@@ -30,4 +32,5 @@ free-text-delivery
 multi-modality
 field-router
 field-driven-extraction
+repo-split
 ```

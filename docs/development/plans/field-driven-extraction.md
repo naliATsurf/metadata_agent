@@ -170,11 +170,22 @@ Each step is one commit and leaves the tests passing.
 - The legacy path (`generate`, the orchestrator, players, topologies). It is left as it
   is. After step 1 the two paths share only the foundations (contexts, tools,
   standards, config) and the CLI and app entry points. Moving the field-driven path to
-  its own repository is a separate decision.
+  its own repository is planned in [the repository split](repo-split.md).
 - Settling conflicts with a model or a debate. This could come back later, for
   `conflict` fields only.
-- Inferring one field from another, such as genus from species. That needs authority
-  lookups (Phase 2 of [the multi-modality plan](multi-modality.md)).
+- External knowledge bases, such as Crossref, Catalogue of Life, GeoNames and
+  Dataverse (Phase 2 of [the multi-modality plan](multi-modality.md)). They are
+  needed for fields a bundle cannot answer, such as genus from species. The design
+  above takes them without changes to what is built here:
+  - A lookup is evidence like a tool call. It records the knowledge base, the query,
+    the record id it returned, and the date or version. Knowledge bases change, so
+    re-checking one means "same answer from that version", not "re-read the file".
+  - A lookup that starts from another field (genus from species) is graded no higher
+    than that field: the grade is the weaker of the lookup and its input.
+  - Rule 1 applies: a name that matches several records is `varies`, never a pick.
+  - The router will need fields that depend on other fields. Today every field is
+    routed on its own; this is open decision 1 in [the field-router
+    plan](field-router.md).
 - PDF documents.
 - A command that re-checks a saved record against the files. The evidence makes it
   possible, but it is not built here.
