@@ -27,12 +27,12 @@ from src.router.catalog import _DocResource, _as_text_codebook
 from dataclasses import replace
 
 from src import thresholds
+from src.tools.base import clear_registry
 
 
 def _limits(**values):
     """Run a block with some thresholds changed (see src/thresholds.py)."""
     return thresholds.use(replace(thresholds.current(), **values))
-from src.tools.base import clear_registry
 
 
 # What the stub reader "understands": column -> (description, units, verbatim quote).

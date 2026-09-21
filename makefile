@@ -108,7 +108,7 @@ eval:  # grade the router against the hand-labeled sheet in eval/data
 	$(UV) run python -m eval score
 
 ci-install:
-	$(UV) sync --locked --no-default-groups
+	$(UV) sync --locked --no-default-groups --group demo  # the app pages are tested too
 
 ci: lint compile test
 

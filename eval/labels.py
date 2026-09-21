@@ -12,7 +12,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence
 
 from src.context.base_context import EvidenceRef, content_terms, tokenize
 from src.router.judge import candidate_ref
