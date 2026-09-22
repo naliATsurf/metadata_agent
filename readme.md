@@ -1,3 +1,12 @@
+
+> **This fork has moved.** Development continues in
+> [naliATsurf/metadata-from-sources](https://github.com/naliATsurf/metadata-from-sources),
+> which keeps this fork's history but replaces the agentic pipeline (planner, agents,
+> executor) with a field-driven one: each field of a metadata standard is routed to the
+> source that answers it, and every value cites its evidence. This repository is no
+> longer updated. For the original agentic tool, see
+> [com3dian/metadata_agent](https://github.com/com3dian/metadata_agent).
+
 <div align="center">
 <img width="233" height="233" alt="New Project(2)" src="https://github.com/user-attachments/assets/45d652b6-492f-4ee7-a353-d06310c069cb" />
 
